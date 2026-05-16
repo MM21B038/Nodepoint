@@ -13,9 +13,9 @@ wheels/
 .env.local
 .env.*.local
 
-# Docker data volumes
-postgresql/
-mongo/
-redis/
-quadrant/
-media/
+# Docker bind-mount data (repo root only; not e.g. nodepoint/mongo/)
+/postgresql/
+/mongo/
+/redis/
+/quadrant/
+/media/

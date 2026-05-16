@@ -9,11 +9,12 @@ dist
 wheels
 .ipynb_checkpoints
 *.ipynb
-postgresql
-mongo
-redis
-quadrant
-media
+# Bind-mount data at repo root only (not application paths under nodepoint/)
+/postgresql
+/mongo
+/redis
+/quadrant
+/media
 .env
 .env.*
 .cursor
