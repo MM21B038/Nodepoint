@@ -66,6 +66,105 @@ class KnowledgeGraphIngestTests(TestCase):
         )
 
 
+class PreprocessPipelineTests(TestCase):
+    @patch("nodepoint.services.preprocess_pipeline.django_rq.get_queue")
+    def test_enqueue_pipeline_with_upload_four_steps(self, mock_get_queue):
+        from nodepoint.services.preprocess_pipeline import enqueue_preprocess_pipeline
+
+        mock_queue = MagicMock()
+        mock_get_queue.return_value = mock_queue
+        j1, j2, j3, j4 = MagicMock(), MagicMock(), MagicMock(), MagicMock()
+        j1.id, j2.id, j3.id, j4.id = "j1", "j2", "j3", "j4"
+        mock_queue.enqueue.side_effect = [j1, j2, j3, j4]
+
+        doc_id = uuid.uuid4()
+        result = enqueue_preprocess_pipeline(uploaded_document_id=doc_id)
+
+        self.assertEqual(mock_queue.enqueue.call_count, 4)
+        self.assertIn("4 steps", result["message"])
+        self.assertEqual(len(result["steps"]), 4)
+
+        calls = mock_queue.enqueue.call_args_list
+        self.assertEqual(calls[0][0][0].__name__, "run_process_document")
+        self.assertEqual(calls[0][0][1], doc_id)
+        self.assertEqual(calls[1][0][0].__name__, "run_doc_preprocess_batch")
+        self.assertEqual(calls[1][1]["depends_on"], j1)
+        self.assertEqual(calls[2][0][0].__name__, "run_vector_preprocess_batch")
+        self.assertEqual(calls[2][1]["depends_on"], j1)
+        self.assertEqual(calls[3][0][0].__name__, "run_mongo_content_repair_batch")
+        self.assertEqual(calls[3][1]["depends_on"], [j2, j3])
+
+    @patch("nodepoint.services.preprocess_pipeline.django_rq.get_queue")
+    def test_enqueue_pipeline_without_upload_three_steps(self, mock_get_queue):
+        from nodepoint.services.preprocess_pipeline import enqueue_preprocess_pipeline
+
+        mock_queue = MagicMock()
+        mock_get_queue.return_value = mock_queue
+        j2, j3, j4 = MagicMock(), MagicMock(), MagicMock()
+        j2.id, j3.id, j4.id = "j2", "j3", "j4"
+        mock_queue.enqueue.side_effect = [j2, j3, j4]
+
+        result = enqueue_preprocess_pipeline()
+
+        self.assertEqual(mock_queue.enqueue.call_count, 3)
+        self.assertIn("3 steps", result["message"])
+        calls = mock_queue.enqueue.call_args_list
+        self.assertEqual(calls[0][0][0].__name__, "run_doc_preprocess_batch")
+        self.assertNotIn("depends_on", calls[0][1])
+        self.assertEqual(calls[2][1]["depends_on"], [j2, j3])
+
+    @patch("nodepoint.services.document.ingest_document", return_value=True)
+    @patch("nodepoint.services.document.extract_knowledge_graph")
+    @patch("nodepoint.services.document.ingest_knowledge_graph", return_value=(True, [], []))
+    @patch("nodepoint.services.vector.vector_preprocess")
+    def test_process_doc_does_not_enqueue_vectors(
+        self, mock_vector_preprocess, mock_kg_ingest, mock_extract, mock_mongo
+    ):
+        import tempfile
+
+        from nodepoint.services.document import process_doc
+
+        mock_extract.return_value = KnowledgeGraph(entities=[], relations=[])
+
+        media_dir = tempfile.mkdtemp()
+        with override_settings(MEDIA_ROOT=media_dir):
+            workspace = Workspace.objects.create(name="pipeline-ws")
+            document = Document.objects.create(
+                workspace=workspace,
+                file_name="note.md",
+                file=SimpleUploadedFile("note.md", b"hello world"),
+            )
+            process_doc(document.id, document.file.path)
+
+        mock_vector_preprocess.assert_not_called()
+        document.refresh_from_db()
+        self.assertEqual(document.status, Status.COMPLETED)
+
+    @patch("nodepoint.services.preprocess_pipeline.ingest_document", return_value=True)
+    @patch("nodepoint.services.preprocess_pipeline.read_document_content", return_value="fixed text")
+    @patch("nodepoint.backend.kg_builder.extract_knowledge_graph")
+    def test_mongo_content_repair_batch(
+        self, mock_extract, mock_read, mock_ingest
+    ):
+        from nodepoint.services.preprocess_pipeline import run_mongo_content_repair_batch
+
+        workspace = Workspace.objects.create(name="repair-ws")
+        document = Document.objects.create(
+            workspace=workspace,
+            file_name="broken.md",
+            file=SimpleUploadedFile("broken.md", b"content"),
+            content=False,
+            status=Status.COMPLETED,
+        )
+
+        count = run_mongo_content_repair_batch()
+        self.assertEqual(count, 1)
+        document.refresh_from_db()
+        self.assertTrue(document.content)
+        mock_extract.assert_not_called()
+        mock_ingest.assert_called_once()
+
+
 class DocPreprocessTests(TestCase):
     @patch("nodepoint.services.document.django_rq.get_queue")
     def test_doc_preprocess_enqueues_existing_files(self, mock_get_queue):
@@ -625,11 +724,11 @@ class UploadDefaultFlaggedTests(TestCase):
     def setUp(self):
         self.client = APIClient()
 
-    @patch("nodepoint.views.document.django_rq.get_queue")
-    def test_upload_without_workspace_uses_first_flagged(self, mock_get_queue):
+    @patch("nodepoint.views.document.enqueue_preprocess_pipeline")
+    def test_upload_without_workspace_uses_first_flagged(self, mock_pipeline):
         Workspace.objects.create(name="first-star", is_flag=True)
         Workspace.objects.create(name="second-star", is_flag=True)
-        mock_get_queue.return_value = MagicMock()
+        mock_pipeline.return_value = {"message": "ok", "steps": [], "jobs": {}}
         resp = self.client.post(
             "/api/document/upload/",
             {"file": SimpleUploadedFile("note.md", b"content")},

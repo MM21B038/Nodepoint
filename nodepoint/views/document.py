@@ -1,6 +1,5 @@
 import os
 
-import django_rq
 from django.conf import settings
 from rest_framework import status
 from rest_framework.parsers import MultiPartParser
@@ -8,7 +7,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from nodepoint.models import Workspace, Document
-from nodepoint.services.document import doc_preprocess
+from nodepoint.services.preprocess_pipeline import enqueue_preprocess_pipeline
 from nodepoint.services.workspace import get_default_flagged_workspace
 
 ALLOWED_EXTENSIONS = {".txt", ".md", ".text"}
@@ -60,12 +59,12 @@ class UploadDocumentAPIView(APIView):
             file=uploaded_file,
         )
 
-        queue = django_rq.get_queue("default")
-        queue.enqueue(doc_preprocess, document_ids=[document.id])
+        pipeline = enqueue_preprocess_pipeline(uploaded_document_id=document.id)
 
         return Response(
             {
                 "message": "File uploaded successfully",
+                "pipeline": pipeline,
                 "id": str(document.id),
                 "file_name": document.file_name,
                 "file_path": document.file.path,

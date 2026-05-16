@@ -1,10 +1,9 @@
-import django_rq
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from nodepoint.models import Workspace
-from nodepoint.services.document import doc_preprocess
+from nodepoint.services.preprocess_pipeline import enqueue_preprocess_pipeline
 from nodepoint.services.preprocess_status import build_workspace_preprocess_status
 
 
@@ -39,9 +38,11 @@ class PreprocessWorkspaceAPIView(APIView):
         except Workspace.DoesNotExist:
             return Response({"error": "Workspace not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        queue = django_rq.get_queue("default")
-        queue.enqueue(doc_preprocess, workspace_name=workspace.name)
+        pipeline = enqueue_preprocess_pipeline()
 
         return Response(
-            {"message": f"Preprocessing queued for workspace '{workspace.name}'"}
+            {
+                "message": f"Preprocessing queued for workspace '{workspace.name}'",
+                "pipeline": pipeline,
+            }
         )

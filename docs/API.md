@@ -190,7 +190,7 @@ Flips `is_flag` boolean. No body.
 
 Allowed extensions: **`.txt`**, **`.md`**, **`.text`**.
 
-Upload triggers background preprocessing (KG extraction → Postgres → Qdrant vectors).
+Upload triggers a **4-step global preprocess pipeline** (see [Preprocess](#preprocess)).
 
 ### `POST /api/document/upload/`
 
@@ -206,6 +206,21 @@ Upload triggers background preprocessing (KG extraction → Postgres → Qdrant 
 ```json
 {
   "message": "File uploaded successfully",
+  "pipeline": {
+    "message": "Preprocess pipeline queued (4 steps)",
+    "steps": [
+      "uploaded_document",
+      "doc_preprocess_global",
+      "vector_preprocess_global",
+      "mongo_content_repair"
+    ],
+    "jobs": {
+      "uploaded_document": "rq-job-id-1",
+      "doc_preprocess_global": "rq-job-id-2",
+      "vector_preprocess_global": "rq-job-id-3",
+      "mongo_content_repair": "rq-job-id-4"
+    }
+  },
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "file_name": "notes.md",
   "file_path": "/path/to/media/workspaces/PRAJNA/notes.md",
@@ -262,13 +277,39 @@ Upload triggers background preprocessing (KG extraction → Postgres → Qdrant 
 
 ### `POST /api/workspace/preprocess/<workspace_name>/`
 
-Re-queues KG + vector pipeline for every document in the workspace.
+Queues the **global preprocess pipeline** (3 steps; no single-document job). Sweeps are **system-wide**, not limited to the workspace in the URL (workspace must exist for routing only).
+
+**Pipeline steps (RQ orchestrator)**
+
+| Step | Job | What it does |
+|------|-----|----------------|
+| 1 (upload only) | `run_process_document` | Mongo + KG for the uploaded file |
+| 2 | `run_doc_preprocess_batch` | All documents with `status` PENDING or FAILED → `process_doc` each |
+| 3 | `run_vector_preprocess_batch` | All entities/relations with vector PENDING or FAILED → Qdrant embed |
+| 4 | `run_mongo_content_repair_batch` | All documents with `content=false` → re-read file, Mongo ingest only |
+
+**Order:** On upload, step 1 runs first; steps **2 and 3** start in **parallel** after step 1; step **4** runs after both 2 and 3 finish. On POST preprocess (no upload), steps 2 ∥ 3, then 4.
+
+Embeddings are **not** run inside `process_doc`; they are handled only by step 3.
 
 **Response `200`**
 
 ```json
 {
-  "message": "Preprocessing queued for workspace 'PRAJNA'"
+  "message": "Preprocessing queued for workspace 'PRAJNA'",
+  "pipeline": {
+    "message": "Preprocess pipeline queued (3 steps)",
+    "steps": [
+      "doc_preprocess_global",
+      "vector_preprocess_global",
+      "mongo_content_repair"
+    ],
+    "jobs": {
+      "doc_preprocess_global": "rq-job-id-2",
+      "vector_preprocess_global": "rq-job-id-3",
+      "mongo_content_repair": "rq-job-id-4"
+    }
+  }
 }
 ```
 
@@ -343,7 +384,7 @@ Poll after upload until `overall.ready` is `true` and `overall.phase` is `ready`
 | `ready` | Document `COMPLETED` and all vectors `COMPLETED` (or no KG rows) |
 | `failed` | Document `FAILED`, `INVALID`, or `TERMINATED` |
 
-**Important:** `document_status: COMPLETED` means the worker finished KG ingest and **queued** embedding jobs. Embeddings may still be running; use `phase` or `embedding_progress` for Qdrant readiness.
+**Important:** `document_status: COMPLETED` means the worker finished KG ingest in Postgres. Embeddings are handled by pipeline step 3 (`vector_preprocess_global`); use `phase` or `embedding_progress` for Qdrant readiness. `content=false` may persist until pipeline step 4 (`mongo_content_repair`) runs.
 
 | Status | Condition |
 |--------|-----------|

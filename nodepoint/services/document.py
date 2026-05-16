@@ -8,7 +8,6 @@ from nodepoint.enums import Status
 from nodepoint.backend.content_extractor import read_document_content
 from nodepoint.backend.kg_builder import extract_knowledge_graph, ingest_knowledge_graph
 from nodepoint.mongo.manager import ingest_document
-from .vector import vector_preprocess
 
 logger = logging.getLogger(__name__)
 
@@ -61,10 +60,9 @@ def process_doc(doc_id, filepath):
             logger.error("Knowledge graph ingest failed for document %s", doc_id)
             return
 
-        vector_preprocess(document_id=doc.id)
         Document.objects.filter(id=doc_id).update(status=Status.COMPLETED)
         logger.info(
-            "Completed document %s (%s entities, %s relations queued for vectors)",
+            "Completed document %s (%s entities, %s relations; vectors via pipeline job 3)",
             doc_id,
             len(entity_ids),
             len(relation_ids),
