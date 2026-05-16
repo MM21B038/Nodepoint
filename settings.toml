@@ -1,0 +1,30 @@
+[agent]
+model = "GLM5"
+vector = "Qwen3-Embedding-8B"
+dim = 256
+
+[postgresql]
+name = "nodepoint"
+user = "nodepoint"
+password = "nodepoint"
+host = "localhost"
+port = 5432
+
+[mongo]
+user = "admin"
+password = "password"
+host = "localhost"
+port = 27017
+database = "contentdb"
+auth_source = "admin"
+
+[redis]
+host = "localhost"
+port = 6379
+db = 0
+
+[quadrant]
+host = "localhost"
+port = 6333
+collection_name = "nodepoint"
+vector_size = 256

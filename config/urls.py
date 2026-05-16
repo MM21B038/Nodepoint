@@ -24,7 +24,7 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path(
         "api/",
-        include("Nodepoint.urls")
+        include("nodepoint.urls")
     ),
 ]
 

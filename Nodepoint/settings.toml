@@ -1,3 +1,0 @@
-[agent]
-model = "nvidia/nemotron-3-super-120b-a12b:free"
-vector = "nvidia/llama-nemotron-embed-vl-1b-v2:free"

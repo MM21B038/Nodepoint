@@ -1,0 +1,4 @@
+[agent]
+model = "GLM5"
+vector = "Qwen3-Embedding-8B"
+dim = 64

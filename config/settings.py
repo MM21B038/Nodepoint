@@ -13,6 +13,11 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 from pathlib import Path
 from dotenv import load_dotenv
 import os
+import sys
+
+from nodepoint.settings_loader import postgres_config, redis_config
+from nodepoint.registry.prompt import Prompt
+
 load_dotenv()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -23,26 +28,34 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-yv6r(r4aruaityi#-stp%ahgu#^+a(6536_e*7zh(af52r5(5('
+SECRET_KEY = os.getenv(
+    "SECRET_KEY",
+    "django-insecure-yv6r(r4aruaityi#-stp%ahgu#^+a(6536_e*7zh(af52r5(5(",
+)
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv("DEBUG", "True").lower() in ("1", "true", "yes")
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "*").split(",")
 
 
 # Application definition
 
 INSTALLED_APPS = [
-    'django.contrib.admin',
-    'django.contrib.auth',
-    'django.contrib.contenttypes',
-    'django.contrib.sessions',
-    'django.contrib.messages',
-    'django.contrib.staticfiles',
+    "daphne",
+    "django.contrib.admin",
+    "django.contrib.auth",
+    "django.contrib.contenttypes",
+    "django.contrib.sessions",
+    "django.contrib.messages",
+    "django.contrib.staticfiles",
+    "channels",
     "rest_framework",
-    "Nodepoint",
+    "django_rq",
+    "nodepoint",
 ]
+
+ASGI_APPLICATION = "config.asgi.application"
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -77,14 +90,15 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
+_pg = postgres_config()
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": os.getenv("NAME"),
-        "USER": os.getenv("USER"),
-        "PASSWORD": os.getenv("PASSWORD"),
-        "HOST": os.getenv("HOST"),
-        "PORT": os.getenv("PORT"),
+        "NAME": _pg["NAME"],
+        "USER": _pg["USER"],
+        "PASSWORD": _pg["PASSWORD"],
+        "HOST": _pg["HOST"],
+        "PORT": _pg["PORT"],
     }
 }
 
@@ -126,3 +140,38 @@ STATIC_URL = 'static/'
 
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
+
+_redis = redis_config()
+RQ_QUEUES = {
+    "high": _redis,
+    "default": _redis,
+    "low": _redis,
+}
+
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [
+                (
+                    _redis["HOST"],
+                    int(_redis["PORT"]),
+                )
+            ],
+        },
+    },
+}
+
+CHAT_COMPRESS_TOKEN_THRESHOLD = int(os.getenv("CHAT_COMPRESS_TOKEN_THRESHOLD", "64000"))
+CHAT_DEFAULT_SYSTEM = os.getenv("CHAT_DEFAULT_SYSTEM", Prompt["chat_system"])
+
+if "test" in sys.argv:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": ":memory:",
+        }
+    }
+    CHANNEL_LAYERS = {
+        "default": {"BACKEND": "channels.layers.InMemoryChannelLayer"},
+    }

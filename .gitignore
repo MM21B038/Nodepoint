@@ -5,8 +5,6 @@ build/
 dist/
 wheels/
 *.egg-info
-migrations/
-
 # Virtual environments
 .venv
 
@@ -14,3 +12,10 @@ migrations/
 .env
 .env.local
 .env.*.local
+
+# Docker data volumes
+postgresql/
+mongo/
+redis/
+quadrant/
+media/
