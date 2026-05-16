@@ -40,6 +40,7 @@ def extract_entities(doc: str, entity_types: str, agent: Agent) -> list:
     thread.addUser(Prompt["entity_extractor_user"].format(entity_types=entity_types, doc=doc))
     response = agent.parse(
         messages=thread,
+        model=agent.model,
         response_schema=Schema["Entities"],
         temperature=EXTRACTION_TEMPERATURE,
     )
@@ -52,6 +53,7 @@ def extract_relations(doc: str, entities: list[str], agent: Agent) -> list:
     thread.addUser(Prompt["relation_extractor_user"].format(entities=entities, doc=doc))
     response = agent.parse(
         messages=thread,
+        model=agent.model,
         response_schema=Schema["Relations"],
         temperature=EXTRACTION_TEMPERATURE,
     )

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import json
+import logging
 import os
 import tomllib
 import urllib3
@@ -21,6 +22,15 @@ from nodepoint.registry import Thread, Tool
 from nodepoint.settings_loader import settings_path as nodepoint_settings_path
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+
+def _env_truthy(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 def _parse_function_arguments(raw: str) -> dict[str, Any]:
@@ -316,7 +326,16 @@ class Agent:
         self.vector_model = agent_cfg.get("vector", "") or ""
         self.dim = self._to_int(agent_cfg.get("dim"), default=None)
 
-        self._model_ids: list[str] | None = None
+        self.skip_model_validation = _env_truthy("AGENT_SKIP_MODEL_VALIDATION", default=False)
+        self._model_ids: set[str] | None = None
+
+    def _request_timeout(self) -> tuple[float, float]:
+        raw = os.getenv("AGENT_REQUEST_TIMEOUT", "120")
+        try:
+            read_timeout = float(raw)
+        except (TypeError, ValueError):
+            read_timeout = 120.0
+        return (10.0, read_timeout)
 
     def _load_settings(self, settings_path: str | Path) -> dict[str, Any]:
         path = Path(settings_path)
@@ -351,6 +370,7 @@ class Agent:
                 url=url,
                 json=payload,
                 verify=self.verify_ssl,
+                timeout=self._request_timeout(),
             )
             if not resp.ok:
                 print("Status:", resp.status_code)
@@ -370,7 +390,13 @@ class Agent:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         url = f"{self.base_url.rstrip('/')}/{path.lstrip('/')}"
         try:
-            with self.session.post(url, json=payload, verify=self.verify_ssl, stream=True) as resp:
+            with self.session.post(
+                url,
+                json=payload,
+                verify=self.verify_ssl,
+                stream=True,
+                timeout=self._request_timeout(),
+            ) as resp:
                 if not resp.ok:
                     raise RuntimeError(f"Streaming request failed: {resp.status_code} {resp.text}")
 
@@ -402,10 +428,28 @@ class Agent:
         return self._model_ids
 
     def _validate_model(self, model: str) -> None:
-        if model in self.model_ids:
+        if self.skip_model_validation:
             return
 
-        suggestion = difflib.get_close_matches(model, self.model_ids, n=1)
+        try:
+            ids = self.model_ids
+        except Exception as e:
+            configured = {m for m in (self.model, self.vector_model) if m}
+            if model in configured:
+                logger.warning(
+                    "Model catalog unreachable; allowing configured model %r: %s",
+                    model,
+                    e,
+                )
+                return
+            raise ValueError(
+                f"Cannot validate model {model!r} (failed to fetch /models): {e}"
+            ) from e
+
+        if model in ids:
+            return
+
+        suggestion = difflib.get_close_matches(model, ids, n=1)
         hint = f" Did you mean '{suggestion[0]}'?" if suggestion else ""
         raise ValueError(f"Invalid model: {model}.{hint}")
 

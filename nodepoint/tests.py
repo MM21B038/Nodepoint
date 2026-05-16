@@ -6,6 +6,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 
 from nodepoint.backend.kg_builder import ingest_knowledge_graph
+from nodepoint.enums import Status
 from nodepoint.models import (
     ChatBranch,
     Conversation,
@@ -88,6 +89,114 @@ class DocPreprocessTests(TestCase):
             args = mock_queue.enqueue.call_args[0]
             self.assertEqual(args[1], document.id)
             self.assertEqual(args[2], filepath)
+
+
+class AgentModelValidationTests(TestCase):
+    @patch.dict("os.environ", {"BASE_URL": "https://api.example/v1", "API_KEY": "test-key"}, clear=False)
+    @patch("nodepoint.agent.agent.Agent._request")
+    def test_validate_model_skipped_when_env_set(self, mock_request):
+        with patch.dict("os.environ", {"AGENT_SKIP_MODEL_VALIDATION": "true"}, clear=False):
+            from nodepoint.agent.agent import Agent
+
+            agent = Agent(settings_path="/nonexistent-settings.toml")
+            agent.model = "GLM5"
+            agent._validate_model("GLM5")
+            mock_request.assert_not_called()
+
+    @patch.dict("os.environ", {"BASE_URL": "https://api.example/v1", "API_KEY": "test-key"}, clear=False)
+    @patch("nodepoint.agent.agent.Agent._request")
+    def test_validate_model_allows_configured_model_when_catalog_fails(self, mock_request):
+        from nodepoint.agent.agent import Agent
+
+        mock_request.side_effect = RuntimeError("connection timed out")
+        agent = Agent(settings_path="/nonexistent-settings.toml")
+        agent.model = "GLM5"
+        agent.vector_model = "embed-model"
+        agent._validate_model("GLM5")
+        self.assertEqual(mock_request.call_count, 1)
+
+
+class PreprocessStatusAPITests(TestCase):
+    def setUp(self):
+        from rest_framework.test import APIClient
+
+        self.client = APIClient()
+        self.workspace = Workspace.objects.create(name="status-ws")
+
+    def test_workspace_not_found_returns_404(self):
+        resp = self.client.get("/api/workspace/missing-ws/preprocess-status/")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_empty_workspace_idle(self):
+        resp = self.client.get("/api/workspace/status-ws/preprocess-status/")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["workspace"], "status-ws")
+        self.assertEqual(data["overall"]["phase"], "idle")
+        self.assertTrue(data["overall"]["ready"])
+        self.assertEqual(data["files"], [])
+
+    def test_inprogress_document_processing_phase(self):
+        Document.objects.create(
+            workspace=self.workspace,
+            file_name="a.md",
+            status=Status.INPROGRESS,
+        )
+        resp = self.client.get("/api/workspace/status-ws/preprocess-status/")
+        self.assertEqual(resp.json()["files"][0]["phase"], "processing")
+        self.assertEqual(resp.json()["overall"]["phase"], "processing")
+
+    def test_completed_with_pending_vectors_embedding(self):
+        doc = Document.objects.create(
+            workspace=self.workspace,
+            file_name="b.md",
+            status=Status.COMPLETED,
+            content=True,
+        )
+        e1 = KnowledgeEntity.objects.create(
+            document=doc, name="A", entity_type="PER", vector=Status.COMPLETED
+        )
+        KnowledgeEntity.objects.create(
+            document=doc, name="B", entity_type="PER", vector=Status.PENDING
+        )
+        KnowledgeRelation.objects.create(
+            document=doc,
+            source=e1,
+            target=e1,
+            type_description="self",
+            description="loop",
+            vector=Status.PENDING,
+        )
+        resp = self.client.get("/api/workspace/status-ws/preprocess-status/")
+        file_data = resp.json()["files"][0]
+        self.assertEqual(file_data["phase"], "embedding")
+        self.assertEqual(file_data["embedding_progress"], 0.3333)
+        self.assertEqual(resp.json()["overall"]["phase"], "embedding")
+        self.assertFalse(resp.json()["overall"]["ready"])
+
+    def test_all_vectors_ready(self):
+        doc = Document.objects.create(
+            workspace=self.workspace,
+            file_name="c.md",
+            status=Status.COMPLETED,
+            content=True,
+        )
+        e1 = KnowledgeEntity.objects.create(
+            document=doc, name="X", entity_type="ORG", vector=Status.COMPLETED
+        )
+        KnowledgeRelation.objects.create(
+            document=doc,
+            source=e1,
+            target=e1,
+            type_description="self",
+            description="loop",
+            vector=Status.COMPLETED,
+        )
+        resp = self.client.get("/api/workspace/status-ws/preprocess-status/")
+        self.assertEqual(resp.json()["files"][0]["phase"], "ready")
+        self.assertEqual(resp.json()["files"][0]["embedding_progress"], 1.0)
+        self.assertTrue(resp.json()["overall"]["ready"])
+        self.assertEqual(resp.json()["overall"]["phase"], "ready")
 
 
 from unittest.mock import AsyncMock, patch

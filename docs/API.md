@@ -274,6 +274,83 @@ Re-queues KG + vector pipeline for every document in the workspace.
 
 ---
 
+### `GET /api/workspace/<workspace_name>/preprocess-status/`
+
+Read-only pipeline status for a workspace: upload queue → document processing → KG in Postgres → Qdrant embeddings.
+
+Poll after upload until `overall.ready` is `true` and `overall.phase` is `ready`.
+
+**Response `200`**
+
+```json
+{
+  "workspace": "PRAJNA",
+  "overall": {
+    "phase": "embedding",
+    "ready": false,
+    "documents_total": 2,
+    "documents_failed": 0
+  },
+  "documents": {
+    "by_status": {
+      "PENDING": 0,
+      "QUEUED": 0,
+      "INPROGRESS": 0,
+      "COMPLETED": 2,
+      "FAILED": 0,
+      "INVALID": 0,
+      "TERMINATED": 0
+    }
+  },
+  "vectors": {
+    "entities": { "total": 10, "pending": 2, "completed": 8, "failed": 0 },
+    "relations": { "total": 5, "pending": 1, "completed": 4, "failed": 0 }
+  },
+  "files": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "file_name": "notes.md",
+      "document_status": "COMPLETED",
+      "content": true,
+      "phase": "embedding",
+      "uploaded_at": "2026-05-15T12:00:00.123456Z",
+      "entities": { "total": 5, "pending": 1, "completed": 4, "failed": 0 },
+      "relations": { "total": 2, "pending": 0, "completed": 2, "failed": 0 },
+      "embedding_progress": 0.8571
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `overall.phase` | Workspace-wide stage: `idle`, `queued`, `processing`, `kg_ready`, `embedding`, `ready`, `failed` |
+| `overall.ready` | All files are `ready` and none failed |
+| `document_status` | Raw `Document.status` from Postgres |
+| `phase` (per file) | Derived end-to-end stage (see table below) |
+| `embedding_progress` | Share of entity + relation vectors with `COMPLETED` (0–1) |
+| `vectors` | Counts by vector job status across the workspace |
+
+**Per-file `phase` values**
+
+| `phase` | When |
+|---------|------|
+| `idle` | No documents (workspace-level only) |
+| `queued` | Document `PENDING` or `QUEUED` |
+| `processing` | Document `INPROGRESS` (read file, Mongo, KG extract) |
+| `kg_ready` | Document `COMPLETED` but no entities yet |
+| `embedding` | Document `COMPLETED` and some vectors not `COMPLETED` |
+| `ready` | Document `COMPLETED` and all vectors `COMPLETED` (or no KG rows) |
+| `failed` | Document `FAILED`, `INVALID`, or `TERMINATED` |
+
+**Important:** `document_status: COMPLETED` means the worker finished KG ingest and **queued** embedding jobs. Embeddings may still be running; use `phase` or `embedding_progress` for Qdrant readiness.
+
+| Status | Condition |
+|--------|-----------|
+| `404` | Workspace not found |
+
+---
+
 ## Knowledge graph
 
 Source of truth: **Postgres** (`KnowledgeEntity`, `KnowledgeRelation`).  
@@ -916,6 +993,7 @@ Prior search hit IDs from the same chat session are merged into later searches i
 | POST | `/api/document/upload/` |
 | GET | `/api/document/<workspace_name>/` |
 | DELETE | `/api/document/delete/<workspace_name>/<file_name>/` |
+| GET | `/api/workspace/<workspace_name>/preprocess-status/` |
 | POST | `/api/workspace/preprocess/<workspace_name>/` |
 | GET | `/api/knowledge-graph/` |
 | GET | `/api/chat/?flagged=true` |
