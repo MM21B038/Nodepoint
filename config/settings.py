@@ -164,6 +164,11 @@ CHANNEL_LAYERS = {
 
 CHAT_COMPRESS_TOKEN_THRESHOLD = int(os.getenv("CHAT_COMPRESS_TOKEN_THRESHOLD", "64000"))
 CHAT_DEFAULT_SYSTEM = os.getenv("CHAT_DEFAULT_SYSTEM", Prompt["chat_system"])
+CHAT_MAX_CONCURRENT_SEARCHES = int(os.getenv("CHAT_MAX_CONCURRENT_SEARCHES", "8"))
+WEB_WORKERS = int(os.getenv("WEB_WORKERS", "4"))
+
+_db_conn_max_age = os.getenv("DB_CONN_MAX_AGE", "60")
+DATABASES["default"]["CONN_MAX_AGE"] = int(_db_conn_max_age)
 
 if "test" in sys.argv:
     DATABASES = {

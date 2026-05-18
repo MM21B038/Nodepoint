@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from asgiref.sync import sync_to_async
 from django.conf import settings
 
 from nodepoint.agent.agent import Agent, tool_call_items_to_normalized
@@ -20,7 +20,8 @@ from nodepoint.agent.schema import (
 )
 from nodepoint.models import ChatMessageRole
 from nodepoint.registry import Thread, Tool
-from nodepoint.services import chat_compression, chat_context, chat_storage
+from nodepoint.services import chat_compression, chat_context
+from nodepoint.services import chat_storage_async as storage_async
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +50,7 @@ async def run_agent_stream(
     new_branch_id: uuid.UUID | None = None
 
     if workspace_name is None and not flagged_scope:
-        conversation = await sync_to_async(
-            chat_storage.Conversation.objects.select_related("workspace").get
-        )(id=conversation_id)
+        conversation = await storage_async.get_conversation(conversation_id)
         workspace_name = conversation.workspace.name
 
     if flagged_scope:
@@ -69,24 +68,25 @@ async def run_agent_stream(
 
     async def maybe_compress() -> None:
         nonlocal thread, new_branch_id
-        if thread.root_count_tokens() < settings.CHAT_COMPRESS_TOKEN_THRESHOLD:
+        token_count = await asyncio.to_thread(thread.root_count_tokens)
+        if token_count < settings.CHAT_COMPRESS_TOKEN_THRESHOLD:
             return
-        conversation = await sync_to_async(chat_storage.Conversation.objects.get)(
-            id=conversation_id
-        )
-        parent_branch = await sync_to_async(chat_storage.ChatBranch.objects.get)(
-            id=branch_id
-        )
+        conversation = await storage_async.get_conversation(conversation_id)
+        parent_branch = await storage_async.get_branch(branch_id)
         summary = await chat_compression.compress_async(agent, thread)
-        new_branch = await sync_to_async(chat_storage.create_branch_from_compression)(
+        new_branch = await storage_async.create_branch_from_compression(
             conversation, parent_branch, summary
         )
         new_branch_id = new_branch.id
-        thread, _, _ = await sync_to_async(chat_storage.load_thread)(new_branch.id)
+        thread, _, _ = await storage_async.load_thread(new_branch.id)
         await on_event({"type": "chat.compressed"})
 
     try:
-        async for ev in agent.stream_agent_events_async(messages=thread, tools=tools):
+        async for ev in agent.stream_agent_events_async(
+            messages=thread,
+            tools=tools,
+            register_mcp_tools=False,
+        ):
             await emit_typed(ev)
 
             if isinstance(ev, ThinkingTokenEvent):
@@ -103,7 +103,7 @@ async def run_agent_stream(
                         "reasoning_content": ev.reasoning_content,
                     }
                 )
-                await sync_to_async(chat_storage.append_message)(
+                await storage_async.append_message(
                     branch_id,
                     role=ChatMessageRole.ASSISTANT,
                     content=ev.content or "",
@@ -132,7 +132,7 @@ async def run_agent_stream(
                     )
                 if call is not None:
                     thread.addTool(call, ev.result)
-                    await sync_to_async(chat_storage.append_message)(
+                    await storage_async.append_message(
                         branch_id,
                         role=ChatMessageRole.TOOL,
                         content=ev.result,
@@ -154,7 +154,7 @@ async def run_agent_stream(
                 text = "".join(response_buf)
                 if text:
                     thread.addAssistant(text)
-                    await sync_to_async(chat_storage.append_message)(
+                    await storage_async.append_message(
                         branch_id,
                         role=ChatMessageRole.ASSISTANT,
                         content=text,
@@ -181,6 +181,13 @@ def default_tools(exclude_servers: set[str] | None = None) -> list[dict[str, Any
     del exclude_servers
     return Tool.schemas(
         include_servers={"Knowledge"},
-        include_tools={"Knowledge.search_graph"},
+        include_tools={
+            "Knowledge.search_graph",
+            "Knowledge.get_entity_record",
+            "Knowledge.get_relation_record",
+            "Knowledge.get_chunk_record",
+            "Knowledge.get_document_record",
+            "Knowledge.search_entity_by_name",
+        },
         include_mcp=False,
     )

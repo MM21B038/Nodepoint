@@ -53,8 +53,20 @@ Backend-only streaming chat over Django Channels. Requires **ASGI** (`uvicorn co
 
 If none are starred during flagged chat, the tool returns: *No workspace is flagged…*
 
+## Concurrency
+
+- Each WebSocket connection runs **one agent task** at a time (`Agent busy` if a second `chat.send` arrives during a turn).
+- Different users/workspaces run **in parallel** on the same `web` service (async event loop + httpx LLM streaming).
+- Knowledge tools share a per-worker slot limit: `CHAT_MAX_CONCURRENT_SEARCHES` (default `8`).
+- Scale horizontally: set `WEB_WORKERS` (default `4`) on the `web` container, or `docker compose up --scale web=2`.
+- Document preprocess/embed jobs stay on the separate `worker` RQ service (not used for live chat).
+
 ## Environment
 
 - `CHAT_COMPRESS_TOKEN_THRESHOLD` — default `64000`
 - `CHAT_DEFAULT_SYSTEM` — system prompt for new chats
+- `CHAT_MAX_CONCURRENT_SEARCHES` — default `8`
+- `WEB_WORKERS` — uvicorn worker processes (default `4`)
+- `DB_CONN_MAX_AGE` — Postgres connection reuse per worker (default `60`)
+- `AGENT_REQUEST_TIMEOUT` — LLM HTTP read timeout seconds (default `300`)
 - `BASE_URL`, `API_KEY` — required for `Agent`

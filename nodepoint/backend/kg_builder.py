@@ -4,7 +4,7 @@ from nodepoint.agent.schema import AgentParseEmptyResult, AgentParseSuccessResul
 from nodepoint.registry import Thread, Schema, Prompt
 from nodepoint.registry.dynamic_schema import Entities
 from nodepoint.agent.agent import Agent
-from nodepoint.models import KnowledgeEntity, KnowledgeRelation
+from nodepoint.models import DocumentChunk, KnowledgeEntity, KnowledgeRelation
 import tiktoken
 
 logger = logging.getLogger(__name__)
@@ -60,7 +60,6 @@ def extract_entities(doc: str, entity_types: set, md_entity_table: str, agent: A
     while trial < TRIALS:
         response = agent.parse(
             messages=thread,
-            model=agent.model,
             response_schema=NewEntities,
             temperature=EXTRACTION_TEMPERATURE,
         )
@@ -86,7 +85,6 @@ def extract_relations(doc: str, entities: list[str], agent: Agent) -> list:
     while trial < TRIALS:
         response = agent.parse(
             messages=thread,
-            model=agent.model,
             response_schema=Schema.Relations,
             temperature=EXTRACTION_TEMPERATURE,
         )
@@ -115,7 +113,61 @@ def extract_knowledge_graph(doc: str) -> Schema.KnowledgeGraph:
     return entities, relations
 
 
+def ingest_knowledge_graph_for_chunk(
+    doc,
+    chunk: DocumentChunk,
+    entities,
+    relations,
+) -> tuple[bool, list, list]:
+    entity_ids: list = []
+    relation_ids: list = []
+
+    try:
+        KnowledgeRelation.objects.filter(chunk=chunk).delete()
+        KnowledgeEntity.objects.filter(chunk=chunk).delete()
+
+        entity_by_name: dict[str, KnowledgeEntity] = {}
+        for entity in entities:
+            row = KnowledgeEntity.objects.create(
+                document=doc,
+                chunk=chunk,
+                name=entity.name,
+                entity_type=entity.type if entity.type != "OTHER" else entity.newtype,
+                attributes=entity.attributes or {},
+            )
+            entity_by_name[entity.name] = row
+            entity_ids.append(row.id)
+
+        for relation in relations:
+            source = entity_by_name.get(relation.source)
+            target = entity_by_name.get(relation.target)
+            if source is None or target is None:
+                logger.warning(
+                    "Skipping relation %s -> %s: missing entity for chunk %s",
+                    relation.source,
+                    relation.target,
+                    chunk.id,
+                )
+                continue
+            row = KnowledgeRelation.objects.create(
+                document=doc,
+                chunk=chunk,
+                source=source,
+                target=target,
+                type_description=relation.type_description,
+                description=relation.description,
+            )
+            relation_ids.append(row.id)
+
+        return True, entity_ids, relation_ids
+
+    except Exception:
+        logger.exception("Failed to ingest knowledge graph for chunk %s", chunk.id)
+        return False, entity_ids, relation_ids
+
+
 def ingest_knowledge_graph(doc, entities, relations) -> tuple[bool, list, list]:
+    """Legacy whole-document ingest (deletes all KG rows for the document)."""
     entity_ids: list = []
     relation_ids: list = []
 

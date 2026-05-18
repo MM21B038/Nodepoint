@@ -48,3 +48,27 @@ def ingest_relation_vector(point_id, relation):
     payload = create_relation_payload(relation)
     vector = payload.pop("vector")
     return ingest_vector(str(point_id), vector, payload)
+
+
+def create_chunk_payload(chunk):
+    from nodepoint.mongo.manager import get_chunk_text
+
+    workspace_name = chunk.document.workspace.name
+    text = get_chunk_text(chunk.id) or ""
+    snippet = text[:2000] if len(text) > 2000 else text
+    doc = f"Document chunk {chunk.index} from {chunk.document.file_name}: {snippet}"
+    vector = get_agent().vector(doc).squeeze().tolist()
+    return {
+        "type": "chunk",
+        "workspace": workspace_name,
+        "file_name": chunk.document.file_name,
+        "chunk_index": chunk.index,
+        "document_id": str(chunk.document_id),
+        "vector": vector,
+    }
+
+
+def ingest_chunk_vector(point_id, chunk):
+    payload = create_chunk_payload(chunk)
+    vector = payload.pop("vector")
+    return ingest_vector(str(point_id), vector, payload)

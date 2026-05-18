@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Type, Union, cast
+import httpx
 import requests
 from dotenv import load_dotenv
 from pydantic import BaseModel, ValidationError
@@ -317,6 +318,7 @@ class Agent:
             "Authorization": f"Bearer {os.getenv('API_KEY')}",
             "Content-Type": "application/json",
         })
+        self._async_client: httpx.AsyncClient | None = None
 
         self.settings = self._load_settings(settings_path)
         agent_cfg = self.settings.get("agent", {}) or {}
@@ -324,17 +326,44 @@ class Agent:
         self.model = agent_cfg.get("model", "") or ""
         self.vector_model = agent_cfg.get("vector", "") or ""
         self.dim = self._to_int(agent_cfg.get("dim"), default=None)
+        parser_from_env = os.getenv("AGENT_PARSER")
+        parser_from_toml = agent_cfg.get("parser", "") or ""
+        self.parser_model = (parser_from_env or parser_from_toml or self.model).strip()
 
         self.skip_model_validation = _env_truthy("AGENT_SKIP_MODEL_VALIDATION", default=False)
         self._model_ids: set[str] | None = None
 
     def _request_timeout(self) -> tuple[float, float]:
-        raw = os.getenv("AGENT_REQUEST_TIMEOUT", "120")
+        raw = os.getenv("AGENT_REQUEST_TIMEOUT", "300")
         try:
             read_timeout = float(raw)
         except (TypeError, ValueError):
             read_timeout = 120.0
         return (10.0, read_timeout)
+
+    def _read_timeout_seconds(self) -> float:
+        return self._request_timeout()[1]
+
+    def _api_headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {os.getenv('API_KEY')}",
+            "Content-Type": "application/json",
+        }
+
+    def _get_async_client(self) -> httpx.AsyncClient:
+        if self._async_client is None or self._async_client.is_closed:
+            connect_s, read_s = self._request_timeout()
+            self._async_client = httpx.AsyncClient(
+                headers=self._api_headers(),
+                verify=self.verify_ssl,
+                timeout=httpx.Timeout(connect_s, read=read_s),
+            )
+        return self._async_client
+
+    async def aclose(self) -> None:
+        if self._async_client is not None and not self._async_client.is_closed:
+            await self._async_client.aclose()
+            self._async_client = None
 
     def _load_settings(self, settings_path: str | Path) -> dict[str, Any]:
         path = Path(settings_path)
@@ -415,6 +444,37 @@ class Agent:
         except requests.RequestException as e:
             raise RuntimeError(f"Streaming request failed for {path}: {e}") from e
 
+    async def _request_stream_async(
+        self,
+        path: str,
+        payload: dict[str, Any],
+    ) -> AsyncIterator[dict[str, Any]]:
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        url = f"{self.base_url.rstrip('/')}/{path.lstrip('/')}"
+        client = self._get_async_client()
+        try:
+            async with client.stream("POST", url, json=payload) as resp:
+                if resp.status_code >= 400:
+                    body = await resp.aread()
+                    raise RuntimeError(
+                        f"Streaming request failed: {resp.status_code} {body.decode(errors='replace')}"
+                    )
+                async for raw_line in resp.aiter_lines():
+                    if not raw_line:
+                        continue
+                    line = raw_line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[len("data:") :].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        yield cast(dict[str, Any], json.loads(data))
+                    except json.JSONDecodeError:
+                        continue
+        except httpx.HTTPError as e:
+            raise RuntimeError(f"Streaming request failed for {path}: {e}") from e
+
     @property
     def model_ids(self) -> set[str]:
         if self._model_ids is None:
@@ -433,7 +493,7 @@ class Agent:
         try:
             ids = self.model_ids
         except Exception as e:
-            configured = {m for m in (self.model, self.vector_model) if m}
+            configured = {m for m in (self.model, self.parser_model, self.vector_model) if m}
             if model in configured:
                 logger.warning(
                     "Model catalog unreachable; allowing configured model %r: %s",
@@ -622,59 +682,40 @@ class Agent:
         """
         Async generator of validated :class:`SingleTurnStreamEvent` models.
 
-        Uses the same transport as :meth:`stream_async` but parses each chunk through
-        :class:`ChatCompletionStreamParser`. On success, yields :class:`DoneEvent` when
-        ``emit_terminal_done`` is True (single HTTP completion boundary).
-
-        ``emit_terminal_done=False`` is used by :meth:`stream_agent_events_async` so the
-        caller can emit :class:`ModelTurnCompleteEvent` instead of overloading ``done``.
+        Uses httpx SSE streaming (no dedicated thread per active chat).
         """
-        q: asyncio.Queue[SingleTurnStreamEvent | None] = asyncio.Queue()
-        loop = asyncio.get_running_loop()
-        emit_done = emit_terminal_done
+        model = self._resolve_model(model, self.model)
+        self._validate_model(model)
 
-        def _worker() -> None:
-            had_error = False
-            try:
-                parser = ChatCompletionStreamParser()
-                for raw in self.stream(
-                    messages=messages,
-                    model=model,
-                    tools=tools,
-                    temperature=temperature,
-                    reasoning=reasoning,
-                ):
-                    if not isinstance(raw, dict):
-                        continue
-                    for ev in parser.feed_chunk(raw):
-                        loop.call_soon_threadsafe(q.put_nowait, ev)
-                        if isinstance(ev, ErrorEvent):
-                            had_error = True
-                    if had_error:
-                        break
-                if not had_error:
-                    for ev in parser.close_open_tool_calls():
-                        loop.call_soon_threadsafe(q.put_nowait, ev)
-                    if emit_done:
-                        loop.call_soon_threadsafe(q.put_nowait, DoneEvent())
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                loop.call_soon_threadsafe(q.put_nowait, ErrorEvent(message=str(exc)))
-            finally:
-                loop.call_soon_threadsafe(q.put_nowait, None)
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages.to_json(),
+            "stream": True,
+            "temperature": temperature,
+            "reasoning": {"effort": reasoning},
+        }
+        if tools is not None:
+            payload["tools"] = tools
 
-        task = asyncio.create_task(asyncio.to_thread(_worker))
+        parser = ChatCompletionStreamParser()
+        had_error = False
         try:
-            while True:
-                item = await q.get()
-                if item is None:
+            async for raw in self._request_stream_async("/chat/completions", payload):
+                if not isinstance(raw, dict):
+                    continue
+                for ev in parser.feed_chunk(raw):
+                    yield ev
+                    if isinstance(ev, ErrorEvent):
+                        had_error = True
+                if had_error:
                     break
-                yield item
-        except asyncio.CancelledError:
-            raise
-        finally:
-            await task
+            if not had_error:
+                for ev in parser.close_open_tool_calls():
+                    yield ev
+                if emit_terminal_done:
+                    yield DoneEvent()
+        except Exception as exc:
+            yield ErrorEvent(message=str(exc))
 
     async def stream_agent_events_async(
         self,
@@ -816,7 +857,7 @@ class Agent:
         temperature: float = 0.3,
         reasoning: str = "low",
     ) -> Union[AgentParseEmptyResult, AgentParseSuccessResult, AgentParseErrorResult, AgentJsonParseSuccessResult]:
-        model = self._resolve_model(model, self.model)
+        model = self._resolve_model(model, self.parser_model)
         self._validate_model(model)
 
         if response_schema is not None:

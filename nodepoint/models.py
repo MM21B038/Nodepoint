@@ -75,6 +75,51 @@ class Document(models.Model):
 
 
 # =========================
+# Document Chunk
+# =========================
+
+class DocumentChunk(models.Model):
+    id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+
+    document = models.ForeignKey(
+        Document,
+        on_delete=models.CASCADE,
+        related_name="chunks",
+    )
+
+    index = models.PositiveIntegerField()
+
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+    )
+
+    vector = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING,
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["document", "index"],
+                name="unique_chunk_index_per_document",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.document_id}#{self.index}"
+
+
+# =========================
 # Knowledge Entity
 # =========================
 
@@ -90,6 +135,14 @@ class KnowledgeEntity(models.Model):
         Document,
         on_delete=models.CASCADE,
         related_name="entities"
+    )
+
+    chunk = models.ForeignKey(
+        DocumentChunk,
+        on_delete=models.CASCADE,
+        related_name="entities",
+        null=True,
+        blank=True,
     )
 
     name = models.CharField(max_length=255)
@@ -133,6 +186,14 @@ class KnowledgeRelation(models.Model):
         Document,
         on_delete=models.CASCADE,
         related_name="relations"
+    )
+
+    chunk = models.ForeignKey(
+        DocumentChunk,
+        on_delete=models.CASCADE,
+        related_name="relations",
+        null=True,
+        blank=True,
     )
 
     source = models.ForeignKey(

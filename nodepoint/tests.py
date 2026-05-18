@@ -11,10 +11,12 @@ from nodepoint.models import (
     ChatBranch,
     Conversation,
     Document,
+    DocumentChunk,
     KnowledgeEntity,
     KnowledgeRelation,
     Workspace,
 )
+from nodepoint.backend.kg_builder import ingest_knowledge_graph_for_chunk
 from nodepoint.registry.schema import Entity, Relation
 from nodepoint.services.document import doc_preprocess
 
@@ -64,7 +66,7 @@ class KnowledgeGraphIngestTests(TestCase):
 
 class PreprocessPipelineTests(TestCase):
     @patch("nodepoint.services.preprocess_pipeline.django_rq.get_queue")
-    def test_enqueue_pipeline_with_upload_four_steps(self, mock_get_queue):
+    def test_enqueue_pipeline_with_upload_sequential_order(self, mock_get_queue):
         from nodepoint.services.preprocess_pipeline import enqueue_preprocess_pipeline
 
         mock_queue = MagicMock()
@@ -77,50 +79,58 @@ class PreprocessPipelineTests(TestCase):
         result = enqueue_preprocess_pipeline(uploaded_document_id=doc_id)
 
         self.assertEqual(mock_queue.enqueue.call_count, 4)
-        self.assertIn("4 steps", result["message"])
         self.assertEqual(len(result["steps"]), 4)
+        self.assertIn("prepare document", result["message"])
 
         calls = mock_queue.enqueue.call_args_list
-        self.assertEqual(calls[0][0][0].__name__, "run_process_document")
+        self.assertEqual(calls[0][0][0].__name__, "run_prepare_document")
         self.assertEqual(calls[0][0][1], doc_id)
-        self.assertEqual(calls[1][0][0].__name__, "run_doc_preprocess_batch")
-        self.assertEqual(calls[1][1]["depends_on"], j1)
+        self.assertEqual(calls[1][0][0].__name__, "run_chunk_preprocess_batch")
+        self.assertEqual(calls[1][1]["depends_on"], [j1])
         self.assertEqual(calls[2][0][0].__name__, "run_vector_preprocess_batch")
-        self.assertEqual(calls[2][1]["depends_on"], j1)
-        self.assertEqual(calls[3][0][0].__name__, "run_mongo_content_repair_batch")
-        self.assertEqual(calls[3][1]["depends_on"], [j2, j3])
+        self.assertEqual(calls[2][1]["depends_on"], j2)
+        self.assertEqual(calls[3][0][0].__name__, "run_chunk_mongo_repair_batch")
+        self.assertEqual(calls[3][1]["depends_on"], j3)
 
     @patch("nodepoint.services.preprocess_pipeline.django_rq.get_queue")
-    def test_enqueue_pipeline_without_upload_three_steps(self, mock_get_queue):
+    def test_enqueue_pipeline_post_prepare_legacy_then_sequential(self, mock_get_queue):
         from nodepoint.services.preprocess_pipeline import enqueue_preprocess_pipeline
 
         mock_queue = MagicMock()
         mock_get_queue.return_value = mock_queue
-        j2, j3, j4 = MagicMock(), MagicMock(), MagicMock()
-        j2.id, j3.id, j4.id = "j2", "j3", "j4"
-        mock_queue.enqueue.side_effect = [j2, j3, j4]
+        j1, j2, j3, j4 = MagicMock(), MagicMock(), MagicMock(), MagicMock()
+        j1.id, j2.id, j3.id, j4.id = "j1", "j2", "j3", "j4"
+        mock_queue.enqueue.side_effect = [j1, j2, j3, j4]
 
-        result = enqueue_preprocess_pipeline()
+        result = enqueue_preprocess_pipeline(workspace_name="my-ws")
 
-        self.assertEqual(mock_queue.enqueue.call_count, 3)
-        self.assertIn("3 steps", result["message"])
+        self.assertEqual(mock_queue.enqueue.call_count, 4)
+        self.assertIn("prepare legacy", result["message"])
+        self.assertIn("my-ws", result["message"])
         calls = mock_queue.enqueue.call_args_list
-        self.assertEqual(calls[0][0][0].__name__, "run_doc_preprocess_batch")
-        self.assertNotIn("depends_on", calls[0][1])
-        self.assertEqual(calls[2][1]["depends_on"], [j2, j3])
+        self.assertEqual(calls[0][0][0].__name__, "run_prepare_legacy_batch")
+        self.assertEqual(calls[0][0][1], "my-ws")
+        self.assertEqual(calls[1][1]["depends_on"], [j1])
+        self.assertEqual(calls[2][1]["depends_on"], j2)
+        self.assertEqual(calls[3][1]["depends_on"], j3)
 
-    @patch("nodepoint.services.document.ingest_document", return_value=True)
-    @patch("nodepoint.services.document.extract_knowledge_graph")
-    @patch("nodepoint.services.document.ingest_knowledge_graph", return_value=(True, [], []))
-    @patch("nodepoint.services.vector.vector_preprocess")
-    def test_process_doc_does_not_enqueue_vectors(
-        self, mock_vector_preprocess, mock_kg_ingest, mock_extract, mock_mongo
-    ):
+    @patch("nodepoint.views.preprocess.enqueue_preprocess_pipeline")
+    def test_post_preprocess_passes_workspace_name(self, mock_enqueue):
+        from rest_framework.test import APIClient
+
+        mock_enqueue.return_value = {"message": "ok", "steps": [], "jobs": {}}
+        client = APIClient()
+        Workspace.objects.create(name="post-ws")
+        resp = client.post("/api/workspace/preprocess/post-ws/")
+        self.assertEqual(resp.status_code, 200)
+        mock_enqueue.assert_called_once_with(workspace_name="post-ws")
+
+    @patch("nodepoint.services.document.enqueue_chunks_for_document", return_value=1)
+    @patch("nodepoint.services.document.prepare_document", return_value=[uuid.uuid4()])
+    def test_process_doc_prepares_and_enqueues_chunks(self, mock_prepare, mock_enqueue):
         import tempfile
 
         from nodepoint.services.document import process_doc
-
-        mock_extract.return_value = [], []
 
         media_dir = tempfile.mkdtemp()
         with override_settings(MEDIA_ROOT=media_dir):
@@ -132,17 +142,14 @@ class PreprocessPipelineTests(TestCase):
             )
             process_doc(document.id, document.file.path)
 
-        mock_vector_preprocess.assert_not_called()
-        document.refresh_from_db()
-        self.assertEqual(document.status, Status.COMPLETED)
+        mock_prepare.assert_called_once()
+        mock_enqueue.assert_called_once_with(document.id)
 
-    @patch("nodepoint.services.preprocess_pipeline.ingest_document", return_value=True)
+    @patch("nodepoint.services.preprocess_pipeline.ingest_chunk", return_value=True)
     @patch("nodepoint.services.preprocess_pipeline.read_document_content", return_value="fixed text")
-    @patch("nodepoint.backend.kg_builder.extract_knowledge_graph")
-    def test_mongo_content_repair_batch(
-        self, mock_extract, mock_read, mock_ingest
-    ):
-        from nodepoint.services.preprocess_pipeline import run_mongo_content_repair_batch
+    @patch("nodepoint.backend.kg_builder.split_doc", return_value=["fixed text"])
+    def test_chunk_mongo_repair_batch(self, mock_split, mock_read, mock_ingest):
+        from nodepoint.services.preprocess_pipeline import run_chunk_mongo_repair_batch
 
         workspace = Workspace.objects.create(name="repair-ws")
         document = Document.objects.create(
@@ -153,17 +160,142 @@ class PreprocessPipelineTests(TestCase):
             status=Status.COMPLETED,
         )
 
-        count = run_mongo_content_repair_batch()
+        count = run_chunk_mongo_repair_batch()
         self.assertEqual(count, 1)
         document.refresh_from_db()
         self.assertTrue(document.content)
-        mock_extract.assert_not_called()
-        mock_ingest.assert_called_once()
+        self.assertEqual(DocumentChunk.objects.filter(document=document).count(), 1)
+        mock_ingest.assert_called()
+
+
+class ChunkPipelineTests(TestCase):
+    @patch("nodepoint.services.chunking.ingest_chunk", return_value=True)
+    @patch("nodepoint.services.chunking.split_doc", return_value=["part one", "part two"])
+    def test_prepare_document_creates_chunks(self, mock_split, mock_ingest):
+        import tempfile
+
+        from nodepoint.services.chunking import prepare_document
+
+        media_dir = tempfile.mkdtemp()
+        with override_settings(MEDIA_ROOT=media_dir):
+            workspace = Workspace.objects.create(name="chunk-ws")
+            document = Document.objects.create(
+                workspace=workspace,
+                file_name="note.md",
+                file=SimpleUploadedFile("note.md", b"hello world"),
+            )
+            chunk_ids = prepare_document(document.id, document.file.path)
+
+        self.assertEqual(len(chunk_ids), 2)
+        self.assertEqual(DocumentChunk.objects.filter(document=document).count(), 2)
+        document.refresh_from_db()
+        self.assertTrue(document.content)
+
+    def test_ingest_for_chunk_does_not_delete_other_chunks(self):
+        workspace = Workspace.objects.create(name="kg-chunk-ws")
+        document = Document.objects.create(
+            workspace=workspace,
+            file_name="a.md",
+            file=SimpleUploadedFile("a.md", b"x"),
+        )
+        chunk_a = DocumentChunk.objects.create(document=document, index=0, status=Status.COMPLETED)
+        chunk_b = DocumentChunk.objects.create(document=document, index=1, status=Status.PENDING)
+        KnowledgeEntity.objects.create(
+            document=document, chunk=chunk_a, name="Keep", entity_type="PER"
+        )
+        entities = [Entity(name="New", type="ORG", attributes={})]
+        ok, _, _ = ingest_knowledge_graph_for_chunk(document, chunk_b, entities, [])
+        self.assertTrue(ok)
+        self.assertEqual(KnowledgeEntity.objects.filter(chunk=chunk_a).count(), 1)
+        self.assertEqual(KnowledgeEntity.objects.filter(chunk=chunk_b).count(), 1)
+
+    def test_rollup_document_completed_when_all_chunks_done(self):
+        from nodepoint.services.chunking import rollup_document_status
+
+        workspace = Workspace.objects.create(name="rollup-ws")
+        document = Document.objects.create(
+            workspace=workspace,
+            file_name="b.md",
+            file=SimpleUploadedFile("b.md", b"y"),
+            status=Status.INPROGRESS,
+        )
+        DocumentChunk.objects.create(document=document, index=0, status=Status.COMPLETED)
+        DocumentChunk.objects.create(document=document, index=1, status=Status.COMPLETED)
+        rollup_document_status(document.id)
+        document.refresh_from_db()
+        self.assertEqual(document.status, Status.COMPLETED)
+
+    @patch("nodepoint.services.chunking.wait_for_chunk_jobs")
+    @patch("nodepoint.services.chunking.django_rq.get_queue")
+    def test_enqueue_chunks_can_wait_for_jobs(self, mock_get_queue, mock_wait):
+        from nodepoint.services.chunking import enqueue_chunks_for_documents
+
+        workspace = Workspace.objects.create(name="wait-ws")
+        document = Document.objects.create(
+            workspace=workspace,
+            file_name="w.md",
+            file=SimpleUploadedFile("w.md", b"x"),
+            status=Status.QUEUED,
+            content=True,
+        )
+        DocumentChunk.objects.create(document=document, index=0, status=Status.PENDING)
+
+        mock_job = MagicMock()
+        mock_get_queue.return_value.enqueue.return_value = mock_job
+
+        count = enqueue_chunks_for_documents(
+            document_ids=[document.id],
+            wait=True,
+        )
+        self.assertEqual(count, 1)
+        mock_wait.assert_called_once_with([mock_job])
+
+    def test_rollup_legacy_completed_not_downgraded(self):
+        from nodepoint.services.chunking import rollup_document_status
+
+        workspace = Workspace.objects.create(name="legacy-rollup-ws")
+        document = Document.objects.create(
+            workspace=workspace,
+            file_name="legacy.md",
+            file=SimpleUploadedFile("legacy.md", b"x"),
+            status=Status.COMPLETED,
+            content=True,
+        )
+        KnowledgeEntity.objects.create(
+            document=document, name="Legacy", entity_type="PER"
+        )
+        rollup_document_status(document.id)
+        document.refresh_from_db()
+        self.assertEqual(document.status, Status.COMPLETED)
+
+    @patch("nodepoint.services.chunking.ingest_chunk", return_value=True)
+    @patch("nodepoint.services.chunking.split_doc", return_value=["chunk one"])
+    def test_run_prepare_legacy_batch_creates_chunks(self, mock_split, mock_ingest):
+        import tempfile
+
+        from nodepoint.services.chunking import run_prepare_legacy_batch
+
+        media_dir = tempfile.mkdtemp()
+        with override_settings(MEDIA_ROOT=media_dir):
+            workspace = Workspace.objects.create(name="legacy-prepare-ws")
+            document = Document.objects.create(
+                workspace=workspace,
+                file_name="old.md",
+                file=SimpleUploadedFile("old.md", b"legacy body"),
+                status=Status.COMPLETED,
+                content=True,
+            )
+            count = run_prepare_legacy_batch(workspace_name=workspace.name)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(DocumentChunk.objects.filter(document=document).count(), 1)
 
 
 class DocPreprocessTests(TestCase):
-    @patch("nodepoint.services.document.django_rq.get_queue")
-    def test_doc_preprocess_enqueues_existing_files(self, mock_get_queue):
+    @patch("nodepoint.services.chunking.django_rq.get_queue")
+    @patch("nodepoint.services.chunking.ingest_chunk", return_value=True)
+    @patch("nodepoint.services.chunking.split_doc", return_value=["chunk text"])
+    def test_doc_preprocess_enqueues_chunk_jobs(self, mock_split, mock_ingest, mock_get_queue):
         media_dir = tempfile.mkdtemp()
         with override_settings(MEDIA_ROOT=media_dir):
             workspace = Workspace.objects.create(name="preprocess-ws")
@@ -171,19 +303,59 @@ class DocPreprocessTests(TestCase):
                 workspace=workspace,
                 file_name="note.md",
                 file=SimpleUploadedFile("note.md", b"test content"),
+                status=Status.PENDING,
             )
-            filepath = document.file.path
-            self.assertTrue(filepath)
 
             mock_queue = MagicMock()
             mock_get_queue.return_value = mock_queue
 
             count = doc_preprocess(workspace_name=workspace.name)
-            self.assertEqual(count, 1)
-            mock_queue.enqueue.assert_called_once()
+            self.assertGreaterEqual(count, 1)
+            mock_queue.enqueue.assert_called()
             args = mock_queue.enqueue.call_args[0]
-            self.assertEqual(args[1], document.id)
-            self.assertEqual(args[2], filepath)
+            from nodepoint.services.chunk_process import process_chunk
+
+            self.assertEqual(args[0], process_chunk)
+
+
+class AgentParserModelTests(TestCase):
+    @patch.dict(
+        "os.environ",
+        {"BASE_URL": "https://api.example/v1", "API_KEY": "test-key"},
+        clear=False,
+    )
+    def test_parser_model_from_toml(self):
+        import tempfile
+        from pathlib import Path
+
+        from nodepoint.agent.agent import Agent
+
+        with tempfile.NamedTemporaryFile("wb", suffix=".toml", delete=False) as f:
+            f.write(
+                b'[agent]\nmodel = "chat-model"\nparser = "parse-model"\nvector = "embed"\n'
+            )
+            path = Path(f.name)
+
+        agent = Agent(settings_path=path)
+        self.assertEqual(agent.model, "chat-model")
+        self.assertEqual(agent.parser_model, "parse-model")
+        self.assertEqual(agent._resolve_model(None, agent.parser_model), "parse-model")
+
+    @patch.dict(
+        "os.environ",
+        {
+            "BASE_URL": "https://api.example/v1",
+            "API_KEY": "test-key",
+            "AGENT_PARSER": "env-parser",
+        },
+        clear=False,
+    )
+    def test_parser_model_env_overrides_toml(self):
+        from nodepoint.agent.agent import Agent
+
+        agent = Agent(settings_path="/nonexistent-settings.toml")
+        agent.model = "chat-model"
+        self.assertEqual(agent.parser_model, "env-parser")
 
 
 class AgentModelValidationTests(TestCase):
@@ -248,6 +420,9 @@ class PreprocessStatusAPITests(TestCase):
             status=Status.COMPLETED,
             content=True,
         )
+        DocumentChunk.objects.create(
+            document=doc, index=0, status=Status.COMPLETED, vector=Status.PENDING
+        )
         e1 = KnowledgeEntity.objects.create(
             document=doc, name="A", entity_type="PER", vector=Status.COMPLETED
         )
@@ -265,7 +440,7 @@ class PreprocessStatusAPITests(TestCase):
         resp = self.client.get("/api/workspace/status-ws/preprocess-status/")
         file_data = resp.json()["files"][0]
         self.assertEqual(file_data["phase"], "embedding")
-        self.assertEqual(file_data["embedding_progress"], 0.3333)
+        self.assertEqual(file_data["embedding_progress"], 0.25)
         self.assertEqual(resp.json()["overall"]["phase"], "embedding")
         self.assertFalse(resp.json()["overall"]["ready"])
 
@@ -275,6 +450,9 @@ class PreprocessStatusAPITests(TestCase):
             file_name="c.md",
             status=Status.COMPLETED,
             content=True,
+        )
+        DocumentChunk.objects.create(
+            document=doc, index=0, status=Status.COMPLETED, vector=Status.COMPLETED
         )
         e1 = KnowledgeEntity.objects.create(
             document=doc, name="X", entity_type="ORG", vector=Status.COMPLETED
@@ -292,6 +470,78 @@ class PreprocessStatusAPITests(TestCase):
         self.assertEqual(resp.json()["files"][0]["embedding_progress"], 1.0)
         self.assertTrue(resp.json()["overall"]["ready"])
         self.assertEqual(resp.json()["overall"]["phase"], "ready")
+
+    def test_legacy_completed_zero_chunks_embedding_not_queued(self):
+        doc = Document.objects.create(
+            workspace=self.workspace,
+            file_name="legacy.md",
+            status=Status.COMPLETED,
+            content=True,
+        )
+        KnowledgeEntity.objects.create(
+            document=doc, name="A", entity_type="PER", vector=Status.PENDING
+        )
+        resp = self.client.get("/api/workspace/status-ws/preprocess-status/")
+        file_data = resp.json()["files"][0]
+        self.assertEqual(file_data["phase"], "embedding")
+        self.assertTrue(file_data["legacy"])
+        self.assertNotEqual(file_data["phase"], "queued")
+
+    def test_legacy_completed_all_vectors_ready(self):
+        doc = Document.objects.create(
+            workspace=self.workspace,
+            file_name="legacy-ready.md",
+            status=Status.COMPLETED,
+            content=True,
+        )
+        KnowledgeEntity.objects.create(
+            document=doc, name="X", entity_type="ORG", vector=Status.COMPLETED
+        )
+        resp = self.client.get("/api/workspace/status-ws/preprocess-status/")
+        self.assertEqual(resp.json()["files"][0]["phase"], "ready")
+
+    def test_zero_chunks_no_content_needs_prepare(self):
+        Document.objects.create(
+            workspace=self.workspace,
+            file_name="unprepared.md",
+            status=Status.COMPLETED,
+            content=False,
+        )
+        resp = self.client.get("/api/workspace/status-ws/preprocess-status/")
+        self.assertEqual(resp.json()["files"][0]["phase"], "needs_prepare")
+
+
+class LegacyDerivePhaseTests(TestCase):
+    def test_completed_legacy_with_pending_vectors_is_embedding(self):
+        from nodepoint.services.preprocess_status import derive_file_phase
+
+        chunks = {"total": 0, "pending": 0, "queued": 0, "in_progress": 0, "completed": 0, "failed": 0}
+        entities = {"total": 1, "pending": 1, "completed": 0, "failed": 0}
+        relations = {"total": 0, "pending": 0, "completed": 0, "failed": 0}
+        chunk_vectors = {"total": 0, "pending": 0, "completed": 0, "failed": 0}
+        phase = derive_file_phase(
+            Status.COMPLETED,
+            chunks,
+            entities,
+            relations,
+            chunk_vectors,
+            content=True,
+        )
+        self.assertEqual(phase, "embedding")
+
+    def test_completed_legacy_no_kg_needs_prepare(self):
+        from nodepoint.services.preprocess_status import derive_file_phase
+
+        empty = {"total": 0, "pending": 0, "completed": 0, "failed": 0}
+        phase = derive_file_phase(
+            Status.COMPLETED,
+            {**empty, "queued": 0, "in_progress": 0},
+            empty,
+            empty,
+            empty,
+            content=True,
+        )
+        self.assertEqual(phase, "needs_prepare")
 
 
 from unittest.mock import AsyncMock, patch
@@ -418,6 +668,9 @@ class ChatRunnerTests(TestCase):
                 tools=[],
                 on_event=capture,
             )
+
+        mock_stream.assert_called_once()
+        self.assertFalse(mock_stream.call_args.kwargs.get("register_mcp_tools", True))
 
         roles = list(
             ChatMessage.objects.filter(branch=self.root).values_list("role", flat=True)
@@ -654,8 +907,9 @@ class KgSearchTests(TestCase):
             ],
             "who is Alice",
         )
-        self.assertIn("## [source: notes.md]", doc)
-        self.assertIn("name: Alice", doc)
+        self.assertIn("[entity](", doc)
+        self.assertIn("notes.md", doc)
+        self.assertIn("Alice", doc)
 
     def test_resolve_hits_loads_entity(self):
         entity = KnowledgeEntity.objects.get(document=self.document)
@@ -760,12 +1014,95 @@ class KnowledgeToolFlaggedScopeTests(TestCase):
         self.assertIn("No workspace is flagged", result)
 
 
+class AsyncChatConcurrencyTests(TestCase):
+    @patch("nodepoint.services.chat_runner.chat_compression.compress_async", new_callable=AsyncMock)
+    @patch.object(chat_runner.Agent, "stream_agent_events_async")
+    @patch("asyncio.to_thread")
+    def test_maybe_compress_counts_tokens_off_event_loop(
+        self, mock_to_thread, mock_stream, mock_compress
+    ):
+        import time
+        from nodepoint.services.chat_runner import run_agent_stream
+
+        async def empty_stream(*args, **kwargs):
+            yield AgentSessionDoneEvent()
+
+        mock_stream.return_value = empty_stream()
+        mock_compress.return_value = "summary"
+
+        def to_thread_side_effect(func, *args, **kwargs):
+            if getattr(func, "__name__", "") == "root_count_tokens":
+                return 100_000
+            if func is time.sleep:
+                return None
+            return func(*args, **kwargs)
+
+        mock_to_thread.side_effect = to_thread_side_effect
+
+        workspace = Workspace.objects.create(name="async-compress-ws")
+        conversation, root = chat_storage.create_conversation(workspace)
+        thread, _, _ = chat_storage.load_thread(root.id)
+
+        with patch.dict(
+            "os.environ",
+            {"BASE_URL": "http://test", "API_KEY": "test-key", "CHAT_COMPRESS_TOKEN_THRESHOLD": "1000"},
+        ):
+            async_to_sync(run_agent_stream)(
+                thread,
+                chat_runner.Agent(),
+                root.id,
+                conversation.id,
+                tools=[],
+                on_event=AsyncMock(),
+            )
+
+        token_calls = [
+            c
+            for c in mock_to_thread.call_args_list
+            if c.args and getattr(c.args[0], "__name__", "") == "root_count_tokens"
+        ]
+        self.assertTrue(token_calls)
+
+    def test_search_semaphore_limits_parallelism(self):
+        import threading
+        import time
+
+        from nodepoint.services.chat_concurrency import run_with_search_limit
+
+        active = 0
+        peak = 0
+        lock = threading.Lock()
+
+        def slow_sync():
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.05)
+            with lock:
+                active -= 1
+            return "ok"
+
+        import asyncio as aio
+
+        async def run():
+            return await aio.gather(*[run_with_search_limit(slow_sync) for _ in range(12)])
+
+        results = async_to_sync(run)()
+        self.assertEqual(len(results), 12)
+        self.assertLessEqual(peak, 8)
+
+
 class ChatRunnerToolTests(TestCase):
-    def test_default_tools_only_search_graph(self):
+    def test_default_tools_includes_knowledge_suite(self):
         from nodepoint.services import chat_runner
 
         names = {t["function"]["name"] for t in chat_runner.default_tools()}
-        self.assertEqual(names, {"Knowledge.search_graph"})
+        self.assertIn("Knowledge.search_graph", names)
+        self.assertIn("Knowledge.get_entity_record", names)
+        self.assertIn("Knowledge.search_entity_by_name", names)
+        self.assertIn("Knowledge.get_document_record", names)
+        self.assertEqual(len(names), 6)
 
 
 class QdrantSearchTests(TestCase):
@@ -788,21 +1125,17 @@ class QdrantSearchTests(TestCase):
 
 
 class ToolInvokeAsyncTests(TestCase):
-    @patch("nodepoint.registry.tools.Knowledge.kg_search.build_search_document")
-    @patch("nodepoint.registry.tools.Knowledge.search_by_workspaces")
+    @patch("nodepoint.registry.tools.Knowledge.kg_search.build_search_document_from_records")
+    @patch("nodepoint.registry.tools.Knowledge.hybrid_search")
     @patch("nodepoint.registry.tools.Knowledge.resolve_search_workspace_names")
-    @patch("nodepoint.registry.tools.Knowledge.get_agent")
     def test_invoke_async_runs_local_tool_off_event_loop(
-        self, mock_get_agent, mock_resolve, mock_search, mock_build
+        self, mock_resolve, mock_hybrid, mock_build
     ):
         from nodepoint.agent.agent import ToolCallNormalized
         from nodepoint.registry.tool import Tool
 
         mock_resolve.return_value = ["global"]
-        mock_get_agent.return_value.vector.return_value.squeeze.return_value.tolist.return_value = [
-            0.1,
-        ]
-        mock_search.return_value = []
+        mock_hybrid.return_value = []
         mock_build.return_value = "ok"
 
         call = ToolCallNormalized(
@@ -820,25 +1153,27 @@ class ToolInvokeAsyncTests(TestCase):
 
 
 class KnowledgeToolTests(TestCase):
-    @patch("nodepoint.registry.tools.Knowledge.kg_search.build_search_document")
-    @patch("nodepoint.registry.tools.Knowledge.search_by_workspaces")
+    @patch("nodepoint.registry.tools.Knowledge.kg_search.build_search_document_from_records")
+    @patch("nodepoint.registry.tools.Knowledge.hybrid_search")
     @patch("nodepoint.registry.tools.Knowledge.resolve_search_workspace_names")
-    @patch("nodepoint.registry.tools.Knowledge.get_agent")
     def test_search_graph_returns_markdown_document(
-        self, mock_get_agent, mock_resolve, mock_search, mock_build
+        self, mock_resolve, mock_hybrid, mock_build
     ):
         mock_resolve.return_value = ["chat-ws"]
-        mock_get_agent.return_value.vector.return_value.squeeze.return_value.tolist.return_value = [
-            0.1,
-            0.2,
+        mock_hybrid.return_value = [
+            {
+                "kind": "entity",
+                "id": "550e8400-e29b-41d4-a716-446655440000",
+                "score": 0.9,
+                "scores": {"total": 0.9, "semantic": 0.8, "bm25": 0.5, "fuzzy": 0.4, "lexical": 0.45},
+            }
         ]
-        mock_search.return_value = [{"id": "1", "score": 0.9, "type": "entity"}]
-        mock_build.return_value = '## [source: notes.md]\n**Entity**\n'
+        mock_build.return_value = "## Result 1 — entity [entity](550e8400)\n"
 
         from nodepoint.registry.tools import Knowledge as knowledge_tools
 
         result = knowledge_tools.search_graph("query", limit=5)
-        self.assertIn("[source: notes.md]", result)
+        self.assertIn("[entity](550e8400)", result)
         mock_build.assert_called_once()
 
     @patch("nodepoint.registry.tools.Knowledge.resolve_search_workspace_names")
@@ -848,3 +1183,168 @@ class KnowledgeToolTests(TestCase):
 
         result = knowledge_tools.search_graph("query")
         self.assertIn("No workspace is flagged", result)
+
+
+class KgRecordsTests(TestCase):
+    def setUp(self):
+        self.workspace = Workspace.objects.create(name="kg-rec-ws")
+        self.document = Document.objects.create(
+            workspace=self.workspace,
+            file_name="notes.md",
+            file=SimpleUploadedFile("notes.md", b"# doc"),
+        )
+        self.chunk = DocumentChunk.objects.create(
+            document=self.document, index=0, status=Status.COMPLETED
+        )
+        self.entity = KnowledgeEntity.objects.create(
+            document=self.document,
+            chunk=self.chunk,
+            name="Alice",
+            entity_type="PER",
+            attributes={"role": "eng"},
+        )
+        self.entity_b = KnowledgeEntity.objects.create(
+            document=self.document,
+            name="Bob",
+            entity_type="PER",
+        )
+        KnowledgeRelation.objects.create(
+            document=self.document,
+            chunk=self.chunk,
+            source=self.entity,
+            target=self.entity_b,
+            type_description="knows",
+            description="Alice knows Bob",
+        )
+
+    def test_serialize_entity_includes_chunk_id(self):
+        from nodepoint.services.kg_records import serialize_entity
+
+        data = serialize_entity(self.entity)
+        self.assertEqual(data["chunk_id"], str(self.chunk.id))
+        self.assertIn("Alice", data["content"])
+
+    def test_get_entity_not_found(self):
+        from nodepoint.services.kg_records import RecordNotFoundError, get_entity
+
+        with self.assertRaises(RecordNotFoundError):
+            get_entity(uuid.uuid4())
+
+    def test_search_entities_by_name_with_relations(self):
+        from nodepoint.services.kg_records import search_entities_by_name
+
+        matches = search_entities_by_name("Alice", ["kg-rec-ws"], exact=True)
+        self.assertEqual(len(matches), 1)
+        self.assertTrue(any(r["direction"] == "outgoing" for r in matches[0]["relations"]))
+
+
+class KgHybridSearchTests(TestCase):
+    def test_rerank_lexical_can_change_order(self):
+        from nodepoint.services.kg_hybrid_search import rerank_records
+
+        records = [
+            {
+                "id": "a",
+                "kind": "entity",
+                "name": "zebra",
+                "entity_type": "X",
+                "attributes": {},
+                "score": 0.99,
+            },
+            {
+                "id": "b",
+                "kind": "entity",
+                "name": "Alice",
+                "entity_type": "PER",
+                "attributes": {"role": "eng"},
+                "score": 0.1,
+            },
+        ]
+        out = rerank_records(
+            "Alice engineer",
+            records,
+            semantic_weight=0.0,
+            lexical_weight=1.0,
+        )
+        self.assertEqual(out[0]["id"], "b")
+
+    def test_normalize_weights(self):
+        from nodepoint.services.kg_hybrid_search import normalize_weights
+
+        sem, lex = normalize_weights(3, 1)
+        self.assertAlmostEqual(sem + lex, 1.0)
+
+
+class KgRecordAPITests(TestCase):
+    def setUp(self):
+        from rest_framework.test import APIClient
+
+        self.client = APIClient()
+        self.workspace = Workspace.objects.create(name="api-kg-rec")
+        self.document = Document.objects.create(
+            workspace=self.workspace,
+            file_name="doc.md",
+            file=SimpleUploadedFile("doc.md", b"x"),
+        )
+        self.entity = KnowledgeEntity.objects.create(
+            document=self.document,
+            name="Node",
+            entity_type="TECH",
+        )
+
+    def test_get_entity_by_id(self):
+        resp = self.client.get(f"/api/knowledge/entity/{self.entity.id}/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["name"], "Node")
+
+    def test_get_entity_404(self):
+        resp = self.client.get(f"/api/knowledge/entity/{uuid.uuid4()}/")
+        self.assertEqual(resp.status_code, 404)
+
+    @patch("nodepoint.services.kg_records.get_document_text", return_value="full doc body")
+    def test_get_document_by_id(self, mock_text):
+        resp = self.client.get(f"/api/knowledge/document/{self.document.id}/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["kind"], "doc")
+        self.assertEqual(resp.json()["content"], "full doc body")
+
+
+class ChatPromptCitationTests(TestCase):
+    def test_chat_system_requires_id_citations(self):
+        from nodepoint.registry.prompt import Prompt
+
+        prompt = Prompt["chat_system"]
+        self.assertIn("[entity](", prompt)
+        self.assertIn("[doc](", prompt)
+        self.assertIn("Never cite with [source: file_name]", prompt)
+        self.assertIn("Knowledge.get_document_record", prompt)
+
+
+class KgSearchFormatTests(TestCase):
+    def test_format_includes_scores_and_chunk_id(self):
+        from nodepoint.services.kg_search import format_search_document
+
+        md = format_search_document(
+            [
+                {
+                    "kind": "entity",
+                    "id": "e1",
+                    "chunk_id": "c1",
+                    "file_name": "a.md",
+                    "workspace": "ws",
+                    "content": "name: Alice",
+                    "scores": {
+                        "total": 0.8,
+                        "semantic": 0.7,
+                        "bm25": 0.5,
+                        "fuzzy": 0.4,
+                        "lexical": 0.45,
+                    },
+                }
+            ],
+            "alice",
+        )
+        self.assertIn("[entity](e1)", md)
+        self.assertIn("**cite**", md)
+        self.assertIn("[doc](", md)
+        self.assertIn("Never use [source: file_name]", md)

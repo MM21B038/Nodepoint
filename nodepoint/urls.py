@@ -22,6 +22,12 @@ from nodepoint.views.preprocess import (
 from nodepoint.views.chat import FlaggedChatAPIView, WorkspaceChatAPIView
 
 from nodepoint.views.knowledge_graph import KnowledgeGraphAPIView
+from nodepoint.views.kg_record import (
+    KnowledgeChunkDetailAPIView,
+    KnowledgeDocumentDetailAPIView,
+    KnowledgeEntityDetailAPIView,
+    KnowledgeRelationDetailAPIView,
+)
 from nodepoint.views.chat_summary import ChatSummaryAPIView
 
 urlpatterns = [
@@ -94,5 +100,22 @@ urlpatterns = [
     path(
         "knowledge-graph/",
         KnowledgeGraphAPIView.as_view(),
+    ),
+
+    path(
+        "knowledge/entity/<uuid:record_id>/",
+        KnowledgeEntityDetailAPIView.as_view(),
+    ),
+    path(
+        "knowledge/relation/<uuid:record_id>/",
+        KnowledgeRelationDetailAPIView.as_view(),
+    ),
+    path(
+        "knowledge/chunk/<uuid:record_id>/",
+        KnowledgeChunkDetailAPIView.as_view(),
+    ),
+    path(
+        "knowledge/document/<uuid:record_id>/",
+        KnowledgeDocumentDetailAPIView.as_view(),
     ),
 ]

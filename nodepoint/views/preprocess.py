@@ -38,11 +38,12 @@ class PreprocessWorkspaceAPIView(APIView):
         except Workspace.DoesNotExist:
             return Response({"error": "Workspace not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        pipeline = enqueue_preprocess_pipeline()
+        pipeline = enqueue_preprocess_pipeline(workspace_name=workspace.name)
 
         return Response(
             {
-                "message": f"Preprocessing queued for workspace '{workspace.name}'",
+                "message": pipeline.get("message")
+                or f"Preprocessing queued for workspace '{workspace.name}'",
                 "pipeline": pipeline,
             }
         )

@@ -207,18 +207,18 @@ Upload triggers a **4-step global preprocess pipeline** (see [Preprocess](#prepr
 {
   "message": "File uploaded successfully",
   "pipeline": {
-    "message": "Preprocess pipeline queued (4 steps)",
+    "message": "Preprocess pipeline queued: prepare document → chunk KG (parallel) → embeddings → mongo repair",
     "steps": [
-      "uploaded_document",
-      "doc_preprocess_global",
-      "vector_preprocess_global",
-      "mongo_content_repair"
+      "prepare_document",
+      "chunk_preprocess",
+      "vector_preprocess",
+      "chunk_mongo_repair"
     ],
     "jobs": {
-      "uploaded_document": "rq-job-id-1",
-      "doc_preprocess_global": "rq-job-id-2",
-      "vector_preprocess_global": "rq-job-id-3",
-      "mongo_content_repair": "rq-job-id-4"
+      "prepare_document": "rq-job-id-1",
+      "chunk_preprocess": "rq-job-id-2",
+      "vector_preprocess": "rq-job-id-3",
+      "chunk_mongo_repair": "rq-job-id-4"
     }
   },
   "id": "550e8400-e29b-41d4-a716-446655440000",
@@ -277,37 +277,42 @@ Upload triggers a **4-step global preprocess pipeline** (see [Preprocess](#prepr
 
 ### `POST /api/workspace/preprocess/<workspace_name>/`
 
-Queues the **global preprocess pipeline** (3 steps; no single-document job). Sweeps are **system-wide**, not limited to the workspace in the URL (workspace must exist for routing only).
+Queues the **full workspace preprocess pipeline** for the named workspace (no single-document upload). One call runs **prepare legacy → chunk KG (parallel workers) → embeddings → mongo repair** — no separate manual preprocess needed to migrate old documents.
 
 **Pipeline steps (RQ orchestrator)**
 
 | Step | Job | What it does |
 |------|-----|----------------|
-| 1 (upload only) | `run_process_document` | Mongo + KG for the uploaded file |
-| 2 | `run_doc_preprocess_batch` | All documents with `status` PENDING or FAILED → `process_doc` each |
-| 3 | `run_vector_preprocess_batch` | All entities/relations with vector PENDING or FAILED → Qdrant embed |
-| 4 | `run_mongo_content_repair_batch` | All documents with `content=false` → re-read file, Mongo ingest only |
+| 1 (upload only) | `run_prepare_document` | Split the new file → Postgres `DocumentChunk` rows + Mongo `chunk_content` |
+| 1 (POST only) | `run_prepare_legacy_batch` | For documents in this workspace with zero chunks or `content=false`, run `prepare_document` (chunk migration) |
+| 2 | `run_chunk_preprocess_batch` | Enqueue `process_chunk` (5 min timeout) for incomplete chunks in the workspace |
+| 3 | `run_vector_preprocess_batch` | Enqueue embeddings for entities, relations, and **chunks** (PENDING/FAILED vectors) in the workspace |
+| 4 | `run_chunk_mongo_repair_batch` | Rebuild Mongo chunk text for `content=false` or missing chunk bodies in the workspace |
 
-**Order:** On upload, step 1 runs first; steps **2 and 3** start in **parallel** after step 1; step **4** runs after both 2 and 3 finish. On POST preprocess (no upload), steps 2 ∥ 3, then 4.
+**Order (sequential steps, parallel workers inside step 2):** prepare → chunk batch → **vectors after chunk batch** → mongo repair. Vectors no longer run in parallel with chunk KG.
 
-Embeddings are **not** run inside `process_doc`; they are handled only by step 3.
+**Legacy documents:** Files uploaded before chunk migration may show `document_status: COMPLETED` with **no** `DocumentChunk` rows and `chunk_id=null` on KG rows. POST preprocess backfills chunks; poll preprocess-status until `overall.ready` is true.
+
+**Per chunk:** Mongo stores chunk text; KG extraction runs in parallel RQ workers (`process_chunk`). A document is marked `COMPLETED` only when **all** its chunks reach `COMPLETED`.
 
 **Response `200`**
 
 ```json
 {
-  "message": "Preprocessing queued for workspace 'PRAJNA'",
+  "message": "Preprocess pipeline queued: prepare legacy → chunk KG (parallel) → embeddings → mongo repair (workspace=PRAJNA)",
   "pipeline": {
-    "message": "Preprocess pipeline queued (3 steps)",
+    "message": "Preprocess pipeline queued: prepare legacy → chunk KG (parallel) → embeddings → mongo repair (workspace=PRAJNA)",
     "steps": [
-      "doc_preprocess_global",
-      "vector_preprocess_global",
-      "mongo_content_repair"
+      "prepare_legacy",
+      "chunk_preprocess",
+      "vector_preprocess",
+      "chunk_mongo_repair"
     ],
     "jobs": {
-      "doc_preprocess_global": "rq-job-id-2",
-      "vector_preprocess_global": "rq-job-id-3",
-      "mongo_content_repair": "rq-job-id-4"
+      "prepare_legacy": "rq-job-id-1",
+      "chunk_preprocess": "rq-job-id-2",
+      "vector_preprocess": "rq-job-id-3",
+      "chunk_mongo_repair": "rq-job-id-4"
     }
   }
 }
@@ -345,7 +350,8 @@ Poll after upload until `overall.ready` is `true` and `overall.phase` is `ready`
   },
   "vectors": {
     "entities": { "total": 10, "pending": 2, "completed": 8, "failed": 0 },
-    "relations": { "total": 5, "pending": 1, "completed": 4, "failed": 0 }
+    "relations": { "total": 5, "pending": 1, "completed": 4, "failed": 0 },
+    "chunks": { "total": 3, "pending": 0, "completed": 3, "failed": 0 }
   },
   "files": [
     {
@@ -353,10 +359,20 @@ Poll after upload until `overall.ready` is `true` and `overall.phase` is `ready`
       "file_name": "notes.md",
       "document_status": "COMPLETED",
       "content": true,
+      "legacy": false,
       "phase": "embedding",
       "uploaded_at": "2026-05-15T12:00:00.123456Z",
+      "chunks": {
+        "total": 3,
+        "pending": 0,
+        "queued": 0,
+        "in_progress": 0,
+        "completed": 3,
+        "failed": 0
+      },
       "entities": { "total": 5, "pending": 1, "completed": 4, "failed": 0 },
       "relations": { "total": 2, "pending": 0, "completed": 2, "failed": 0 },
+      "chunk_vectors": { "total": 3, "pending": 1, "completed": 2, "failed": 0 },
       "embedding_progress": 0.8571
     }
   ]
@@ -365,26 +381,30 @@ Poll after upload until `overall.ready` is `true` and `overall.phase` is `ready`
 
 | Field | Meaning |
 |-------|---------|
-| `overall.phase` | Workspace-wide stage: `idle`, `queued`, `processing`, `kg_ready`, `embedding`, `ready`, `failed` |
+| `overall.phase` | Workspace-wide stage: `idle`, `needs_prepare`, `queued`, `processing`, `kg_ready`, `embedding`, `ready`, `failed` |
 | `overall.ready` | All files are `ready` and none failed |
-| `document_status` | Raw `Document.status` from Postgres |
-| `phase` (per file) | Derived end-to-end stage (see table below) |
-| `embedding_progress` | Share of entity + relation vectors with `COMPLETED` (0–1) |
-| `vectors` | Counts by vector job status across the workspace |
+| `document_status` | Raw `Document.status` from Postgres (COMPLETED when all chunks are COMPLETED) |
+| `phase` (per file) | Derived from chunk KG status + vector progress (see table below) |
+| `legacy` | `true` when the document has `content=true` but no `DocumentChunk` rows yet (pre-migration KG only) |
+| `chunks` | Per-file chunk processing counts by `DocumentChunk.status` |
+| `chunk_vectors` | Per-file Qdrant embedding progress for chunk points |
+| `embedding_progress` | Share of entity + relation + chunk vectors with `COMPLETED` (0–1) |
+| `vectors` | Workspace totals for entity, relation, and chunk vector jobs |
 
 **Per-file `phase` values**
 
 | `phase` | When |
 |---------|------|
 | `idle` | No documents (workspace-level only) |
-| `queued` | Document `PENDING` or `QUEUED` |
-| `processing` | Document `INPROGRESS` (read file, Mongo, KG extract) |
-| `kg_ready` | Document `COMPLETED` but no entities yet |
-| `embedding` | Document `COMPLETED` and some vectors not `COMPLETED` |
-| `ready` | Document `COMPLETED` and all vectors `COMPLETED` (or no KG rows) |
-| `failed` | Document `FAILED`, `INVALID`, or `TERMINATED` |
+| `needs_prepare` | No chunks yet (`content=false`) or completed doc with no chunks/KG (run POST preprocess to migrate) |
+| `queued` | Document `PENDING` or `QUEUED` (awaiting chunk workers) |
+| `processing` | Chunks still running KG (`process_chunk`) or document `INPROGRESS` during prepare |
+| `kg_ready` | All chunks `COMPLETED` but no entity rows yet |
+| `embedding` | Chunk KG done (or legacy doc with entity rows only) and some vectors not `COMPLETED` |
+| `ready` | All vectors `COMPLETED` (legacy: entity/relation vectors only when there are no chunks) |
+| `failed` | Document `FAILED`, `INVALID`, or `TERMINATED`, or chunk failures |
 
-**Important:** `document_status: COMPLETED` means the worker finished KG ingest in Postgres. Embeddings are handled by pipeline step 3 (`vector_preprocess_global`); use `phase` or `embedding_progress` for Qdrant readiness. `content=false` may persist until pipeline step 4 (`mongo_content_repair`) runs.
+**Important:** `document_status: COMPLETED` with zero chunks usually means a **legacy** document (KG before chunk migration). Use `phase` `needs_prepare` / `legacy: true` and POST preprocess to backfill chunks. After migration, `COMPLETED` means all chunks finished KG ingest. Embeddings run in pipeline step 3 (`vector_preprocess`); use `phase` or `embedding_progress` for Qdrant readiness.
 
 | Status | Condition |
 |--------|-----------|
@@ -516,8 +536,8 @@ REST returns **persisted** user-visible messages (root branch only). **Live stre
 **Agent behavior (WebSocket):**
 
 - Fixed system prompt: answer only from `Knowledge.search_graph` tool output and prior search tool messages in the thread.
-- **Single tool:** `Knowledge.search_graph` only (no MCP tools in chat).
-- Citations in replies: **`[source: file_name]`** (exact `file_name` from tool output).
+- **Knowledge tools:** `search_graph`, `get_entity_record`, `get_relation_record`, `get_chunk_record`, `get_document_record`, `search_entity_by_name` (no MCP tools in chat).
+- Citations in replies: **`[entity](uuid)`**, **`[relation](uuid)`**, **`[chunk](uuid)`**, or **`[doc](uuid)`** only — never `[source: file_name]`.
 - No hallucination: if search has no relevant records, the agent must say so.
 
 | Concern | REST | WebSocket |
@@ -969,7 +989,11 @@ Registered when `nodepoint/registry/tools/Knowledge.py` has `active: true` in it
 
 ### `Knowledge.search_graph`
 
-Semantic search in **Qdrant**, then **resolves each hit ID** to full Postgres entity/relation rows. Returns a **markdown search document** (string), not raw JSON hits.
+**Hybrid search:** Qdrant semantic retrieval (`candidate_limit`, default **4000**), then **BM25 + fuzzy** rerank on resolved text, then weighted fusion. Returns structured **markdown** with record ids, `chunk_id`, content, and score breakdown.
+
+Also available: `Knowledge.get_entity_record`, `Knowledge.get_relation_record`, `Knowledge.get_chunk_record`, `Knowledge.get_document_record`, `Knowledge.search_entity_by_name`.
+
+Tool output includes a **cite** line per result, e.g. `[entity](uuid)` and parent `[doc](document-uuid)`. The model must copy these — not `[source: file_name]`.
 
 Workspace scope is **automatic** (model must not pass `workspace`):
 
@@ -991,21 +1015,45 @@ Prior search hit IDs from the same chat session are merged into later searches i
 | Name | Type | Default | Description |
 |------|------|---------|-------------|
 | `query` | string | required | Natural-language query |
-| `limit` | int | `10` | Max Qdrant hits |
-| `record_type` | string \| null | `null` | Filter: `entity` or `relation` |
+| `limit` | int | `10` | Final results after rerank |
+| `record_type` | string \| null | `null` | Filter: `entity`, `relation`, or `chunk` |
+| `candidate_limit` | int | `4000` | Qdrant pool size before BM25/fuzzy |
+| `semantic_weight` | float | `0.6` | Weight for cosine score (normalized) |
+| `lexical_weight` | float | `0.4` | Weight for BM25+fuzzy blend |
+| `bm25_weight` | float | `0.5` | Share of lexical from BM25 vs fuzzy |
 
-**Return:** markdown string with `## [source: file_name]` sections for citations.
+**Return:** markdown with `## Result N — kind [kind](uuid)`, ids, chunk_id, content, and scores.
 
-```markdown
-# Knowledge search: "who is Alice"
+### `Knowledge.get_entity_record` / `get_relation_record` / `get_chunk_record` / `get_document_record`
 
-## [source: notes.md]
-**Entity** (score 0.8700)
-- name: Alice
-- type: PER
-- attributes: {'role': 'eng'}
-- workspace: PRAJNA
-```
+| Name | Type | Description |
+|------|------|-------------|
+| `entity_id` / `relation_id` / `chunk_id` / `document_id` | string | Postgres UUID |
+
+Returns full record markdown including content. Documents return assembled text (Mongo chunks or file). Cite as `[doc](document_id)`.
+
+### `Knowledge.search_entity_by_name`
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `name` | string | required | Entity name (exact or substring) |
+| `exact` | bool | `false` | `iexact` vs `icontains` |
+| `limit` | int | `20` | Max entities |
+
+Returns matches with outgoing/incoming relations (relation ids and peer entity ids).
+
+---
+
+## Knowledge records (REST)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/knowledge/entity/<uuid>/` | Entity JSON (`id`, `chunk_id`, `content`, …) |
+| GET | `/api/knowledge/relation/<uuid>/` | Relation JSON |
+| GET | `/api/knowledge/chunk/<uuid>/` | Chunk JSON (full Mongo text in `content`) |
+| GET | `/api/knowledge/document/<uuid>/` | Document JSON (`kind`: `doc`, full `content` text) |
+
+Optional query: `?workspace_name=` — returns `404` if the record is not in that workspace.
 
 ---
 
@@ -1014,6 +1062,9 @@ Prior search hit IDs from the same chat session are merged into later searches i
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `CHAT_COMPRESS_TOKEN_THRESHOLD` | `64000` | Trigger internal branch compression |
+| `CHAT_MAX_CONCURRENT_SEARCHES` | `8` | Max parallel Knowledge tool runs per web worker |
+| `WEB_WORKERS` | `4` | Uvicorn worker processes for ASGI |
+| `DB_CONN_MAX_AGE` | `60` | Postgres connection reuse (seconds) |
 | `CHAT_DEFAULT_SYSTEM` | (see settings) | New conversation system prompt |
 | `BASE_URL`, `API_KEY` | — | LLM provider for `Agent` |
 | `POSTGRES_*`, `MONGO_*`, Redis, Qdrant | — | Data stores (`settings.toml`, `.env`) |
@@ -1037,6 +1088,10 @@ Prior search hit IDs from the same chat session are merged into later searches i
 | GET | `/api/workspace/<workspace_name>/preprocess-status/` |
 | POST | `/api/workspace/preprocess/<workspace_name>/` |
 | GET | `/api/knowledge-graph/` |
+| GET | `/api/knowledge/entity/<uuid>/` |
+| GET | `/api/knowledge/relation/<uuid>/` |
+| GET | `/api/knowledge/chunk/<uuid>/` |
+| GET | `/api/knowledge/document/<uuid>/` |
 | GET | `/api/chat/?flagged=true` |
 | DELETE | `/api/chat/?flagged=true` |
 | GET | `/api/chat/<workspace_name>/` |

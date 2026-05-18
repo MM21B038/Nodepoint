@@ -3,14 +3,23 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from nodepoint.models import KnowledgeEntity, KnowledgeRelation
+from nodepoint.models import DocumentChunk, KnowledgeEntity, KnowledgeRelation
 from nodepoint.services.chat_context import get_accumulated_search_ids, record_search_ids
+from nodepoint.services.kg_records import (
+    CITATION_RULES,
+    citation_for_record,
+    citation_metadata_lines,
+    serialize_chunk,
+    serialize_entity,
+    serialize_relation,
+)
 
 
 def resolve_hits(hits: list[dict]) -> list[dict[str, Any]]:
-    """Load full entity/relation rows for Qdrant hits (point id = Postgres PK)."""
+    """Load entity/relation/chunk rows for Qdrant hits (point id = Postgres PK)."""
     entity_ids: list[uuid.UUID] = []
     relation_ids: list[uuid.UUID] = []
+    chunk_ids: list[uuid.UUID] = []
     scores: dict[str, float] = {}
 
     for hit in hits:
@@ -25,6 +34,8 @@ def resolve_hits(hits: list[dict]) -> list[dict[str, Any]]:
         record_type = hit.get("type") or (hit.get("payload") or {}).get("type")
         if record_type == "relation":
             relation_ids.append(uid)
+        elif record_type == "chunk":
+            chunk_ids.append(uid)
         else:
             entity_ids.append(uid)
 
@@ -32,20 +43,19 @@ def resolve_hits(hits: list[dict]) -> list[dict[str, Any]]:
 
     if entity_ids:
         for entity in KnowledgeEntity.objects.filter(id__in=entity_ids).select_related(
+            "document", "document__workspace", "chunk"
+        ):
+            rec = serialize_entity(entity)
+            rec["score"] = scores.get(str(entity.id), 0.0)
+            records.append(rec)
+
+    if chunk_ids:
+        for chunk in DocumentChunk.objects.filter(id__in=chunk_ids).select_related(
             "document", "document__workspace"
         ):
-            records.append(
-                {
-                    "kind": "entity",
-                    "id": str(entity.id),
-                    "score": scores.get(str(entity.id), 0.0),
-                    "name": entity.name,
-                    "entity_type": entity.entity_type,
-                    "attributes": entity.attributes,
-                    "workspace": entity.document.workspace.name,
-                    "file_name": entity.document.file_name,
-                }
-            )
+            rec = serialize_chunk(chunk, full_content=False)
+            rec["score"] = scores.get(str(chunk.id), 0.0)
+            records.append(rec)
 
     if relation_ids:
         for relation in KnowledgeRelation.objects.filter(id__in=relation_ids).select_related(
@@ -53,20 +63,11 @@ def resolve_hits(hits: list[dict]) -> list[dict[str, Any]]:
             "document__workspace",
             "source",
             "target",
+            "chunk",
         ):
-            records.append(
-                {
-                    "kind": "relation",
-                    "id": str(relation.id),
-                    "score": scores.get(str(relation.id), 0.0),
-                    "source": relation.source.name,
-                    "target": relation.target.name,
-                    "type_description": relation.type_description,
-                    "description": relation.description,
-                    "workspace": relation.document.workspace.name,
-                    "file_name": relation.document.file_name,
-                }
-            )
+            rec = serialize_relation(relation)
+            rec["score"] = scores.get(str(relation.id), 0.0)
+            records.append(rec)
 
     records.sort(key=lambda r: r.get("score", 0.0), reverse=True)
     return records
@@ -93,33 +94,49 @@ def format_search_document(records: list[dict[str, Any]], query: str) -> str:
     if not records:
         return (
             f'# Knowledge search: "{query}"\n\n'
-            "No matching entities or relations were found in the knowledge graph."
+            "No matching entities, relations, or chunks were found in the knowledge graph."
         )
 
-    lines = [f'# Knowledge search: "{query}"', ""]
-    for rec in records:
-        file_name = rec.get("file_name") or "unknown"
-        score = rec.get("score", 0.0)
-        lines.append(f"## [source: {file_name}]")
+    lines = [
+        f'# Knowledge search: "{query}"',
+        "",
+        f"> {CITATION_RULES}",
+        "",
+    ]
+    for i, rec in enumerate(records, start=1):
+        kind = rec.get("kind", "record")
+        scores = rec.get("scores") or {}
+        total = scores.get("total", rec.get("score", 0.0))
 
-        if rec.get("kind") == "entity":
-            lines.append(f"**Entity** (score {score:.4f})")
-            lines.append(f"- name: {rec.get('name', '')}")
+        lines.append(f"## Result {i} — {citation_for_record(rec)}")
+        lines.extend(citation_metadata_lines(rec))
+
+        if scores:
+            lines.append(
+                "- **scores**: "
+                f"total={scores.get('total', total):.4f} | "
+                f"semantic={scores.get('semantic', 0):.4f} | "
+                f"bm25={scores.get('bm25', 0):.4f} | "
+                f"fuzzy={scores.get('fuzzy', 0):.4f} | "
+                f"lexical={scores.get('lexical', 0):.4f}"
+            )
+        else:
+            lines.append(f"- **score**: {float(rec.get('score', 0.0)):.4f}")
+
+        lines.append("")
+        lines.append("**content**:")
+        if kind == "entity":
+            lines.append(rec.get("content") or "")
             if rec.get("entity_type"):
                 lines.append(f"- type: {rec['entity_type']}")
-            if rec.get("attributes"):
-                lines.append(f"- attributes: {rec['attributes']}")
-            lines.append(f"- workspace: {rec.get('workspace', '')}")
+        elif kind == "chunk":
+            lines.append(rec.get("content") or rec.get("snippet") or "")
         else:
-            lines.append(f"**Relation** (score {score:.4f})")
+            lines.append(rec.get("content") or "")
             lines.append(
-                f"- {rec.get('source', '')} — {rec.get('type_description') or 'related to'} — "
+                f"- edge: {rec.get('source', '')} — {rec.get('type_description') or 'related to'} — "
                 f"{rec.get('target', '')}"
             )
-            if rec.get("description"):
-                lines.append(f"- description: {rec['description']}")
-            lines.append(f"- workspace: {rec.get('workspace', '')}")
-
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
@@ -139,4 +156,24 @@ def build_search_document(query: str, hits: list[dict]) -> str:
 
     records = list(records_by_id.values())
     records.sort(key=lambda r: r.get("score", 0.0), reverse=True)
+    return format_search_document(records, query)
+
+
+def build_search_document_from_records(
+    query: str,
+    records: list[dict[str, Any]],
+    *,
+    merge_session: bool = True,
+) -> str:
+    if merge_session:
+        new_ids = [r["id"] for r in records if r.get("id")]
+        all_ids = merge_with_session_hits(new_ids)
+        record_search_ids(new_ids)
+        records_by_id: dict[str, dict[str, Any]] = {}
+        for rec in resolve_records_by_ids(all_ids):
+            records_by_id[rec["id"]] = rec
+        for rec in records:
+            records_by_id[rec["id"]] = rec
+        records = list(records_by_id.values())
+        records.sort(key=lambda r: r.get("score", 0.0), reverse=True)
     return format_search_document(records, query)

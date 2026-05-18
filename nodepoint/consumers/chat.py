@@ -8,7 +8,7 @@ import uuid
 from channels.generic.websocket import AsyncWebsocketConsumer
 
 from nodepoint.agent.agent import Agent
-from nodepoint.services import chat_runner, chat_storage
+from nodepoint.services import chat_runner, chat_storage_async as storage_async
 from nodepoint.services.workspace import (
     get_or_create_flagged_chat_workspace,
     list_starred_workspace_names,
@@ -48,12 +48,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 return
             self.workspace_name = workspace.name
 
-        conversation, _root = await asyncio.to_thread(
-            chat_storage.get_or_create_workspace_chat, workspace
-        )
-        active = await asyncio.to_thread(
-            chat_storage.get_active_branch, conversation.id
-        )
+        conversation, _root = await storage_async.get_or_create_workspace_chat(workspace)
+        active = await storage_async.get_active_branch(conversation.id)
 
         self.conversation_id = conversation.id
         self.active_branch_id = active.id
@@ -80,6 +76,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
     async def disconnect(self, code):
         if self._agent_task and not self._agent_task.done():
             self._agent_task.cancel()
+        if self._agent is not None:
+            await self._agent.aclose()
+            self._agent = None
 
     async def receive(self, text_data=None, bytes_data=None):
         if not text_data:
@@ -123,16 +122,13 @@ class ChatConsumer(AsyncWebsocketConsumer):
             return
 
         if self.active_branch_id is None and self.conversation_id is not None:
-            active = await asyncio.to_thread(
-                chat_storage.get_active_branch, self.conversation_id
-            )
+            active = await storage_async.get_active_branch(self.conversation_id)
             self.active_branch_id = active.id
 
         branch_id = self.active_branch_id
-        thread, _, _ = await asyncio.to_thread(chat_storage.load_thread, branch_id)
+        thread, _, _ = await storage_async.load_thread(branch_id)
         thread.addUser(content)
-        await asyncio.to_thread(
-            chat_storage.append_message,
+        await storage_async.append_message(
             branch_id,
             role="user",
             content=content,
@@ -247,7 +243,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
         except asyncio.CancelledError:
             await self.send_json({"type": "chat.cancelled"})
         except Exception as exc:
-            logger.exception("WebSocket agent run failed")
+            logger.exception(
+                "WebSocket agent run failed (conversation=%s workspace=%s)",
+                self.conversation_id,
+                self.workspace_name,
+            )
             await self.send_json({"type": "error", "message": str(exc)})
         finally:
             self._agent_task = None

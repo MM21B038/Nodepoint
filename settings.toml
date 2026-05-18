@@ -1,6 +1,7 @@
 [agent]
 model = "GLM5"
-vector = "Qwen-Embedding-8B"
+parser = "Basic"
+vector = "Qwen3-Embedding-8B"
 dim = 256
 
 [postgresql]

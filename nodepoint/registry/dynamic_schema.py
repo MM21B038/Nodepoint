@@ -31,9 +31,9 @@ def Entities(types: set):
             str,
             Field(..., description="The name of the new entity type.")
         ),
-        description=(
+        definition=(
             str,
-            Field(..., description="Description of the new entity type.")
+            Field(..., description="Definition of the new entity type.")
         ),
     )
 
@@ -46,7 +46,7 @@ def Entities(types: set):
                 description="List of extracted entities."
             )
         ),
-        new_types=(
+        newtypes=(
             List[Optional[NewType]],
             Field(
                 None,

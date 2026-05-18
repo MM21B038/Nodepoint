@@ -59,7 +59,10 @@ class UploadDocumentAPIView(APIView):
             file=uploaded_file,
         )
 
-        pipeline = enqueue_preprocess_pipeline(uploaded_document_id=document.id)
+        pipeline = enqueue_preprocess_pipeline(
+            uploaded_document_id=document.id,
+            workspace_name=workspace.name,
+        )
 
         return Response(
             {

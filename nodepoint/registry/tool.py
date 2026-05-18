@@ -407,6 +407,10 @@ class Tool:
             validated = tool_def["model"](**args)
             func = tool_def["func"]
             kwargs = validated.model_dump()
+            if tool.name.startswith("Knowledge."):
+                from nodepoint.services.chat_concurrency import run_with_search_limit
+
+                return await run_with_search_limit(func, **kwargs)
             return await asyncio.to_thread(func, **kwargs)
 
         if kind == "mcp":
