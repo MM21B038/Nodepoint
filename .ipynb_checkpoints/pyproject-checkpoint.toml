@@ -1,0 +1,33 @@
+[project]
+name = "nodepoint"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "channels>=4.2.0",
+    "channels-redis>=4.2.0",
+    "daphne>=4.1.0",
+    "django>=5.2.14",
+    "django-rq>=4.1.0",
+    "djangorestframework>=3.17.1",
+    "gunicorn>=23.0.0",
+    "mongoengine>=0.29.3",
+    "numpy>=2.4.4",
+    "psycopg[binary]>=3.3.4",
+    "pydantic>=2.13.4",
+    "python-dotenv>=1.2.2",
+    "redis>=7.4.0",
+    "qdrant-client>=1.12.1,<1.13.0",
+    "requests>=2.34.0",
+    "rq>=2.8.0",
+    "tiktoken>=0.12.0",
+    "uvicorn[standard]>=0.34.0",
+]
+
+[dependency-groups]
+dev = [
+    "fastmcp>=3.2.4",
+    "ipykernel>=7.2.0",
+    "jupyter>=1.1.1",
+]
