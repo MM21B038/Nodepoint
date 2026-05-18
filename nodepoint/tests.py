@@ -946,7 +946,7 @@ class KnowledgeEntitySearchAPITests(TestCase):
             {
                 "q": "Alcie",
                 "workspace_name": "entity-search-ws",
-                "threshold": "0.5",
+                "threshold": "0.6",
                 "depth": "1",
                 "limit": "50",
             },
@@ -955,7 +955,9 @@ class KnowledgeEntitySearchAPITests(TestCase):
         data = resp.json()
         self.assertEqual(data["query"], "Alcie")
         self.assertGreaterEqual(len(data["matches"]), 1)
-        self.assertGreaterEqual(data["matches"][0]["score"], 0.5)
+        names = {m["name"] for m in data["matches"]}
+        self.assertTrue(names & {"Alice", "Alicia"})
+        self.assertGreaterEqual(data["matches"][0]["score"], 0.6)
         graph = data["graph"]
         self.assertIn("nodes", graph)
         self.assertIn("edges", graph)
@@ -1014,6 +1016,25 @@ class KgEntitySearchServiceTests(TestCase):
         )
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0]["name"], "Nmap")
+
+    def test_typo_when_icontains_prefilter_misses(self):
+        """Alcie does not icontains-match Alice; broad sample must still find it."""
+        from nodepoint.services.kg_entity_search import fuzzy_match_entities, score_entity_name
+
+        doc = Document.objects.create(
+            workspace=self.ws,
+            file_name="noise.md",
+            file=SimpleUploadedFile("noise.md", b"x"),
+        )
+        noise = [Entity(name=f"Alert-{i}", type="TECH", attributes={}) for i in range(30)]
+        ingest_knowledge_graph(
+            doc,
+            noise + [Entity(name="Alice", type="PER", attributes={})],
+            [],
+        )
+        self.assertGreaterEqual(score_entity_name("Alcie", "Alice"), 0.6)
+        matches = fuzzy_match_entities("Alcie", ["fuzzy-svc-ws"], threshold=0.6)
+        self.assertTrue(any(m["name"] == "Alice" for m in matches))
 
 
 class WorkspaceChatAPITests(TestCase):

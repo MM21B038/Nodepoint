@@ -1075,7 +1075,7 @@ Returns matches with `score` (fuzzy mode), outgoing/incoming relations (relation
 
 ### `GET /api/knowledge/entities/search/`
 
-Fuzzy entity **name** search (rapidfuzz `token_set_ratio`) plus a subgraph around matches using `depth` and `limit`.
+Fuzzy entity **name** search (rapidfuzz WRatio / partial / token_set, plus broad candidate pool for typos) and a subgraph around matches using `depth` and `limit`.
 
 **Scope:** exactly one of `workspace_name` or `flagged=true` (same rules as knowledge-graph).
 

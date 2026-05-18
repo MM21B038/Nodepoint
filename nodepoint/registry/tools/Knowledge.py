@@ -148,7 +148,8 @@ def get_chunk_record(chunk_id: str) -> str:
     server="Knowledge",
     description=(
         "Find entities by name with related relations. "
-        "Default: fuzzy match (rapidfuzz) with threshold 0.6; set exact=true for case-insensitive exact name. "
+        "Default: fuzzy match (WRatio/partial/token_set) with threshold 0.6; typos OK when exact=false. "
+        "Set exact=true for case-insensitive exact name only. "
         "Returns ids, chunk_id, content, and relationship data."
     ),
 )

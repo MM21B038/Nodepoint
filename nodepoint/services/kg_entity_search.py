@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 from uuid import UUID
 
@@ -14,6 +15,10 @@ DEFAULT_MATCH_LIMIT = 20
 MAX_MATCH_LIMIT = 100
 DEFAULT_FUZZY_THRESHOLD = 0.6
 CANDIDATE_PREFETCH_LIMIT = 3000
+# When icontains prefilter fills this many rows, still merge a full-workspace sample for typos.
+BROADEN_PREFILTER_AT = 500
+
+_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 
 
 def parse_entity_search_params(
@@ -50,9 +55,8 @@ def parse_entity_search_params(
     return filters, threshold, match_limit
 
 
-def _candidate_entities_qs(
+def _base_entity_qs(
     workspace_names: list[str],
-    query: str,
     entity_types: list[str] | None,
 ):
     qs = KnowledgeEntity.objects.filter(
@@ -60,10 +64,109 @@ def _candidate_entities_qs(
     ).select_related("document", "document__workspace")
     if entity_types is not None:
         qs = qs.filter(entity_type__in=entity_types)
+    return qs
+
+
+def _query_tokens(query: str) -> list[str]:
+    return [t for t in _TOKEN_RE.findall(query.lower()) if len(t) >= 2]
+
+
+def score_entity_name(query: str, name: str) -> float:
+    """Best fuzzy score for entity name matching (0–1)."""
+    q = (query or "").strip()
+    n = (name or "").strip()
+    if not q or not n:
+        return 0.0
+    if q.lower() == n.lower():
+        return 1.0
+
+    scores = [
+        fuzz.WRatio(q, n) / 100.0,
+        fuzz.partial_ratio(q, n) / 100.0,
+        fuzz.token_set_ratio(q, n) / 100.0,
+        fuzz.ratio(q, n) / 100.0,
+    ]
+    # Substring / abbreviation: short query inside longer name
+    n_lower = n.lower()
+    q_lower = q.lower()
+    if len(q_lower) >= 2 and q_lower in n_lower:
+        scores.append(min(1.0, len(q_lower) / max(len(n_lower), 1) + 0.55))
+    return max(scores)
+
+
+def _merge_entities(
+    into: dict[UUID, KnowledgeEntity],
+    entities: list[KnowledgeEntity],
+    *,
+    cap: int,
+) -> None:
+    for entity in entities:
+        if entity.id not in into:
+            into[entity.id] = entity
+        if len(into) >= cap:
+            break
+
+
+def gather_entity_candidates(
+    workspace_names: list[str],
+    query: str,
+    entity_types: list[str] | None,
+    *,
+    include_broad_sample: bool = True,
+) -> list[KnowledgeEntity]:
+    """
+  Build a candidate pool for fuzzy scoring.
+
+  icontains alone misses typos (e.g. Alciedoes not match Alice). We union:
+  - full query icontains
+  - per-token icontains
+  - istartswith on first 2–3 characters
+  - optional full-workspace sample (ordered by name) for typo recovery
+    """
     q = query.strip()
+    if not q:
+        return []
+
+    base = _base_entity_qs(workspace_names, entity_types)
+    merged: dict[UUID, KnowledgeEntity] = {}
+
     if len(q) >= 2:
-        qs = qs.filter(name__icontains=q)
-    return qs.order_by("created_at", "id")[:CANDIDATE_PREFETCH_LIMIT]
+        _merge_entities(merged, list(base.filter(name__icontains=q)[:CANDIDATE_PREFETCH_LIMIT]), cap=CANDIDATE_PREFETCH_LIMIT)
+
+        prefix_len = min(3, len(q))
+        _merge_entities(
+            merged,
+            list(base.filter(name__istartswith=q[:prefix_len])[:CANDIDATE_PREFETCH_LIMIT]),
+            cap=CANDIDATE_PREFETCH_LIMIT,
+        )
+
+        for token in _query_tokens(q):
+            _merge_entities(
+                merged,
+                list(base.filter(name__icontains=token)[:CANDIDATE_PREFETCH_LIMIT]),
+                cap=CANDIDATE_PREFETCH_LIMIT,
+            )
+
+    # Typo-tolerant: always add a name-ordered sample so entities missed by icontains are scored.
+    if include_broad_sample and (
+        len(merged) < 50 or len(merged) >= BROADEN_PREFILTER_AT
+    ):
+        remaining = CANDIDATE_PREFETCH_LIMIT - len(merged)
+        if remaining > 0:
+            _merge_entities(
+                merged,
+                list(base.order_by("name", "id")[:remaining]),
+                cap=CANDIDATE_PREFETCH_LIMIT,
+            )
+
+    if not merged:
+        _merge_entities(
+            merged,
+            list(base.order_by("name", "id")[:CANDIDATE_PREFETCH_LIMIT]),
+            cap=CANDIDATE_PREFETCH_LIMIT,
+        )
+
+    return list(merged.values())
 
 
 def fuzzy_match_entities(
@@ -78,24 +181,10 @@ def fuzzy_match_entities(
     if not q or not workspace_names:
         return []
 
-    candidates = list(
-        _candidate_entities_qs(workspace_names, q, entity_types)
+    candidates = gather_entity_candidates(
+        workspace_names, q, entity_types, include_broad_sample=True
     )
-    if not candidates and len(q) >= 1:
-        qs = KnowledgeEntity.objects.filter(
-            document__workspace__name__in=workspace_names,
-        ).select_related("document", "document__workspace")
-        if entity_types is not None:
-            qs = qs.filter(entity_type__in=entity_types)
-        candidates = list(qs.order_by("created_at", "id")[:CANDIDATE_PREFETCH_LIMIT])
-
-    scored: list[tuple[KnowledgeEntity, float]] = []
-    for entity in candidates:
-        score = fuzz.token_set_ratio(q, entity.name or "") / 100.0
-        if score >= threshold:
-            scored.append((entity, score))
-
-    scored.sort(key=lambda pair: (-pair[1], pair[0].name or "", str(pair[0].id)))
+    scored = _rank_entities(q, candidates, threshold=threshold)
     top = scored[:match_limit]
 
     results: list[dict[str, Any]] = []
@@ -105,6 +194,21 @@ def fuzzy_match_entities(
         row["workspace"] = entity.document.workspace.name
         results.append(row)
     return results
+
+
+def _rank_entities(
+    query: str,
+    candidates: list[KnowledgeEntity],
+    *,
+    threshold: float,
+) -> list[tuple[KnowledgeEntity, float]]:
+    scored: list[tuple[KnowledgeEntity, float]] = []
+    for entity in candidates:
+        score = score_entity_name(query, entity.name or "")
+        if score >= threshold:
+            scored.append((entity, score))
+    scored.sort(key=lambda pair: (-pair[1], pair[0].name or "", str(pair[0].id)))
+    return scored
 
 
 def search_workspace_by_name(
