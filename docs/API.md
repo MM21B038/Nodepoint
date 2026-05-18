@@ -33,6 +33,7 @@ Complete reference for REST and WebSocket APIs. Base URL example: `http://localh
 Flagged-scope (cross-workspace)          Per-workspace
   GET  /api/chat/?flagged=true             GET  /api/chat/<name>/
   WS   /ws/chat/flagged/                   WS   /ws/chat/<name>/
+  GET  /api/knowledge-graph/entity-types/?flagged=true
   GET  /api/knowledge-graph/?flagged=true  GET  /api/knowledge-graph/?workspace_name=<name>
 ```
 
@@ -42,7 +43,8 @@ Star a workspace: `PATCH /api/workspace/<name>/toggle-flag/`.
 
 | Use | API |
 |-----|-----|
-| All entities/relations (Postgres) for every starred workspace | `GET /api/knowledge-graph/?flagged=true` |
+| Entity type counts per starred workspace | `GET /api/knowledge-graph/entity-types/?flagged=true` |
+| Filtered subgraph per starred workspace | `GET /api/knowledge-graph/?flagged=true` (+ optional `entity_type`, `depth`, `limit`) |
 | Chat metadata for starred workspaces | `GET /api/chat/summary/?flagged=true` |
 | Semantic search during **flagged-scope** chat | `Knowledge.search_graph` (starred workspaces only) |
 | Semantic search during **per-workspace** chat | `Knowledge.search_graph` (that workspace + all starred) |
@@ -419,22 +421,70 @@ Semantic search: **Qdrant** (via agent tool `Knowledge.search_graph` during chat
 
 Entities and relations are always stored per **document** under a **named workspace**. Flagged-scope chat does not create its own nodes or edges; use `?flagged=true` to read the union of all starred workspaces’ graphs.
 
-### `GET /api/knowledge-graph/`
+### `GET /api/knowledge-graph/entity-types/`
 
-Provide **exactly one** query mode.
+Provide **exactly one** scope: `workspace_name` or `flagged=true`.
 
-| Query | Result |
-|-------|--------|
-| `?workspace_name=PRAJNA` | One object: all nodes/edges for that workspace |
-| `?flagged=true` | All nodes/edges for **every** starred workspace, grouped per workspace |
-
-### Single workspace — `?workspace_name=<name>`
+Returns distinct `entity_type` values with entity counts, sorted by count descending.
 
 **Single workspace `200`**
 
 ```json
 {
   "workspace": "PRAJNA",
+  "entity_types": [
+    { "type": "PER", "count": 42 },
+    { "type": "ORG", "count": 10 }
+  ]
+}
+```
+
+**Flagged `200`**
+
+```json
+{
+  "workspaces": [
+    { "workspace": "PRAJNA", "entity_types": [{ "type": "PER", "count": 42 }] }
+  ]
+}
+```
+
+| Status | Condition |
+|--------|-----------|
+| `400` | Both or neither scope param; invalid filters on graph endpoint only |
+| `404` | Unknown `workspace_name` |
+
+---
+
+### `GET /api/knowledge-graph/`
+
+Provide **exactly one** scope: `workspace_name` or `flagged=true`.
+
+Optional filters (same for both modes; applied **per workspace** in flagged responses):
+
+| Query | Default | Max | Description |
+|-------|---------|-----|-------------|
+| `entity_type` | — | — | Comma-separated, e.g. `PER,ORG` (case-sensitive) |
+| `depth` | `1` | `5` | BFS hops from seed entities |
+| `limit` | `500` | `5000` | Max nodes per workspace |
+
+**Traversal**
+
+1. **Seeds:** entities matching `entity_type` when set; otherwise all entities in the workspace.
+2. **BFS:** expand via relations up to `depth` hops; stop at `limit` nodes.
+3. **Edges:** relations whose `source_id` and `target_id` are both in the node set (edges between seeds appear even when `depth=0`).
+
+**Single workspace `200`**
+
+```bash
+curl "http://localhost:8000/api/knowledge-graph/?workspace_name=PRAJNA&entity_type=PER,ORG&depth=1&limit=500"
+```
+
+```json
+{
+  "workspace": "PRAJNA",
+  "filters": { "entity_types": ["PER", "ORG"], "depth": 1, "limit": 500 },
+  "truncated": false,
   "nodes": [
     {
       "id": "…",
@@ -448,83 +498,61 @@ Provide **exactly one** query mode.
     }
   ],
   "edges": [
-    { "source": "Alice", "target": "Acme Corp" }
+    {
+      "id": "…",
+      "source": "Alice",
+      "target": "Acme Corp",
+      "source_id": "…",
+      "target_id": "…",
+      "type_description": "works at"
+    }
   ]
 }
 ```
 
-| Field | Notes |
-|-------|-------|
-| `nodes[]` | Full entity rows for documents in this workspace |
-| `edges[].source` / `target` | Entity **names** only (not UUIDs) |
-| `nodes[].vector` | Vector index status for that entity |
-
-### All starred workspaces — `?flagged=true`
-
-Returns **every** `KnowledgeEntity` and `KnowledgeRelation` for each workspace with `is_flag=true`, in one response. This is the REST way to load “global” KG data across starred corpora (same scope as flagged-scope chat search, but full Postgres dump, not semantic search).
-
-**Example**
+**Flagged `200`**
 
 ```bash
-curl "http://localhost:8000/api/knowledge-graph/?flagged=true"
+curl "http://localhost:8000/api/knowledge-graph/?flagged=true&entity_type=PER&limit=100"
 ```
-
-**Response `200`**
 
 ```json
 {
   "graphs": [
     {
       "workspace": "main",
-      "nodes": [
-        {
-          "id": "…",
-          "name": "Alice",
-          "entity_type": "PER",
-          "attributes": { "role": "engineer" },
-          "document_id": "…",
-          "file_name": "notes.md",
-          "vector": "COMPLETED",
-          "created_at": "2026-05-15T12:00:00Z"
-        }
-      ],
-      "edges": [
-        { "source": "Alice", "target": "Acme Corp" }
-      ]
-    },
-    {
-      "workspace": "research",
-      "nodes": [],
-      "edges": []
+      "filters": { "entity_types": ["PER"], "depth": 1, "limit": 100 },
+      "truncated": false,
+      "nodes": [...],
+      "edges": [...]
     }
   ]
 }
 ```
 
-| Field | Meaning |
-|-------|---------|
-| `graphs` | One entry per starred workspace (sorted by workspace name) |
-| `graphs[].nodes` | All entities from documents in that workspace |
-| `graphs[].edges` | All relations from documents in that workspace |
+| Field | Notes |
+|-------|-------|
+| `filters.entity_types` | `null` when no `entity_type` query param |
+| `truncated` | `true` if seeds or BFS hit `limit` |
+| `edges[]` | Includes `id`, `source_id`, `target_id`, `type_description` |
 
 **Client notes**
 
-- There is **no** single merged `nodes` / `edges` array; concatenate per workspace or render one panel per `graphs[i]`.
-- Empty `graphs: []` means no workspace is starred.
-- Empty `nodes` / `edges` for a workspace means no KG was ingested there yet (upload + preprocess).
-- Entity names may repeat across workspaces; use `id` + `workspace` (from parent object) as unique keys in UI.
+- No merged global `nodes` array; use one panel per `graphs[i]`.
+- Empty `graphs: []` — no starred workspaces (internal `__flagged_chat__` excluded).
+- Request higher `limit` / `depth` explicitly for larger subgraphs (defaults cap at 500 nodes).
 
 **Relation to chat**
 
 | API | Data |
 |-----|------|
-| `GET /api/knowledge-graph/?flagged=true` | Full entity/relation lists (Postgres) |
-| Flagged chat `Knowledge.search_graph` | Top semantic hits (Qdrant → Postgres resolve → markdown) |
+| `GET /api/knowledge-graph/?flagged=true` | Filtered Postgres subgraph per starred workspace |
+| Flagged chat `Knowledge.search_graph` | Top semantic hits (Qdrant → Postgres → markdown) |
 
 | Status | Condition |
 |--------|-----------|
-| `400` | Both or neither query param |
-| `404` | Unknown `workspace_name` (single-workspace mode only) |
+| `400` | Both or neither scope; invalid `depth`/`limit`; empty `entity_type` after parse |
+| `404` | Unknown `workspace_name` |
 
 ---
 
@@ -702,7 +730,7 @@ Reserved path segment: `flagged` is not a user workspace name.
 ### Typical client flow (flagged-scope)
 
 1. Star workspaces: `PATCH /api/workspace/main/toggle-flag/`
-2. `GET /api/knowledge-graph/?flagged=true` — optional, load all entities/relations for UI
+2. `GET /api/knowledge-graph/entity-types/?flagged=true` and `GET /api/knowledge-graph/?flagged=true&entity_type=...` — optional KG UI data
 3. `GET /api/chat/?flagged=true` — load flagged chat history
 4. Connect `ws://<host>/ws/chat/flagged/` → `chat.ready`
 5. Send `chat.send` → stream → `chat.done`
@@ -1036,11 +1064,94 @@ Returns full record markdown including content. Documents return assembled text 
 
 | Name | Type | Default | Description |
 |------|------|---------|-------------|
-| `name` | string | required | Entity name (exact or substring) |
-| `exact` | bool | `false` | `iexact` vs `icontains` |
+| `name` | string | required | Entity name to search |
+| `exact` | bool | `false` | If true, case-insensitive exact name; if false, fuzzy match |
 | `limit` | int | `20` | Max entities |
+| `threshold` | float | `0.6` | Min fuzzy score 0–1 (ignored when `exact=true`) |
 
-Returns matches with outgoing/incoming relations (relation ids and peer entity ids).
+Returns matches with `score` (fuzzy mode), outgoing/incoming relations (relation ids and peer entity ids).
+
+---
+
+### `GET /api/knowledge/entities/search/`
+
+Fuzzy entity **name** search (rapidfuzz `token_set_ratio`) plus a subgraph around matches using `depth` and `limit`.
+
+**Scope:** exactly one of `workspace_name` or `flagged=true` (same rules as knowledge-graph).
+
+| Query | Required | Default | Max | Description |
+|-------|----------|---------|-----|-------------|
+| `q` | yes | — | — | Name query (typos tolerated via fuzzy) |
+| `threshold` | no | `0.6` | `1.0` | Min match score `0`–`1` |
+| `match_limit` | no | `20` | `100` | Max ranked entity matches (seeds) |
+| `depth` | no | `1` | `5` | BFS hops from seeds into the graph |
+| `limit` | no | `500` | `5000` | Max nodes in `graph` |
+| `entity_type` | no | — | — | Comma-separated filter on candidates, e.g. `PER,ORG` |
+
+**Single workspace `200`**
+
+```bash
+curl "http://localhost:8000/api/knowledge/entities/search/?q=Alcie&workspace_name=PRAJNA&threshold=0.6&depth=1&limit=100"
+```
+
+```json
+{
+  "query": "Alcie",
+  "workspace": "PRAJNA",
+  "filters": {
+    "entity_types": null,
+    "depth": 1,
+    "limit": 100,
+    "threshold": 0.6,
+    "match_limit": 20
+  },
+  "matches": [
+    {
+      "id": "…",
+      "name": "Alice",
+      "entity_type": "PER",
+      "score": 0.92,
+      "workspace": "PRAJNA",
+      "document_id": "…",
+      "file_name": "notes.md",
+      "vector": "COMPLETED",
+      "created_at": "…"
+    }
+  ],
+  "graph": {
+    "workspace": "PRAJNA",
+    "truncated": false,
+    "nodes": […],
+    "edges": […]
+  }
+}
+```
+
+- **`matches`:** entities with `score >= threshold` (empty if none).
+- **`graph`:** BFS from match entity ids; edges are the induced subgraph on returned nodes.
+
+**Flagged `200`**
+
+```json
+{
+  "query": "Alice",
+  "filters": { "depth": 1, "limit": 500, "threshold": 0.6, "match_limit": 20, "entity_types": null },
+  "workspaces": [
+    {
+      "workspace": "main",
+      "matches": […],
+      "graph": { "workspace": "main", "truncated": false, "nodes": […], "edges": […] }
+    }
+  ]
+}
+```
+
+| Status | Condition |
+|--------|-----------|
+| `400` | Missing `q`; invalid scope; invalid `threshold` / `depth` / `limit` / `match_limit` |
+| `404` | Unknown `workspace_name` |
+
+Chat tool `Knowledge.search_entity_by_name` uses the same fuzzy matcher when `exact=false`.
 
 ---
 
@@ -1088,6 +1199,8 @@ Optional query: `?workspace_name=` — returns `404` if the record is not in tha
 | GET | `/api/workspace/<workspace_name>/preprocess-status/` |
 | POST | `/api/workspace/preprocess/<workspace_name>/` |
 | GET | `/api/knowledge-graph/` |
+| GET | `/api/knowledge-graph/entity-types/` |
+| GET | `/api/knowledge/entities/search/` |
 | GET | `/api/knowledge/entity/<uuid>/` |
 | GET | `/api/knowledge/relation/<uuid>/` |
 | GET | `/api/knowledge/chunk/<uuid>/` |

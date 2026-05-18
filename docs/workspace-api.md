@@ -4,17 +4,57 @@ REST endpoints for listing Postgres knowledge graphs and conversations per works
 
 ## Knowledge graph
 
-`GET /api/knowledge-graph/`
+Scope: provide **exactly one** of `workspace_name=<name>` or `flagged=true` (not both). Missing both → `400`.
 
-### Single workspace
+### Entity types
 
-Query: `workspace_name=<name>`
+`GET /api/knowledge-graph/entity-types/`
 
-Response:
+Lists distinct `entity_type` values with counts per workspace.
+
+**Single workspace** — `?workspace_name=PRAJNA`
 
 ```json
 {
   "workspace": "PRAJNA",
+  "entity_types": [
+    { "type": "PER", "count": 42 },
+    { "type": "ORG", "count": 10 }
+  ]
+}
+```
+
+**Flagged** — `?flagged=true`
+
+```json
+{
+  "workspaces": [
+    { "workspace": "PRAJNA", "entity_types": [{ "type": "PER", "count": 42 }] }
+  ]
+}
+```
+
+Sorted by `count` descending. `type` is `null` when the stored value is blank.
+
+### Filtered graph
+
+`GET /api/knowledge-graph/`
+
+| Query | Default | Max | Description |
+|-------|---------|-----|-------------|
+| `entity_type` | — | — | Comma-separated types, e.g. `PER,ORG` |
+| `depth` | `1` | `5` | BFS hops from seed entities |
+| `limit` | `500` | `5000` | Max nodes per workspace |
+
+**Seeds:** entities matching `entity_type` when provided; otherwise all entities in the workspace. **BFS:** expand via relations up to `depth` hops, capped at `limit` nodes. **Edges:** relations with both endpoints in the returned node set (includes edges between seeds when `depth=0`).
+
+**Single workspace** — `?workspace_name=PRAJNA&entity_type=PER,ORG&depth=1&limit=500`
+
+```json
+{
+  "workspace": "PRAJNA",
+  "filters": { "entity_types": ["PER", "ORG"], "depth": 1, "limit": 500 },
+  "truncated": false,
   "nodes": [
     {
       "id": "...",
@@ -28,29 +68,50 @@ Response:
     }
   ],
   "edges": [
-    { "source": "Alice", "target": "Acme" }
+    {
+      "id": "...",
+      "source": "Alice",
+      "target": "Acme",
+      "source_id": "...",
+      "target_id": "...",
+      "type_description": "works at"
+    }
   ]
 }
 ```
 
-Edges use entity **names** only (`source` / `target`). Nodes include full `KnowledgeEntity` fields.
-
-### Flagged workspaces
-
-Query: `flagged=true`
-
-Response:
+**Flagged** — `?flagged=true` (same optional filters; each graph object includes `filters`, `truncated`, `nodes`, `edges`)
 
 ```json
 {
   "graphs": [
-    { "workspace": "PRAJNA", "nodes": [...], "edges": [...] },
-    { "workspace": "OTHER", "nodes": [...], "edges": [...] }
+    {
+      "workspace": "PRAJNA",
+      "filters": { "entity_types": null, "depth": 1, "limit": 500 },
+      "truncated": false,
+      "nodes": [...],
+      "edges": [...]
+    }
   ]
 }
 ```
 
-Provide either `workspace_name` or `flagged=true`, not both. Missing both returns `400`.
+`truncated: true` when seed count or BFS expansion hit `limit`. Flagged scope excludes internal `__flagged_chat__` workspace.
+
+### Fuzzy entity name search
+
+`GET /api/knowledge/entities/search/`
+
+| Query | Default | Description |
+|-------|---------|-------------|
+| `q` | required | Name to search (fuzzy) |
+| `threshold` | `0.6` | Minimum score 0–1 |
+| `match_limit` | `20` | Max seed matches |
+| `depth` | `1` | Graph BFS hops from seeds |
+| `limit` | `500` | Max nodes in `graph` |
+| `entity_type` | — | Optional comma-separated filter |
+
+Returns `matches` (ranked entities with `score`) and `graph` (nodes/edges around seeds). Scope: `workspace_name` or `flagged=true`.
 
 ## Chat summary
 

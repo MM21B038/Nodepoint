@@ -21,6 +21,8 @@ from nodepoint.views.preprocess import (
 
 from nodepoint.views.chat import FlaggedChatAPIView, WorkspaceChatAPIView
 
+from nodepoint.views.kg_entity_search import KnowledgeEntitySearchAPIView
+from nodepoint.views.kg_entity_types import KnowledgeGraphEntityTypesAPIView
 from nodepoint.views.knowledge_graph import KnowledgeGraphAPIView
 from nodepoint.views.kg_record import (
     KnowledgeChunkDetailAPIView,
@@ -97,6 +99,14 @@ urlpatterns = [
         WorkspaceChatAPIView.as_view(),
     ),
 
+    path(
+        "knowledge/entities/search/",
+        KnowledgeEntitySearchAPIView.as_view(),
+    ),
+    path(
+        "knowledge-graph/entity-types/",
+        KnowledgeGraphEntityTypesAPIView.as_view(),
+    ),
     path(
         "knowledge-graph/",
         KnowledgeGraphAPIView.as_view(),

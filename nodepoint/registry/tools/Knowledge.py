@@ -147,7 +147,8 @@ def get_chunk_record(chunk_id: str) -> str:
 @Tool.tool(
     server="Knowledge",
     description=(
-        "Find entities by name (exact or substring) with related relations. "
+        "Find entities by name with related relations. "
+        "Default: fuzzy match (rapidfuzz) with threshold 0.6; set exact=true for case-insensitive exact name. "
         "Returns ids, chunk_id, content, and relationship data."
     ),
 )
@@ -155,6 +156,7 @@ def search_entity_by_name(
     name: str,
     exact: bool = False,
     limit: int = 20,
+    threshold: float = 0.6,
 ) -> str:
     workspaces = _workspace_scope()
     if not workspaces:
@@ -162,10 +164,16 @@ def search_entity_by_name(
             f'# Entity name search: "{name}"\n\n'
             "No workspace is flagged (starred) for knowledge search."
         )
+    if threshold < 0.0 or threshold > 1.0:
+        return (
+            f'# Entity name search: "{name}"\n\n'
+            "threshold must be between 0 and 1."
+        )
     matches = search_entities_by_name(
         name,
         workspaces,
         exact=exact,
         limit=limit,
+        threshold=threshold,
     )
     return format_name_search_markdown(name, matches)

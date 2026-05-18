@@ -1,6 +1,70 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Any
+from uuid import UUID
+
+from django.db.models import Count, Q
+
 from nodepoint.models import KnowledgeEntity, KnowledgeRelation, Workspace
+from nodepoint.services.workspace import get_flagged_workspaces_qs
+
+DEFAULT_GRAPH_LIMIT = 500
+DEFAULT_GRAPH_DEPTH = 1
+MAX_GRAPH_LIMIT = 5000
+MAX_GRAPH_DEPTH = 5
+
+
+@dataclass(frozen=True)
+class GraphFilters:
+    entity_types: list[str] | None
+    depth: int
+    limit: int
+
+    def as_response_dict(self) -> dict[str, Any]:
+        return {
+            "entity_types": self.entity_types,
+            "depth": self.depth,
+            "limit": self.limit,
+        }
+
+
+def parse_entity_types_param(raw: str | None) -> list[str] | None:
+    if raw is None or not str(raw).strip():
+        return None
+    types = [part.strip() for part in str(raw).split(",") if part.strip()]
+    if not types:
+        raise ValueError("entity_type must include at least one non-empty type")
+    return types
+
+
+def parse_graph_filters(
+    *,
+    entity_type_raw: str | None,
+    depth_raw: str | None,
+    limit_raw: str | None,
+) -> GraphFilters:
+    entity_types = parse_entity_types_param(entity_type_raw)
+
+    depth = DEFAULT_GRAPH_DEPTH
+    if depth_raw is not None and str(depth_raw).strip():
+        try:
+            depth = int(depth_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("depth must be an integer") from exc
+        if depth < 0 or depth > MAX_GRAPH_DEPTH:
+            raise ValueError(f"depth must be between 0 and {MAX_GRAPH_DEPTH}")
+
+    limit = DEFAULT_GRAPH_LIMIT
+    if limit_raw is not None and str(limit_raw).strip():
+        try:
+            limit = int(limit_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("limit must be an integer") from exc
+        if limit < 1 or limit > MAX_GRAPH_LIMIT:
+            raise ValueError(f"limit must be between 1 and {MAX_GRAPH_LIMIT}")
+
+    return GraphFilters(entity_types=entity_types, depth=depth, limit=limit)
 
 
 def serialize_entity(entity: KnowledgeEntity) -> dict:
@@ -18,34 +82,284 @@ def serialize_entity(entity: KnowledgeEntity) -> dict:
 
 def serialize_edge(relation: KnowledgeRelation) -> dict:
     return {
+        "id": str(relation.id),
         "source": relation.source.name,
         "target": relation.target.name,
+        "source_id": str(relation.source_id),
+        "target_id": str(relation.target_id),
+        "type_description": relation.type_description,
     }
 
 
-def build_workspace_graph(workspace: Workspace) -> dict:
-    entities = (
+def _entity_types_rows(qs) -> list[dict[str, Any]]:
+    rows = (
+        qs.values("entity_type")
+        .annotate(count=Count("id"))
+        .order_by("-count", "entity_type")
+    )
+    return [{"type": row["entity_type"], "count": row["count"]} for row in rows]
+
+
+def list_entity_types_for_workspace(workspace: Workspace) -> dict:
+    qs = KnowledgeEntity.objects.filter(document__workspace=workspace)
+    return {
+        "workspace": workspace.name,
+        "entity_types": _entity_types_rows(qs),
+    }
+
+
+def list_entity_types_for_workspace_name(name: str) -> dict:
+    workspace = Workspace.objects.get(name=name)
+    return list_entity_types_for_workspace(workspace)
+
+
+def list_entity_types_for_flagged_workspaces() -> dict:
+    workspaces = get_flagged_workspaces_qs().order_by("name")
+    return {
+        "workspaces": [
+            {
+                "workspace": ws.name,
+                "entity_types": _entity_types_rows(
+                    KnowledgeEntity.objects.filter(document__workspace=ws)
+                ),
+            }
+            for ws in workspaces
+        ]
+    }
+
+
+def _seed_entities_qs(workspace: Workspace, entity_types: list[str] | None):
+    qs = (
         KnowledgeEntity.objects.filter(document__workspace=workspace)
         .select_related("document")
-        .order_by("created_at")
+        .order_by("created_at", "id")
     )
-    relations = (
+    if entity_types is not None:
+        qs = qs.filter(entity_type__in=entity_types)
+    return qs
+
+
+def _fetch_neighbors(
+    workspace: Workspace,
+    frontier_ids: set[UUID],
+) -> list[KnowledgeRelation]:
+    if not frontier_ids:
+        return []
+    return list(
         KnowledgeRelation.objects.filter(document__workspace=workspace)
-        .select_related("source", "target")
-        .order_by("created_at")
+        .filter(Q(source_id__in=frontier_ids) | Q(target_id__in=frontier_ids))
+        .select_related("source", "target", "document")
+        .distinct()
+    )
+
+
+def build_graph_from_seed_ids(
+    workspace: Workspace,
+    seed_ids: list[UUID],
+    *,
+    depth: int,
+    limit: int,
+    entity_types: list[str] | None = None,
+) -> dict:
+    """BFS subgraph from explicit seed entity ids (empty seeds → empty graph)."""
+    if not seed_ids:
+        return {
+            "workspace": workspace.name,
+            "truncated": False,
+            "nodes": [],
+            "edges": [],
+        }
+
+    seed_qs = (
+        KnowledgeEntity.objects.filter(
+            document__workspace=workspace,
+            id__in=seed_ids,
+        )
+        .select_related("document")
+        .order_by("created_at", "id")
+    )
+    if entity_types is not None:
+        seed_qs = seed_qs.filter(entity_type__in=entity_types)
+    all_seeds = list(seed_qs)
+
+    truncated = False
+    if len(all_seeds) > limit:
+        truncated = True
+        seeds = all_seeds[:limit]
+    else:
+        seeds = all_seeds
+
+    nodes_by_id: dict[UUID, KnowledgeEntity] = {e.id: e for e in seeds}
+    frontier_ids: set[UUID] = set(nodes_by_id)
+
+    for _hop in range(depth):
+        if len(nodes_by_id) >= limit:
+            truncated = True
+            break
+        if not frontier_ids:
+            break
+
+        relations = _fetch_neighbors(workspace, frontier_ids)
+        next_frontier: set[UUID] = set()
+        for rel in relations:
+            for entity in (rel.source, rel.target):
+                eid = entity.id
+                if eid in nodes_by_id:
+                    continue
+                if len(nodes_by_id) >= limit:
+                    truncated = True
+                    break
+                nodes_by_id[eid] = entity
+                next_frontier.add(eid)
+            if truncated:
+                break
+        if truncated:
+            break
+        frontier_ids = next_frontier
+
+    node_ids = set(nodes_by_id)
+    edges: list[dict] = []
+    seen_edge_ids: set[UUID] = set()
+    if node_ids:
+        relations = (
+            KnowledgeRelation.objects.filter(document__workspace=workspace)
+            .filter(source_id__in=node_ids, target_id__in=node_ids)
+            .select_related("source", "target")
+            .order_by("created_at", "id")
+        )
+        for rel in relations:
+            if rel.id in seen_edge_ids:
+                continue
+            seen_edge_ids.add(rel.id)
+            edges.append(serialize_edge(rel))
+
+    ordered_nodes = sorted(
+        nodes_by_id.values(),
+        key=lambda e: (e.created_at, e.id),
     )
     return {
         "workspace": workspace.name,
-        "nodes": [serialize_entity(e) for e in entities],
-        "edges": [serialize_edge(r) for r in relations],
+        "truncated": truncated,
+        "nodes": [serialize_entity(e) for e in ordered_nodes],
+        "edges": edges,
     }
 
 
-def build_graph_for_workspace_name(name: str) -> dict:
+def build_filtered_workspace_graph(
+    workspace: Workspace,
+    filters: GraphFilters,
+) -> dict:
+    seed_qs = _seed_entities_qs(workspace, filters.entity_types)
+    all_seeds = list(seed_qs)
+    truncated = False
+
+    if len(all_seeds) > filters.limit:
+        truncated = True
+        seeds = all_seeds[: filters.limit]
+    else:
+        seeds = all_seeds
+
+    nodes_by_id: dict[UUID, KnowledgeEntity] = {e.id: e for e in seeds}
+    frontier_ids: set[UUID] = set(nodes_by_id)
+
+    for _hop in range(filters.depth):
+        if len(nodes_by_id) >= filters.limit:
+            truncated = True
+            break
+        if not frontier_ids:
+            break
+
+        relations = _fetch_neighbors(workspace, frontier_ids)
+        next_frontier: set[UUID] = set()
+        for rel in relations:
+            for entity in (rel.source, rel.target):
+                eid = entity.id
+                if eid in nodes_by_id:
+                    continue
+                if len(nodes_by_id) >= filters.limit:
+                    truncated = True
+                    break
+                nodes_by_id[eid] = entity
+                next_frontier.add(eid)
+            if truncated:
+                break
+        if truncated:
+            break
+        frontier_ids = next_frontier
+
+    node_ids = set(nodes_by_id)
+    edges: list[dict] = []
+    seen_edge_ids: set[UUID] = set()
+    if node_ids:
+        relations = (
+            KnowledgeRelation.objects.filter(document__workspace=workspace)
+            .filter(source_id__in=node_ids, target_id__in=node_ids)
+            .select_related("source", "target")
+            .order_by("created_at", "id")
+        )
+        for rel in relations:
+            if rel.id in seen_edge_ids:
+                continue
+            seen_edge_ids.add(rel.id)
+            edges.append(serialize_edge(rel))
+
+    ordered_nodes = sorted(
+        nodes_by_id.values(),
+        key=lambda e: (e.created_at, e.id),
+    )
+    return {
+        "workspace": workspace.name,
+        "filters": filters.as_response_dict(),
+        "truncated": truncated,
+        "nodes": [serialize_entity(e) for e in ordered_nodes],
+        "edges": edges,
+    }
+
+
+def build_filtered_graph_for_workspace_name(
+    name: str,
+    filters: GraphFilters,
+) -> dict:
     workspace = Workspace.objects.get(name=name)
-    return build_workspace_graph(workspace)
+    return build_filtered_workspace_graph(workspace, filters)
+
+
+def build_filtered_graphs_for_flagged_workspaces(
+    filters: GraphFilters,
+) -> list[dict]:
+    workspaces = get_flagged_workspaces_qs().order_by("name")
+    return [build_filtered_workspace_graph(ws, filters) for ws in workspaces]
+
+
+# Legacy helpers (delegate to filtered builder with defaults)
+
+def build_workspace_graph(workspace: Workspace) -> dict:
+    return build_filtered_workspace_graph(
+        workspace,
+        GraphFilters(
+            entity_types=None,
+            depth=DEFAULT_GRAPH_DEPTH,
+            limit=DEFAULT_GRAPH_LIMIT,
+        ),
+    )
+
+
+def build_graph_for_workspace_name(name: str) -> dict:
+    return build_filtered_graph_for_workspace_name(
+        name,
+        GraphFilters(
+            entity_types=None,
+            depth=DEFAULT_GRAPH_DEPTH,
+            limit=DEFAULT_GRAPH_LIMIT,
+        ),
+    )
 
 
 def build_graphs_for_flagged_workspaces() -> list[dict]:
-    workspaces = Workspace.objects.filter(is_flag=True).order_by("name")
-    return [build_workspace_graph(ws) for ws in workspaces]
+    return build_filtered_graphs_for_flagged_workspaces(
+        GraphFilters(
+            entity_types=None,
+            depth=DEFAULT_GRAPH_DEPTH,
+            limit=DEFAULT_GRAPH_LIMIT,
+        ),
+    )

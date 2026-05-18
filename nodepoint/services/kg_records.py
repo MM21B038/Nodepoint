@@ -236,20 +236,38 @@ def search_entities_by_name(
     *,
     exact: bool = False,
     limit: int = 20,
+    threshold: float = 0.6,
 ) -> list[dict[str, Any]]:
     if not workspaces or not name.strip():
         return []
 
-    qs = KnowledgeEntity.objects.filter(
-        document__workspace__name__in=workspaces,
-    ).select_related("document", "document__workspace", "chunk")
+    scores_by_id: dict[str, Any] = {}
     if exact:
-        qs = qs.filter(name__iexact=name.strip())
+        qs = KnowledgeEntity.objects.filter(
+            document__workspace__name__in=workspaces,
+            name__iexact=name.strip(),
+        ).select_related("document", "document__workspace", "chunk")
+        entities = list(qs[:limit])
+        entity_ids = [e.id for e in entities]
     else:
-        qs = qs.filter(name__icontains=name.strip())
-    entities = list(qs[:limit])
+        from nodepoint.services.kg_entity_search import fuzzy_match_entities
 
-    entity_ids = [e.id for e in entities]
+        fuzzy_rows = fuzzy_match_entities(
+            name,
+            workspaces,
+            threshold=threshold,
+            match_limit=limit,
+        )
+        if not fuzzy_rows:
+            return []
+        scores_by_id = {row["id"]: row.get("score") for row in fuzzy_rows}
+        entity_ids = [uuid.UUID(row["id"]) for row in fuzzy_rows]
+        entities = list(
+            KnowledgeEntity.objects.filter(id__in=entity_ids)
+            .select_related("document", "document__workspace", "chunk")
+        )
+        order = {row["id"]: i for i, row in enumerate(fuzzy_rows)}
+        entities.sort(key=lambda e: order.get(str(e.id), 999))
     outgoing = KnowledgeRelation.objects.filter(source_id__in=entity_ids).select_related(
         "target", "source"
     )
@@ -286,6 +304,9 @@ def search_entities_by_name(
     for entity in entities:
         rec = serialize_entity(entity)
         rec["relations"] = relations_by_entity.get(entity.id, [])
+        score = scores_by_id.get(str(entity.id))
+        if score is not None:
+            rec["score"] = score
         results.append(rec)
     return results
 
@@ -346,6 +367,8 @@ def format_name_search_markdown(name: str, matches: list[dict[str, Any]]) -> str
         lines.append(f"## Match {i} — {citation_for_record(rec)}")
         lines.extend(citation_metadata_lines(rec))
         lines.append(f"- **name**: {rec.get('name', '')}")
+        if rec.get("score") is not None:
+            lines.append(f"- **score**: {rec['score']}")
         if rec.get("entity_type"):
             lines.append(f"- **type**: {rec['entity_type']}")
         lines.append("")

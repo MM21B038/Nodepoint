@@ -727,11 +727,17 @@ class KgGraphServiceTests(TestCase):
         self.assertEqual(graph["workspace"], "flagged-ws")
         self.assertEqual(len(graph["nodes"]), 2)
         self.assertEqual(len(graph["edges"]), 1)
+        self.assertIn("filters", graph)
+        self.assertIn("truncated", graph)
         node = graph["nodes"][0]
         self.assertIn("id", node)
         self.assertIn("name", node)
         self.assertIn("file_name", node)
-        self.assertEqual(graph["edges"][0], {"source": "Alice", "target": "Bob"})
+        edge = graph["edges"][0]
+        self.assertEqual(edge["source"], "Alice")
+        self.assertEqual(edge["target"], "Bob")
+        self.assertIn("source_id", edge)
+        self.assertIn("target_id", edge)
 
     def test_flagged_bulk_excludes_non_flagged(self):
         graphs = kg_graph.build_graphs_for_flagged_workspaces()
@@ -739,20 +745,50 @@ class KgGraphServiceTests(TestCase):
         self.assertIn("flagged-ws", names)
         self.assertNotIn("other-ws", names)
 
+    def test_filtered_entity_type_and_depth_zero(self):
+        filters = kg_graph.GraphFilters(entity_types=["ORG"], depth=0, limit=500)
+        graph = kg_graph.build_filtered_workspace_graph(self.flagged_ws, filters)
+        self.assertEqual(len(graph["nodes"]), 0)
+        self.assertEqual(len(graph["edges"]), 0)
+
+    def test_list_entity_types(self):
+        payload = kg_graph.list_entity_types_for_workspace(self.flagged_ws)
+        types = {row["type"]: row["count"] for row in payload["entity_types"]}
+        self.assertEqual(types["PER"], 2)
+
 
 class KnowledgeGraphAPITests(TestCase):
     def setUp(self):
         self.client = APIClient()
         self.ws = Workspace.objects.create(name="api-kg-ws", is_flag=True)
+        self.ws2 = Workspace.objects.create(name="api-kg-ws-2", is_flag=True)
         self.doc = Document.objects.create(
             workspace=self.ws,
             file_name="doc.md",
             file=SimpleUploadedFile("doc.md", b"x"),
         )
+        entities = [
+            Entity(name="Alice", type="PER", attributes={}),
+            Entity(name="Acme", type="ORG", attributes={}),
+        ]
+        relations = [
+            Relation(
+                source="Alice",
+                target="Acme",
+                type_description="works at",
+                description="Alice works at Acme.",
+            ),
+        ]
+        ingest_knowledge_graph(self.doc, entities, relations)
+        doc2 = Document.objects.create(
+            workspace=self.ws2,
+            file_name="other.md",
+            file=SimpleUploadedFile("other.md", b"y"),
+        )
         ingest_knowledge_graph(
-            self.doc,
-            entities, 
-            relations,
+            doc2,
+            [Entity(name="Bob", type="PER", attributes={})],
+            [],
         )
 
     def test_get_by_workspace_name(self):
@@ -760,18 +796,224 @@ class KnowledgeGraphAPITests(TestCase):
             "/api/knowledge-graph/", {"workspace_name": "api-kg-ws"}
         )
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()["workspace"], "api-kg-ws")
-        self.assertEqual(len(resp.json()["nodes"]), 1)
+        data = resp.json()
+        self.assertEqual(data["workspace"], "api-kg-ws")
+        self.assertEqual(len(data["nodes"]), 2)
+        self.assertEqual(data["filters"]["depth"], 1)
+        self.assertEqual(data["filters"]["limit"], 500)
 
     def test_get_flagged(self):
         resp = self.client.get("/api/knowledge-graph/", {"flagged": "true"})
         self.assertEqual(resp.status_code, 200)
         workspaces = [g["workspace"] for g in resp.json()["graphs"]]
         self.assertIn("api-kg-ws", workspaces)
+        self.assertIn("api-kg-ws-2", workspaces)
+
+    def test_entity_type_filter_per_only(self):
+        resp = self.client.get(
+            "/api/knowledge-graph/",
+            {"workspace_name": "api-kg-ws", "entity_type": "PER", "depth": "0"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(len(data["nodes"]), 1)
+        self.assertEqual(data["nodes"][0]["name"], "Alice")
+        self.assertEqual(data["edges"], [])
+
+    def test_entity_type_csv_and_depth_one(self):
+        resp = self.client.get(
+            "/api/knowledge-graph/",
+            {
+                "workspace_name": "api-kg-ws",
+                "entity_type": "PER,ORG",
+                "depth": "1",
+                "limit": "500",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        names = {n["name"] for n in data["nodes"]}
+        self.assertEqual(names, {"Alice", "Acme"})
+        self.assertEqual(len(data["edges"]), 1)
+
+    def test_limit_truncated(self):
+        resp = self.client.get(
+            "/api/knowledge-graph/",
+            {"workspace_name": "api-kg-ws", "limit": "1", "depth": "0"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(len(data["nodes"]), 1)
+        self.assertTrue(data["truncated"])
+
+    def test_invalid_depth_returns_400(self):
+        resp = self.client.get(
+            "/api/knowledge-graph/",
+            {"workspace_name": "api-kg-ws", "depth": "99"},
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_empty_entity_type_returns_400(self):
+        resp = self.client.get(
+            "/api/knowledge-graph/",
+            {"workspace_name": "api-kg-ws", "entity_type": "  , "},
+        )
+        self.assertEqual(resp.status_code, 400)
 
     def test_missing_params_returns_400(self):
         resp = self.client.get("/api/knowledge-graph/")
         self.assertEqual(resp.status_code, 400)
+
+
+class KnowledgeGraphEntityTypesAPITests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.ws = Workspace.objects.create(name="types-ws", is_flag=True)
+        self.doc = Document.objects.create(
+            workspace=self.ws,
+            file_name="doc.md",
+            file=SimpleUploadedFile("doc.md", b"x"),
+        )
+        ingest_knowledge_graph(
+            self.doc,
+            [
+                Entity(name="Alice", type="PER", attributes={}),
+                Entity(name="Bob", type="PER", attributes={}),
+                Entity(name="Acme", type="ORG", attributes={}),
+            ],
+            [],
+        )
+
+    def test_entity_types_by_workspace(self):
+        resp = self.client.get(
+            "/api/knowledge-graph/entity-types/",
+            {"workspace_name": "types-ws"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["workspace"], "types-ws")
+        types = {row["type"]: row["count"] for row in data["entity_types"]}
+        self.assertEqual(types["PER"], 2)
+        self.assertEqual(types["ORG"], 1)
+
+    def test_entity_types_flagged(self):
+        resp = self.client.get(
+            "/api/knowledge-graph/entity-types/", {"flagged": "true"}
+        )
+        self.assertEqual(resp.status_code, 200)
+        names = [w["workspace"] for w in resp.json()["workspaces"]]
+        self.assertIn("types-ws", names)
+
+    def test_entity_types_missing_scope_400(self):
+        resp = self.client.get("/api/knowledge-graph/entity-types/")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_entity_types_unknown_workspace_404(self):
+        resp = self.client.get(
+            "/api/knowledge-graph/entity-types/",
+            {"workspace_name": "missing"},
+        )
+        self.assertEqual(resp.status_code, 404)
+
+
+class KnowledgeEntitySearchAPITests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.ws = Workspace.objects.create(name="entity-search-ws", is_flag=True)
+        self.doc = Document.objects.create(
+            workspace=self.ws,
+            file_name="doc.md",
+            file=SimpleUploadedFile("doc.md", b"x"),
+        )
+        entities = [
+            Entity(name="Alice", type="PER", attributes={}),
+            Entity(name="Alicia", type="PER", attributes={}),
+            Entity(name="Acme Corp", type="ORG", attributes={}),
+        ]
+        relations = [
+            Relation(
+                source="Alice",
+                target="Acme Corp",
+                type_description="works at",
+                description="Alice works at Acme.",
+            ),
+        ]
+        ingest_knowledge_graph(self.doc, entities, relations)
+
+    def test_fuzzy_search_returns_matches_and_graph(self):
+        resp = self.client.get(
+            "/api/knowledge/entities/search/",
+            {
+                "q": "Alcie",
+                "workspace_name": "entity-search-ws",
+                "threshold": "0.5",
+                "depth": "1",
+                "limit": "50",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["query"], "Alcie")
+        self.assertGreaterEqual(len(data["matches"]), 1)
+        self.assertGreaterEqual(data["matches"][0]["score"], 0.5)
+        graph = data["graph"]
+        self.assertIn("nodes", graph)
+        self.assertIn("edges", graph)
+
+    def test_threshold_excludes_weak_matches(self):
+        resp = self.client.get(
+            "/api/knowledge/entities/search/",
+            {
+                "q": "zzz",
+                "workspace_name": "entity-search-ws",
+                "threshold": "0.9",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["matches"], [])
+        self.assertEqual(resp.json()["graph"]["nodes"], [])
+
+    def test_missing_q_returns_400(self):
+        resp = self.client.get(
+            "/api/knowledge/entities/search/",
+            {"workspace_name": "entity-search-ws"},
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_flagged_scope(self):
+        resp = self.client.get(
+            "/api/knowledge/entities/search/",
+            {"q": "Alice", "flagged": "true"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        names = [w["workspace"] for w in resp.json()["workspaces"]]
+        self.assertIn("entity-search-ws", names)
+
+
+class KgEntitySearchServiceTests(TestCase):
+    def setUp(self):
+        self.ws = Workspace.objects.create(name="fuzzy-svc-ws")
+        self.doc = Document.objects.create(
+            workspace=self.ws,
+            file_name="d.md",
+            file=SimpleUploadedFile("d.md", b"x"),
+        )
+        ingest_knowledge_graph(
+            self.doc,
+            [Entity(name="Nmap", type="TOOL", attributes={})],
+            [],
+        )
+
+    def test_fuzzy_match_typo(self):
+        from nodepoint.services.kg_entity_search import fuzzy_match_entities
+
+        matches = fuzzy_match_entities(
+            "Nmapp",
+            ["fuzzy-svc-ws"],
+            threshold=0.6,
+        )
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["name"], "Nmap")
 
 
 class WorkspaceChatAPITests(TestCase):

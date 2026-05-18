@@ -132,7 +132,7 @@ def ingest_knowledge_graph_for_chunk(
                 document=doc,
                 chunk=chunk,
                 name=entity.name,
-                entity_type=entity.type if entity.type != "OTHER" else entity.newtype,
+                entity_type=entity.newtype if entity.type == "OTHER" and entity.newtype.strip() != "" and entity.newtype is not None else entity.type,
                 attributes=entity.attributes or {},
             )
             entity_by_name[entity.name] = row
