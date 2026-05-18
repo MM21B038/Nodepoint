@@ -25,5 +25,5 @@ RUN chmod +x docker/entrypoint.sh
 
 EXPOSE 8000
 
-ENTRYPOINT ["docker/entrypoint.sh"]
+ENTRYPOINT ["/bin/sh", "/app/docker/entrypoint.sh"]
 CMD ["/app/.venv/bin/uvicorn", "config.asgi:application", "--host", "0.0.0.0", "--port", "8000"]

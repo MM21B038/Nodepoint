@@ -6,7 +6,7 @@ from rq import Retry
 from nodepoint.models import Document
 from nodepoint.enums import Status
 from nodepoint.backend.content_extractor import read_document_content
-from nodepoint.backend.kg_builder import extract_knowledge_graph, ingest_knowledge_graph
+from nodepoint.backend.kg_builder import split_doc, extract_knowledge_graph, ingest_knowledge_graph
 from nodepoint.mongo.manager import ingest_document
 
 logger = logging.getLogger(__name__)
@@ -47,14 +47,23 @@ def process_doc(doc_id, filepath):
         Document.objects.filter(id=doc_id).update(content=True)
         logger.info("Mongo ingest succeeded for document %s", doc_id)
 
-        try:
-            graph = extract_knowledge_graph(content)
-        except Exception:
-            Document.objects.filter(id=doc_id).update(status=Status.FAILED)
-            logger.exception("Knowledge graph extraction failed for document %s", doc_id)
-            return
+        entities: list = []
+        relations: list = []
 
-        ok, entity_ids, relation_ids = ingest_knowledge_graph(doc, graph)
+        chunks = split_doc(content)
+        
+        for idx, chunk in enumerate(chunks):
+            logger.info("Processing chunk %d / %d for document %s", idx, len(chunks), doc_id)
+            try:
+                chunk_entities, chunk_relations = extract_knowledge_graph(chunk)
+                entities.extend(chunk_entities)
+                relations.extend(chunk_relations)
+            except Exception:
+                Document.objects.filter(id=doc_id).update(status=Status.FAILED)
+                logger.exception("Knowledge graph extraction failed %s / %s for document %s", idx, len(chunks), doc_id)
+                return
+
+        ok, entity_ids, relation_ids = ingest_knowledge_graph(doc, entities, relations)
         if not ok:
             Document.objects.filter(id=doc_id).update(status=Status.FAILED)
             logger.error("Knowledge graph ingest failed for document %s", doc_id)

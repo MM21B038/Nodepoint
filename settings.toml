@@ -1,7 +1,6 @@
 [agent]
-model = "GLM5"
-vector = "Qwen3-Embedding-8B"
-dim = 256
+model = "nvidia/nemotron-3-super-120b-a12b:free"
+vector = "nvidia/llama-nemotron-embed-vl-1b-v2:free"
 
 [postgresql]
 name = "nodepoint"
@@ -27,4 +26,4 @@ db = 0
 host = "localhost"
 port = 6333
 collection_name = "nodepoint"
-vector_size = 256
+vector_size = 2048

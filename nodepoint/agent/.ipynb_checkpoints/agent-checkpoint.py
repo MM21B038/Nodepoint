@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import difflib
 import json
-from json_repair import repair_json
 import logging
 import os
 import tomllib
@@ -15,9 +14,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Type, Union, cast
 import requests
 from dotenv import load_dotenv
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
+
 from .schema import *
 from nodepoint.registry import Thread, Tool
+
 from nodepoint.settings_loader import settings_path as nodepoint_settings_path
 
 load_dotenv()
@@ -473,7 +474,7 @@ class Agent:
         model: str | None = None,
         tools: List[Dict[str, Any]] | None = None,
         temperature: float = 1.2,
-        reasoning: str = "low",
+        reasoning: str = "medium",
         stream: bool = False,
     ) -> Union[Iterator[dict[str, Any]], AgentToolCallsResult, AgentTextResult]:
         model = self._resolve_model(model, self.model)
@@ -484,7 +485,7 @@ class Agent:
             "messages": messages.to_json(),
             "stream": bool(stream),
             "temperature": temperature,
-            "reasoning": {"effort": reasoning},
+            #"reasoning": {"effort": reasoning},
         }
         if tools is not None:
             payload["tools"] = tools
@@ -492,17 +493,12 @@ class Agent:
         if stream:
             return self._request_stream("/chat/completions", payload)
 
-        raw_response = self._request("POST", "/chat/completions", payload)
-
-        if "error" in raw_response:
-            raise RuntimeError(
-                f"API Error: {raw_response['error']}"
-            )
-
-        response = ChatCompletionResponse.model_validate(raw_response)
+        response = ChatCompletionResponse.model_validate(
+            self._request("POST", "/chat/completions", payload)
+        )
         usage = response.usage
         choice = response.choices[0]
-        finish_reason = choice.finish_reason or "stop"
+        finish_reason = choice.finish_reason
         msg = choice.message
 
         reasoning_text = msg.reasoning_content or msg.reasoning or ""
@@ -536,7 +532,7 @@ class Agent:
         model: str | None = None,
         tools: List[Dict[str, Any]] | None = None,
         temperature: float = 1.2,
-        reasoning: str = "low",
+        reasoning: str = "medium",
     ) -> Iterator[dict[str, Any]]:
         """
         Convenience wrapper for streaming. Yields raw SSE JSON events.
@@ -559,7 +555,7 @@ class Agent:
         model: str | None = None,
         tools: List[Dict[str, Any]] | None = None,
         temperature: float = 1.2,
-        reasoning: str = "low",
+        reasoning: str = "medium",
         stream: bool = False,
     ) -> Union[AgentToolCallsResult, AgentTextResult]:
         if stream:
@@ -575,7 +571,7 @@ class Agent:
         model: str | None = None,
         tools: List[Dict[str, Any]] | None = None,
         temperature: float = 1.2,
-        reasoning: str = "low",
+        reasoning: str = "medium",
     ) -> AsyncIterator[dict[str, Any]]:
         """
         Async wrapper around streaming generator.
@@ -615,7 +611,7 @@ class Agent:
         model: str | None = None,
         tools: List[Dict[str, Any]] | None = None,
         temperature: float = 1.2,
-        reasoning: str = "low",
+        reasoning: str = "medium",
         *,
         emit_terminal_done: bool = True,
     ) -> AsyncIterator[SingleTurnStreamEvent]:
@@ -682,7 +678,7 @@ class Agent:
         model: str | None = None,
         tools: List[Dict[str, Any]] | None = None,
         temperature: float = 1.2,
-        reasoning: str = "low",
+        reasoning: str = "medium",
         max_tool_rounds: int = 25,
         register_mcp_tools: bool = True,
     ) -> AsyncIterator[AgentStreamEvent]:
@@ -769,7 +765,7 @@ class Agent:
         model: str | None = None,
         tools: List[Dict[str, Any]] | None = None,
         temperature: float = 1.2,
-        reasoning: str = "low",
+        reasoning: str = "medium",
         max_tool_rounds: int = 25,
         register_mcp_tools: bool = True,
     ) -> Union[AgentToolCallsResult, AgentTextResult, AgentMaxRoundsResult]:
@@ -813,9 +809,9 @@ class Agent:
         model: str | None = None,
         response_schema: Type[BaseModel] | None = None,
         response_format: Dict[str, Any] | None = None,
-        temperature: float = 0.3,
-        reasoning: str = "low",
-    ) -> Union[AgentParseEmptyResult, AgentParseSuccessResult, AgentParseErrorResult, AgentJsonParseSuccessResult]:
+        temperature: float = 1.2,
+        reasoning: str = "medium",
+    ) -> Union[AgentParseEmptyResult, AgentParseSuccessResult, AgentParseErrorResult]:
         model = self._resolve_model(model, self.model)
         self._validate_model(model)
 
@@ -824,7 +820,6 @@ class Agent:
                 "type": "json_schema",
                 "json_schema": {
                     "name": response_schema.__name__,
-                    "strict": True,
                     "schema": response_schema.model_json_schema(),
                 },
             }
@@ -836,79 +831,40 @@ class Agent:
             "messages": messages.to_json(),
             "stream": False,
             "temperature": temperature,
+            #"reasoning": {"effort": reasoning},
             "response_format": response_format,
-            "reasoning": {"effort": reasoning}
         }
 
-        raw_response = self._request("POST", "/chat/completions", payload)
-
-        if "error" in raw_response:
-            raise RuntimeError(
-                f"API Error: {raw_response['error']}"
-            )
-
-        response = ChatCompletionResponse.model_validate(raw_response)
+        response = ChatCompletionResponse.model_validate(
+            self._request("POST", "/chat/completions", payload)
+        )
         usage = response.usage
         choice = response.choices[0]
+        finish_reason = choice.finish_reason
         msg = choice.message
-        finish_reason = choice.finish_reason or "stop"
 
         reasoning_text = msg.reasoning_content or msg.reasoning or ""
         content = msg.content
-        
-        if finish_reason != "stop":
 
-            if finish_reason == "length":
-                return AgentParseErrorResult(
-                    reasoning=reasoning_text,
-                    message=msg,
-                    usage=response.usage,
-                    error=(
-                        "Generation truncated (finish_reason='length'). "
-                        "Increase max_tokens or reduce input size."
-                    ),
-                )
-            
-            elif finish_reason == "content_filter":
-                return AgentParseErrorResult(
-                    reasoning=reasoning_text,
-                    message=msg,
-                    usage=response.usage,
-                    error="Content filtered",
-                )
-            
-            return AgentParseErrorResult(
-                reasoning=reasoning_text,
-                message=msg,
-                usage=response.usage,
-                error=f"Incomplete generation. Finish reason: {choice.finish_reason}",
-            )
         if not content:
             return AgentParseEmptyResult(
                 reasoning=reasoning_text,
                 message=msg,
                 usage=usage,
             )
-        
-        content = repair_json(content)
+
         try:
             if response_schema is not None:
                 parsed = response_schema.model_validate_json(content)
-                return AgentParseSuccessResult(
-                    response=parsed,
-                    reasoning=reasoning_text,
-                    message=msg,
-                    usage=usage,
-                )
+            else:
+                parsed = json.loads(content)
 
-            parsed = json.loads(content)
-            return AgentJsonParseSuccessResult(
+            return AgentParseSuccessResult(
                 response=parsed,
                 reasoning=reasoning_text,
                 message=msg,
                 usage=usage,
             )
-
         except Exception as e:
             return AgentParseErrorResult(
                 reasoning=reasoning_text,

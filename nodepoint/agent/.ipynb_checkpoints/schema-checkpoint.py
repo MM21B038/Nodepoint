@@ -111,13 +111,6 @@ class AgentParseSuccessResult(BaseModel):
     message: ChatCompletionMessage
     usage: ChatCompletionUsage | None = None
 
-class AgentJsonParseSuccessResult(BaseModel):
-    model_config = ConfigDict(extra="allow")
-    finish_reason: Literal["stop"] = "stop"
-    response: Any
-    reasoning: str = ""
-    message: ChatCompletionMessage
-    usage: ChatCompletionUsage | None = None
 
 class AgentParseErrorResult(BaseModel):
     finish_reason: Literal["stop"] = "stop"

@@ -1,45 +1,16 @@
 import logging
 from collections import defaultdict
 from nodepoint.agent.schema import AgentParseEmptyResult, AgentParseSuccessResult, AgentParseErrorResult
-from nodepoint.registry import Thread, Schema, Prompt
-from nodepoint.registry.dynamic_schema import Entities
+from nodepoint.registry import Thread, Prompt
+from nodepoint.registry.schema import Schema, get_entity_types
 from nodepoint.agent.agent import Agent
 from nodepoint.models import KnowledgeEntity, KnowledgeRelation
-import tiktoken
+from typing import Type
 
 logger = logging.getLogger(__name__)
 
-EXTRACTION_TEMPERATURE = 0.3
+EXTRACTION_TEMPERATURE = 1.2
 TRIALS = 3
-CHUNK_SIZE = 1500
-OVERLAP = 100
-
-def split_doc(doc: str) -> list[str]:
-    chunks = []
-    encoding = tiktoken.get_encoding("o200k_harmony")
-    tokens = encoding.encode(doc)
-    for i in range(0, len(tokens), CHUNK_SIZE - OVERLAP):
-        chunk_tokens = tokens[i : i + CHUNK_SIZE]
-        chunk = encoding.decode(chunk_tokens)
-        chunks.append(chunk)
-    return chunks
-
-def get_entity_types() -> dict[str, str]:
-    entity_types = defaultdict(str)
-    entity_types["PER"] = "Name of Individuals (e.g., John Doe, Jane Smith) or System Users (e.g., @username, root, kali)"
-    entity_types["ORG"] = "Name of Organizations (e.g., Google, Microsoft, OpenAI)"
-    entity_types["LOC"] = "Name of Locations (e.g., New York, Paris, Mount Everest)"
-    entity_types["PROD"] = "Name of Products (e.g., iPhone, Windows 10, Tesla Model S)"
-    entity_types["EVENT"] = "Name of Events (e.g., World War II, Super Bowl, COVID-19 Pandemic, Birthday Party)"
-    entity_types["TECH"] = "Name of Technologies with versions (e.g., Python 3.8, TensorFlow 2.0, Blockchain, docker, Apache 2.4)"
-    entity_types["VULN"] = "Name of Vulnerabilities (e.g., CVE-2021-12345, Heartbleed, Shellshock)"
-    entity_types["MALWARE"] = "Name of Malware (e.g., WannaCry, NotPetya, Emotet)"
-    entity_types["TOOL"] = "Name of Tools (e.g., Nmap, Metasploit, Wireshark)"
-    entity_types["IP"] = "Name of IP Addresses (e.g., 192.168.1.1, 10.0.0.1)"
-    entity_types["DOMAIN"] = "Name of Domains (e.g., google.com, microsoft.com, openai.com)"
-    entity_types["SUBDOMAIN"] = "Name of Subdomains (e.g., mail.google.com, www.microsoft.com, api.openai.com)"
-    entity_types["OTHER"] = "Any other type of entity that does not fit into the above categories but is relevant to the document."
-    return entity_types
 
 
 def entity_types_as_md_table(entity_types: dict[str, str]) -> str:
@@ -49,19 +20,16 @@ def entity_types_as_md_table(entity_types: dict[str, str]) -> str:
     return table
 
 
-def extract_entities(doc: str, entity_types: set, md_entity_table: str, agent: Agent) -> list:
+def extract_entities(doc: str, entity_types: str, agent: Agent) -> list:
     trial = 0
     thread = Thread()
     thread.addSystem(Prompt["entity_extractor_system"])
-    thread.addUser(Prompt["entity_extractor_user"].format(md_entity_table=md_entity_table, doc=doc))
-
-    NewEntities = Entities(types=entity_types)
-
+    thread.addUser(Prompt["entity_extractor_user"].format(entity_types=entity_types, doc=doc))
     while trial < TRIALS:
         response = agent.parse(
             messages=thread,
             model=agent.model,
-            response_schema=NewEntities,
+            response_schema=Schema.Entities,
             temperature=EXTRACTION_TEMPERATURE,
         )
         if isinstance(response, AgentParseSuccessResult):
@@ -70,7 +38,8 @@ def extract_entities(doc: str, entity_types: set, md_entity_table: str, agent: A
             print("empty response")
             logger.warning("No entities extracted for document. Trying again.")
             thread.addAssistant(response.message)
-        elif isinstance(response, AgentParseErrorResult):
+            thread.addUser("error: got an empty response, No json content. Please try again.")
+        elif type(response) == Type[AgentParseErrorResult]:
             print("incorrect output")
             logger.error("Error extracting entities for document with error: %s", response.error)
             thread.addAssistant(response.message)
@@ -90,12 +59,13 @@ def extract_relations(doc: str, entities: list[str], agent: Agent) -> list:
             response_schema=Schema.Relations,
             temperature=EXTRACTION_TEMPERATURE,
         )
-        if isinstance(response, AgentParseSuccessResult):
+        if type(response) == Type[AgentParseSuccessResult]:
             return response.response.relations
-        elif isinstance(response, AgentParseEmptyResult):
+        elif type(response) == Type[AgentParseEmptyResult]:
             logger.warning("No relations extracted for document, trying again.")
             thread.addAssistant(response.message)
-        elif isinstance(response, AgentParseErrorResult):
+            thread.addUser("error: got an empty response, expecting a json with key relations and value as a list of relation or an empty list. Please try again.")
+        elif type(response) == Type[AgentParseErrorResult]:
             logger.error("Error extracting relations for document with error: %s, trying again.", response.error)
             thread.addAssistant(response.message)
             thread.addUser(response.error)
@@ -105,17 +75,16 @@ def extract_relations(doc: str, entities: list[str], agent: Agent) -> list:
 
 def extract_knowledge_graph(doc: str) -> Schema.KnowledgeGraph:
     agent = Agent()
-    entity_types = set(get_entity_types().keys())
-    md_entity_table = entity_types_as_md_table(get_entity_types())
-    entities = extract_entities(doc, entity_types, md_entity_table, agent)
+    entity_types = entity_types_as_md_table(get_entity_types())
+    entities = extract_entities(doc, entity_types, agent)
     if len(entities) > 1:
         relations = extract_relations(doc, [entity.name for entity in entities], agent)
     else:
         relations = []
-    return entities, relations
+    return Schema.KnowledgeGraph(entities=entities, relations=relations)
 
 
-def ingest_knowledge_graph(doc, entities, relations) -> tuple[bool, list, list]:
+def ingest_knowledge_graph(doc, knowledge_graph: Schema.KnowledgeGraph) -> tuple[bool, list, list]:
     entity_ids: list = []
     relation_ids: list = []
 
@@ -124,17 +93,17 @@ def ingest_knowledge_graph(doc, entities, relations) -> tuple[bool, list, list]:
         KnowledgeEntity.objects.filter(document=doc).delete()
 
         entity_by_name: dict[str, KnowledgeEntity] = {}
-        for entity in entities:
+        for entity in knowledge_graph.entities:
             row = KnowledgeEntity.objects.create(
                 document=doc,
                 name=entity.name,
-                entity_type=entity.type if entity.type != "OTHER" else entity.newtype,
+                entity_type=entity.type,
                 attributes=entity.attributes or {},
             )
             entity_by_name[entity.name] = row
             entity_ids.append(row.id)
 
-        for relation in relations:
+        for relation in knowledge_graph.relations:
             source = entity_by_name.get(relation.source)
             target = entity_by_name.get(relation.target)
             if source is None or target is None:

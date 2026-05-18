@@ -15,7 +15,7 @@ from nodepoint.models import (
     KnowledgeRelation,
     Workspace,
 )
-from nodepoint.registry.schema import Entity, KnowledgeGraph, Relation
+from nodepoint.registry.schema import Entity, Relation
 from nodepoint.services.document import doc_preprocess
 
 
@@ -29,22 +29,20 @@ class KnowledgeGraphIngestTests(TestCase):
         )
 
     def test_ingest_resolves_relation_fks_by_entity_name(self):
-        graph = KnowledgeGraph(
-            entities=[
-                Entity(name="Alice", type="PER", attributes={}),
-                Entity(name="Acme", type="ORG", attributes={}),
-            ],
-            relations=[
-                Relation(
-                    source="Alice",
-                    target="Acme",
-                    type_description="works at",
-                    description="Alice works at Acme Corp.",
-                ),
-            ],
-        )
+        entities=[
+            Entity(name="Alice", type="PER", attributes={}),
+            Entity(name="Acme", type="ORG", attributes={}),
+        ]
+        relations=[
+            Relation(
+                source="Alice",
+                target="Acme",
+                type_description="works at",
+                description="Alice works at Acme Corp.",
+            ),
+        ]
 
-        ok, entity_ids, relation_ids = ingest_knowledge_graph(self.document, graph)
+        ok, entity_ids, relation_ids = ingest_knowledge_graph(self.document, entities, relations)
         self.assertTrue(ok)
         self.assertEqual(len(entity_ids), 2)
         self.assertEqual(len(relation_ids), 1)
@@ -54,12 +52,10 @@ class KnowledgeGraphIngestTests(TestCase):
         self.assertEqual(relation.target.name, "Acme")
 
     def test_ingest_is_idempotent(self):
-        graph = KnowledgeGraph(
-            entities=[Entity(name="Node", type="TECH", attributes={})],
-            relations=[],
-        )
-        ingest_knowledge_graph(self.document, graph)
-        ingest_knowledge_graph(self.document, graph)
+        entities=[Entity(name="Node", type="TECH", attributes={})]
+        relations=[]
+        ingest_knowledge_graph(self.document, entities, relations)
+        ingest_knowledge_graph(self.document, entities, relations)
         self.assertEqual(
             KnowledgeEntity.objects.filter(document=self.document).count(),
             1,
@@ -124,7 +120,7 @@ class PreprocessPipelineTests(TestCase):
 
         from nodepoint.services.document import process_doc
 
-        mock_extract.return_value = KnowledgeGraph(entities=[], relations=[])
+        mock_extract.return_value = [], []
 
         media_dir = tempfile.mkdtemp()
         with override_settings(MEDIA_ROOT=media_dir):
@@ -454,27 +450,23 @@ class KgGraphServiceTests(TestCase):
             file_name="b.md",
             file=SimpleUploadedFile("b.md", b"b"),
         )
-        graph = KnowledgeGraph(
-            entities=[
-                Entity(name="Alice", type="PER", attributes={"role": "eng"}),
-                Entity(name="Bob", type="PER", attributes={}),
-            ],
-            relations=[
-                Relation(
-                    source="Alice",
-                    target="Bob",
-                    type_description="knows",
-                    description="Alice knows Bob",
-                ),
-            ],
-        )
-        ingest_knowledge_graph(self.doc_flagged, graph)
+        entities=[
+            Entity(name="Alice", type="PER", attributes={"role": "eng"}),
+            Entity(name="Bob", type="PER", attributes={}),
+        ]
+        relations=[
+            Relation(
+                source="Alice",
+                target="Bob",
+                type_description="knows",
+                description="Alice knows Bob",
+            ),
+        ]
+        ingest_knowledge_graph(self.doc_flagged, entities, relations)
         ingest_knowledge_graph(
             self.doc_other,
-            KnowledgeGraph(
-                entities=[Entity(name="Solo", type="PER", attributes={})],
-                relations=[],
-            ),
+            entities, 
+            relations,
         )
 
     def test_build_workspace_graph_shape(self):
@@ -506,10 +498,8 @@ class KnowledgeGraphAPITests(TestCase):
         )
         ingest_knowledge_graph(
             self.doc,
-            KnowledgeGraph(
-                entities=[Entity(name="N1", type="ORG", attributes={})],
-                relations=[],
-            ),
+            entities, 
+            relations,
         )
 
     def test_get_by_workspace_name(self):
@@ -643,11 +633,9 @@ class KgSearchTests(TestCase):
             file_name="notes.md",
             file=SimpleUploadedFile("notes.md", b"# doc"),
         )
-        graph = KnowledgeGraph(
-            entities=[Entity(name="Alice", type="PER", attributes={"role": "eng"})],
-            relations=[],
-        )
-        ingest_knowledge_graph(self.document, graph)
+        entities=[Entity(name="Alice", type="PER", attributes={"role": "eng"})]
+        relations=[]
+        ingest_knowledge_graph(self.document, entities, relations)
 
     def test_format_search_document_includes_source_header(self):
         entity = KnowledgeEntity.objects.get(document=self.document)
