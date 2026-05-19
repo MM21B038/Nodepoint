@@ -27,6 +27,21 @@ def list_starred_workspace_names() -> list[str]:
     return list(get_flagged_workspaces_qs().values_list("name", flat=True))
 
 
+def count_flagged_workspaces() -> int:
+    """Starred user workspaces (excludes internal __flagged_chat__)."""
+    return get_flagged_workspaces_qs().count()
+
+
+def flagged_workspaces_summary() -> dict:
+    names = list(
+        get_flagged_workspaces_qs().order_by("name").values_list("name", flat=True)
+    )
+    return {
+        "count": len(names),
+        "workspaces": names,
+    }
+
+
 def get_default_flagged_workspace() -> Workspace | None:
     return get_flagged_workspaces_qs().first()
 

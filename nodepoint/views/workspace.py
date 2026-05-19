@@ -7,6 +7,7 @@ from rest_framework import status
 from nodepoint.models import Workspace
 from nodepoint.services.workspace import (
     FLAGGED_CHAT_WORKSPACE_NAME,
+    flagged_workspaces_summary,
     is_reserved_workspace_name,
 )
 
@@ -117,6 +118,13 @@ class WorkspaceFlagStatusAPIView(APIView):
             "workspace": workspace.name,
             "is_flag": workspace.is_flag
         })
+
+class FlaggedWorkspaceCountAPIView(APIView):
+    """GET /api/workspace/flagged/count/ — how many workspaces are starred (is_flag=true)."""
+
+    def get(self, request):
+        return Response(flagged_workspaces_summary())
+
 
 class ToggleWorkspaceFlagAPIView(APIView):
 

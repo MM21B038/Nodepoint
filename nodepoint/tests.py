@@ -1254,6 +1254,27 @@ class UploadDefaultFlaggedTests(TestCase):
         self.assertEqual(resp.status_code, 400)
 
 
+class FlaggedWorkspaceCountAPITests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+    def test_count_starred_workspaces(self):
+        Workspace.objects.create(name="star-a", is_flag=True)
+        Workspace.objects.create(name="star-b", is_flag=True)
+        Workspace.objects.create(name="plain", is_flag=False)
+        resp = self.client.get("/api/workspace/flagged/count/")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["count"], 2)
+        self.assertEqual(data["workspaces"], ["star-a", "star-b"])
+
+    def test_count_zero_when_none_starred(self):
+        Workspace.objects.create(name="only-plain", is_flag=False)
+        resp = self.client.get("/api/workspace/flagged/count/")
+        self.assertEqual(resp.json()["count"], 0)
+        self.assertEqual(resp.json()["workspaces"], [])
+
+
 class CreateWorkspaceReservedNameTests(TestCase):
     def setUp(self):
         self.client = APIClient()

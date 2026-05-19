@@ -2,6 +2,7 @@ from django.urls import path
 
 from nodepoint.views.workspace import (
     CreateWorkspaceAPIView,
+    FlaggedWorkspaceCountAPIView,
     ListWorkspaceAPIView,
     DeleteWorkspaceAPIView,
     WorkspaceFlagStatusAPIView,
@@ -42,6 +43,11 @@ urlpatterns = [
     path(
         "workspace/list/",
         ListWorkspaceAPIView.as_view()
+    ),
+
+    path(
+        "workspace/flagged/count/",
+        FlaggedWorkspaceCountAPIView.as_view(),
     ),
 
     path(

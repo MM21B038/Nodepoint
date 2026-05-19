@@ -143,6 +143,30 @@ Create a workspace and its media directory.
 
 ---
 
+### `GET /api/workspace/flagged/count/`
+
+How many workspaces are **starred** (`is_flag=true`), for UI decisions before calling flagged-scope KG/chat APIs.
+
+Uses the same scope as `?flagged=true` on knowledge-graph and entity search (excludes internal `__flagged_chat__`).
+
+**Response `200`**
+
+```json
+{
+  "count": 2,
+  "workspaces": ["main", "PRAJNA"]
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `count` | Number of starred workspaces |
+| `workspaces` | Their names, sorted alphabetically |
+
+`count: 0` means no workspace is starred — flagged chat search and `?flagged=true` graph APIs return empty scope.
+
+---
+
 ### `DELETE /api/workspace/delete/<name>/`
 
 Deletes workspace row and `media/workspaces/<name>/`.
@@ -1190,6 +1214,7 @@ Optional query: `?workspace_name=` — returns `404` if the record is not in tha
 |--------|------|
 | POST | `/api/workspace/create/` |
 | GET | `/api/workspace/list/` |
+| GET | `/api/workspace/flagged/count/` |
 | DELETE | `/api/workspace/delete/<name>/` |
 | GET | `/api/workspace/<name>/flag-status/` |
 | PATCH | `/api/workspace/<name>/toggle-flag/` |
