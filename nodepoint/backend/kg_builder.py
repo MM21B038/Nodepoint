@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 EXTRACTION_TEMPERATURE = 0.3
 TRIALS = 3
-CHUNK_SIZE = 1500
+CHUNK_SIZE = 1000
 OVERLAP = 100
 
 def split_doc(doc: str) -> list[str]:

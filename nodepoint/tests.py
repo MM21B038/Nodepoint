@@ -1254,6 +1254,69 @@ class UploadDefaultFlaggedTests(TestCase):
         self.assertEqual(resp.status_code, 400)
 
 
+class WorkspaceCatalogAPITests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.ws_a = Workspace.objects.create(name="cat-ws-a", is_flag=True)
+        self.ws_b = Workspace.objects.create(name="cat-ws-b", is_flag=False)
+        doc = Document.objects.create(
+            workspace=self.ws_a,
+            file_name="f.md",
+            file=SimpleUploadedFile("f.md", b"x"),
+        )
+        ingest_knowledge_graph(
+            doc,
+            [
+                Entity(name="N1", type="PER", attributes={}),
+                Entity(name="N2", type="ORG", attributes={}),
+            ],
+            [
+                Relation(
+                    source="N1",
+                    target="N2",
+                    type_description="rel",
+                    description="N1 to N2 link.",
+                ),
+            ],
+        )
+        DocumentChunk.objects.create(
+            document=doc,
+            index=0,
+            status=Status.COMPLETED,
+        )
+
+    def test_workspace_stats(self):
+        resp = self.client.get("/api/workspace/stats/")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertGreaterEqual(data["total"], 2)
+        self.assertEqual(data["flagged"] + data["non_flagged"], data["total"])
+
+    def test_workspace_page_all(self):
+        resp = self.client.get(
+            "/api/workspace/page/", {"page": "1", "page_size": "10", "flag": "all"}
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["filter"], "all")
+        names = [w["name"] for w in data["workspaces"]]
+        self.assertIn("cat-ws-a", names)
+        row = next(w for w in data["workspaces"] if w["name"] == "cat-ws-a")
+        self.assertEqual(row["counts"]["files"], 1)
+        self.assertEqual(row["counts"]["entities"], 2)
+        self.assertEqual(row["counts"]["relations"], 1)
+        self.assertEqual(row["counts"]["chunks"], 1)
+
+    def test_workspace_page_flagged_filter(self):
+        resp = self.client.get("/api/workspace/page/", {"flag": "flagged"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(all(w["is_flag"] for w in resp.json()["workspaces"]))
+
+    def test_workspace_page_invalid_flag(self):
+        resp = self.client.get("/api/workspace/page/", {"flag": "maybe"})
+        self.assertEqual(resp.status_code, 400)
+
+
 class FlaggedWorkspaceCountAPITests(TestCase):
     def setUp(self):
         self.client = APIClient()

@@ -6,7 +6,11 @@ from nodepoint.views.workspace import (
     ListWorkspaceAPIView,
     DeleteWorkspaceAPIView,
     WorkspaceFlagStatusAPIView,
-    ToggleWorkspaceFlagAPIView
+    ToggleWorkspaceFlagAPIView,
+)
+from nodepoint.views.workspace_catalog import (
+    WorkspacePageAPIView,
+    WorkspaceStatsAPIView,
 )
 
 from nodepoint.views.document import (
@@ -45,6 +49,14 @@ urlpatterns = [
         ListWorkspaceAPIView.as_view()
     ),
 
+    path(
+        "workspace/stats/",
+        WorkspaceStatsAPIView.as_view(),
+    ),
+    path(
+        "workspace/page/",
+        WorkspacePageAPIView.as_view(),
+    ),
     path(
         "workspace/flagged/count/",
         FlaggedWorkspaceCountAPIView.as_view(),
