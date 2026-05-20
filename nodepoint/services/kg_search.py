@@ -4,7 +4,11 @@ import uuid
 from typing import Any
 
 from nodepoint.models import DocumentChunk, KnowledgeEntity, KnowledgeRelation
-from nodepoint.services.chat_context import get_accumulated_search_ids, record_search_ids
+from nodepoint.services.chat_context import (
+    get_accumulated_search_ids,
+    record_search_ids,
+    resolve_search_workspace_names,
+)
 from nodepoint.services.kg_records import (
     CITATION_RULES,
     citation_for_record,
@@ -73,11 +77,28 @@ def resolve_hits(hits: list[dict]) -> list[dict[str, Any]]:
     return records
 
 
-def resolve_records_by_ids(record_ids: list[str]) -> list[dict[str, Any]]:
+def _filter_records_by_workspace(
+    records: list[dict[str, Any]],
+    allowed_workspaces: list[str] | None,
+) -> list[dict[str, Any]]:
+    if not allowed_workspaces:
+        return records
+    allowed = set(allowed_workspaces)
+    return [r for r in records if r.get("workspace") in allowed]
+
+
+def resolve_records_by_ids(
+    record_ids: list[str],
+    *,
+    allowed_workspaces: list[str] | None = None,
+) -> list[dict[str, Any]]:
     if not record_ids:
         return []
     hits = [{"id": rid, "type": None, "score": 0.0, "payload": {}} for rid in record_ids]
-    return resolve_hits(hits)
+    records = resolve_hits(hits)
+    if allowed_workspaces is None:
+        allowed_workspaces = resolve_search_workspace_names()
+    return _filter_records_by_workspace(records, allowed_workspaces)
 
 
 def merge_with_session_hits(new_hit_ids: list[str]) -> list[str]:
@@ -143,15 +164,16 @@ def format_search_document(records: list[dict[str, Any]], query: str) -> str:
 
 
 def build_search_document(query: str, hits: list[dict]) -> str:
+    allowed_workspaces = resolve_search_workspace_names()
     new_ids = [str(h["id"]) for h in hits if h.get("id")]
     all_ids = merge_with_session_hits(new_ids)
     record_search_ids(new_ids)
 
     records_by_id: dict[str, dict[str, Any]] = {}
-    for rec in resolve_records_by_ids(all_ids):
+    for rec in resolve_records_by_ids(all_ids, allowed_workspaces=allowed_workspaces):
         records_by_id[rec["id"]] = rec
 
-    for rec in resolve_hits(hits):
+    for rec in _filter_records_by_workspace(resolve_hits(hits), allowed_workspaces):
         records_by_id[rec["id"]] = rec
 
     records = list(records_by_id.values())
@@ -166,13 +188,14 @@ def build_search_document_from_records(
     merge_session: bool = True,
 ) -> str:
     if merge_session:
+        allowed_workspaces = resolve_search_workspace_names()
         new_ids = [r["id"] for r in records if r.get("id")]
         all_ids = merge_with_session_hits(new_ids)
         record_search_ids(new_ids)
         records_by_id: dict[str, dict[str, Any]] = {}
-        for rec in resolve_records_by_ids(all_ids):
+        for rec in resolve_records_by_ids(all_ids, allowed_workspaces=allowed_workspaces):
             records_by_id[rec["id"]] = rec
-        for rec in records:
+        for rec in _filter_records_by_workspace(records, allowed_workspaces):
             records_by_id[rec["id"]] = rec
         records = list(records_by_id.values())
         records.sort(key=lambda r: r.get("score", 0.0), reverse=True)

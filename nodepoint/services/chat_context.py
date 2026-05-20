@@ -2,14 +2,13 @@ from __future__ import annotations
 
 from contextvars import ContextVar, Token
 
-from nodepoint.models import Workspace
-from nodepoint.services.workspace import (
-    FLAGGED_CHAT_WORKSPACE_NAME,
-    list_starred_workspace_names,
+from nodepoint.services.workspace_group import (
+    GROUP_CHAT_PREFIX,
+    list_group_workspace_names,
 )
 
 _chat_workspace: ContextVar[str | None] = ContextVar("chat_workspace", default=None)
-_flagged_scope_chat: ContextVar[bool] = ContextVar("flagged_scope_chat", default=False)
+_group_scope_chat: ContextVar[str | None] = ContextVar("group_scope_chat", default=None)
 _search_ids: ContextVar[set[str] | None] = ContextVar("search_ids", default=None)
 
 
@@ -25,16 +24,20 @@ def get_chat_workspace() -> str | None:
     return _chat_workspace.get()
 
 
-def set_flagged_scope_chat(enabled: bool = True) -> Token:
-    return _flagged_scope_chat.set(enabled)
+def set_group_scope_chat(group_name: str) -> Token:
+    return _group_scope_chat.set(group_name)
 
 
-def reset_flagged_scope_chat(token: Token) -> None:
-    _flagged_scope_chat.reset(token)
+def reset_group_scope_chat(token: Token) -> None:
+    _group_scope_chat.reset(token)
 
 
-def is_flagged_scope_chat() -> bool:
-    return _flagged_scope_chat.get()
+def get_group_scope_chat() -> str | None:
+    return _group_scope_chat.get()
+
+
+def is_group_scope_chat() -> bool:
+    return _group_scope_chat.get() is not None
 
 
 def init_search_session() -> Token:
@@ -60,22 +63,22 @@ def record_search_ids(ids: list[str]) -> None:
             current.add(rid)
 
 
+def _is_internal_chat_workspace_name(name: str) -> bool:
+    return name.startswith(GROUP_CHAT_PREFIX)
+
+
 def resolve_search_workspace_names() -> list[str]:
     """
     Workspaces included in Knowledge.search_graph.
 
-    Flagged-scope chat: only user-starred workspaces (is_flag=True).
-    Per-workspace chat: current workspace plus all starred workspaces.
+    Group-scope chat: all workspaces in the active group.
+    Per-workspace chat: the active workspace only.
     """
-    if is_flagged_scope_chat():
-        return list_starred_workspace_names()
+    group_name = get_group_scope_chat()
+    if group_name:
+        return list_group_workspace_names(group_name)
 
-    names: set[str] = set(
-        Workspace.objects.filter(is_flag=True)
-        .exclude(name=FLAGGED_CHAT_WORKSPACE_NAME)
-        .values_list("name", flat=True)
-    )
     chat_ws = get_chat_workspace()
-    if chat_ws and chat_ws != FLAGGED_CHAT_WORKSPACE_NAME:
-        names.add(chat_ws)
-    return sorted(names)
+    if chat_ws and not _is_internal_chat_workspace_name(chat_ws):
+        return [chat_ws]
+    return []

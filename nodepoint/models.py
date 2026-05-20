@@ -10,11 +10,47 @@ from .enums import Status
 
 class Workspace(models.Model):
     name = models.CharField(max_length=255, unique=True)
-    is_flag = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return self.name
+
+
+# =========================
+# Workspace group
+# =========================
+
+class WorkspaceGroup(models.Model):
+    name = models.CharField(max_length=255, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.name
+
+
+class WorkspaceGroupMembership(models.Model):
+    group = models.ForeignKey(
+        WorkspaceGroup,
+        on_delete=models.CASCADE,
+        related_name="memberships",
+    )
+    workspace = models.ForeignKey(
+        Workspace,
+        on_delete=models.CASCADE,
+        related_name="group_memberships",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["group", "workspace"],
+                name="unique_workspace_per_group",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.workspace.name} in {self.group.name}"
 
 
 # =========================

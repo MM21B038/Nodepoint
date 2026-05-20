@@ -9,27 +9,33 @@ from nodepoint.services import kg_graph
 
 @dataclass(frozen=True)
 class KgScope:
-    flagged: bool
     workspace_name: str | None
+    group_name: str | None
+
+    @property
+    def is_group_scope(self) -> bool:
+        return self.group_name is not None
 
 
 def resolve_kg_scope(request: Request) -> tuple[KgScope | None, str | None]:
     """
     Returns (scope, error_message). error_message is set for 400 responses.
     """
-    workspace_name = request.query_params.get("workspace_name")
-    flagged = request.query_params.get("flagged", "").lower() in (
-        "1",
-        "true",
-        "yes",
+    workspace_name = (request.query_params.get("workspace_name") or "").strip() or None
+    group_name = (request.query_params.get("group") or "").strip() or None
+
+    scopes = sum(
+        [
+            bool(workspace_name),
+            bool(group_name),
+        ]
     )
+    if scopes == 0:
+        return None, "Provide workspace_name or group"
+    if scopes > 1:
+        return None, "Use either workspace_name or group, not both"
 
-    if flagged and workspace_name:
-        return None, "Use either workspace_name or flagged=true, not both"
-    if not flagged and not workspace_name:
-        return None, "Provide workspace_name or flagged=true"
-
-    return KgScope(flagged=flagged, workspace_name=workspace_name), None
+    return KgScope(workspace_name=workspace_name, group_name=group_name), None
 
 
 def parse_graph_filters_from_request(
@@ -38,6 +44,7 @@ def parse_graph_filters_from_request(
     try:
         filters = kg_graph.parse_graph_filters(
             entity_type_raw=request.query_params.get("entity_type"),
+            file_name_raw=request.query_params.get("file_name"),
             depth_raw=request.query_params.get("depth"),
             limit_raw=request.query_params.get("limit"),
         )

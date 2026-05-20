@@ -4,57 +4,35 @@ from django.core.paginator import EmptyPage, Paginator
 from django.db.models import Count, QuerySet
 
 from nodepoint.models import Workspace
-from nodepoint.services.workspace import FLAGGED_CHAT_WORKSPACE_NAME
+from nodepoint.services.workspace_group import user_workspaces_qs
 
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
 
 
-def user_workspaces_qs() -> QuerySet[Workspace]:
-    return Workspace.objects.exclude(name=FLAGGED_CHAT_WORKSPACE_NAME)
-
-
 def get_workspace_count_stats() -> dict:
     qs = user_workspaces_qs()
     total = qs.count()
-    flagged = qs.filter(is_flag=True).count()
+    in_group = qs.filter(group_memberships__isnull=False).distinct().count()
     return {
         "total": total,
-        "flagged": flagged,
-        "non_flagged": total - flagged,
+        "in_group": in_group,
+        "ungrouped": total - in_group,
     }
 
 
-def parse_flag_filter(raw: str | None) -> str | None:
+def parse_group_filter(raw: str | None) -> str | None:
     if raw is None or not str(raw).strip():
-        return "all"
-    value = str(raw).strip().lower()
-    aliases = {
-        "all": "all",
-        "flagged": "flagged",
-        "starred": "flagged",
-        "true": "flagged",
-        "1": "flagged",
-        "non_flagged": "non_flagged",
-        "non-flagged": "non_flagged",
-        "unflagged": "non_flagged",
-        "not_flagged": "non_flagged",
-        "false": "non_flagged",
-        "0": "non_flagged",
-    }
-    if value not in aliases:
-        raise ValueError(
-            "flag must be all, flagged, or non_flagged"
-        )
-    return aliases[value]
+        return None
+    return str(raw).strip()
 
 
-def filter_workspaces_by_flag(qs: QuerySet[Workspace], flag_filter: str) -> QuerySet[Workspace]:
-    if flag_filter == "flagged":
-        return qs.filter(is_flag=True)
-    if flag_filter == "non_flagged":
-        return qs.filter(is_flag=False)
-    return qs
+def filter_workspaces_by_group(
+    qs: QuerySet[Workspace], group_name: str | None
+) -> QuerySet[Workspace]:
+    if not group_name:
+        return qs
+    return qs.filter(group_memberships__group__name=group_name).distinct()
 
 
 def workspaces_with_counts_qs() -> QuerySet[Workspace]:
@@ -67,9 +45,10 @@ def workspaces_with_counts_qs() -> QuerySet[Workspace]:
 
 
 def serialize_workspace_row(ws: Workspace) -> dict:
+    groups = sorted(m.group.name for m in ws.group_memberships.all())
     return {
         "name": ws.name,
-        "is_flag": ws.is_flag,
+        "groups": groups,
         "created_at": ws.created_at,
         "counts": {
             "files": getattr(ws, "file_count", 0),
@@ -107,13 +86,15 @@ def parse_pagination(
 
 def list_workspaces_paginated(
     *,
-    flag_filter: str = "all",
+    group_name: str | None = None,
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
 ) -> dict:
-    qs = filter_workspaces_by_flag(
-        workspaces_with_counts_qs().order_by("-created_at", "name"),
-        flag_filter,
+    qs = filter_workspaces_by_group(
+        workspaces_with_counts_qs()
+        .prefetch_related("group_memberships__group")
+        .order_by("-created_at", "name"),
+        group_name,
     )
     paginator = Paginator(qs, page_size)
     try:
@@ -123,7 +104,7 @@ def list_workspaces_paginated(
 
     items = [serialize_workspace_row(ws) for ws in page_obj.object_list]
     return {
-        "filter": flag_filter,
+        "group": group_name,
         "pagination": {
             "page": page_obj.number,
             "page_size": page_size,

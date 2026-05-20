@@ -1,10 +1,21 @@
 # Workspace knowledge graph and chat summary APIs
 
-REST endpoints for listing Postgres knowledge graphs and conversations per workspace, including bulk listing for flagged workspaces (`Workspace.is_flag == True`).
+REST endpoints for listing Postgres knowledge graphs and conversations per workspace or per **workspace group**.
 
 ## Knowledge graph
 
-Scope: provide **exactly one** of `workspace_name=<name>` or `flagged=true` (not both). Missing both → `400`.
+Scope: provide **exactly one** of `workspace_name=<name>` or `group=<name>`. Missing scope → `400`.
+
+## Workspace groups
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/group/create/` | Create group `{ "name": "..." }` |
+| GET | `/api/group/list/` | All groups with `workspace_count` |
+| GET | `/api/group/<name>/` | Members and metadata |
+| POST | `/api/group/<name>/workspaces/` | Add `{ "workspace_name": "..." }` |
+| DELETE | `/api/group/<name>/workspaces/<workspace_name>/` | Remove member |
+| DELETE | `/api/group/<name>/` | Delete group |
 
 ### Entity types
 
@@ -24,7 +35,7 @@ Lists distinct `entity_type` values with counts per workspace.
 }
 ```
 
-**Flagged** — `?flagged=true`
+**Group** — `?group=research`
 
 ```json
 {
@@ -43,28 +54,29 @@ Sorted by `count` descending. `type` is `null` when the stored value is blank.
 | Query | Default | Max | Description |
 |-------|---------|-----|-------------|
 | `entity_type` | — | — | Comma-separated types, e.g. `PER,ORG` |
+| `file_name` | — | — | Comma-separated document file names (exact match) |
 | `depth` | `1` | `5` | BFS hops from seed entities |
 | `limit` | `500` | `5000` | Max nodes per workspace |
 
-**Seeds:** entities matching `entity_type` when provided; otherwise all entities in the workspace. **BFS:** expand via relations up to `depth` hops, capped at `limit` nodes. **Edges:** relations with both endpoints in the returned node set (includes edges between seeds when `depth=0`).
+**Seeds:** entities matching `entity_type` and/or `file_name` when provided; otherwise all entities in the workspace. **BFS:** expand via relations up to `depth` hops, capped at `limit` nodes. **Edges:** relations with both endpoints in the returned node set (includes edges between seeds when `depth=0`). **Nodes:** `id`, `name`, `entity_type` only.
 
 **Single workspace** — `?workspace_name=PRAJNA&entity_type=PER,ORG&depth=1&limit=500`
 
 ```json
 {
   "workspace": "PRAJNA",
-  "filters": { "entity_types": ["PER", "ORG"], "depth": 1, "limit": 500 },
+  "filters": {
+    "entity_types": ["PER", "ORG"],
+    "file_names": null,
+    "depth": 1,
+    "limit": 500
+  },
   "truncated": false,
   "nodes": [
     {
       "id": "...",
       "name": "Alice",
-      "entity_type": "PER",
-      "attributes": {},
-      "document_id": "...",
-      "file_name": "doc.md",
-      "vector": "pending",
-      "created_at": "2026-05-15T12:00:00Z"
+      "entity_type": "PER"
     }
   ],
   "edges": [
@@ -80,7 +92,7 @@ Sorted by `count` descending. `type` is `null` when the stored value is blank.
 }
 ```
 
-**Flagged** — `?flagged=true` (same optional filters; each graph object includes `filters`, `truncated`, `nodes`, `edges`)
+**Group** — `?group=research` (same optional filters; each graph object includes `filters`, `truncated`, `nodes`, `edges`)
 
 ```json
 {
@@ -96,7 +108,7 @@ Sorted by `count` descending. `type` is `null` when the stored value is blank.
 }
 ```
 
-`truncated: true` when seed count or BFS expansion hit `limit`. Flagged scope excludes internal `__flagged_chat__` workspace.
+`truncated: true` when seed count or BFS expansion hit `limit`. Group scope excludes internal `__group_chat__*` workspaces.
 
 ### Fuzzy entity name search
 
@@ -110,8 +122,9 @@ Sorted by `count` descending. `type` is `null` when the stored value is blank.
 | `depth` | `1` | Graph BFS hops from seeds |
 | `limit` | `500` | Max nodes in `graph` |
 | `entity_type` | — | Optional comma-separated filter |
+| `file_name` | — | Optional comma-separated document file names (exact match) |
 
-Returns `matches` (ranked entities with `score`) and `graph` (nodes/edges around seeds). Scope: `workspace_name` or `flagged=true`.
+Returns `matches` (ranked entities with `score`) and `graph` (nodes/edges around seeds). Scope: `workspace_name` or `group=<name>`.
 
 ## Chat summary
 
@@ -126,22 +139,20 @@ Query: `workspace_name=<name>`
 ```json
 {
   "workspace": "PRAJNA",
-  "is_flag": true,
   "updated_at": "...",
   "message_count": 12
 }
 ```
 
-### Flagged workspaces
+### Group
 
-Query: `flagged=true`
+Query: `group=<name>`
 
 ```json
 {
   "workspaces": [
     {
       "workspace": "PRAJNA",
-      "is_flag": true,
       "updated_at": "...",
       "message_count": 0
     }
@@ -149,7 +160,7 @@ Query: `flagged=true`
 }
 ```
 
-Flagged-scope chat: `GET /api/chat/?flagged=true`, `ws://.../ws/chat/flagged/` (separate thread; search uses starred workspaces only). Per-workspace: `GET /api/chat/<workspace_name>/`. See [API.md](../API.md).
+Group chat: `GET /api/chat/group/<name>/`, `ws://.../ws/chat/group/<name>/` (separate thread; search uses group members only). Per-workspace: `GET /api/chat/<workspace_name>/`. See [API.md](../API.md).
 
 ## Agent tools (chat)
 
@@ -163,7 +174,5 @@ Example tool result:
 
 ```markdown
 ## [source: notes.md]
-**Entity** (score 0.8700)
-- name: Alice
 ...
 ```

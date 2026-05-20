@@ -8,7 +8,7 @@ from rest_framework.views import APIView
 
 from nodepoint.models import Workspace, Document
 from nodepoint.services.preprocess_pipeline import enqueue_preprocess_pipeline
-from nodepoint.services.workspace import get_default_flagged_workspace
+from nodepoint.services.workspace import require_default_upload_workspace
 
 ALLOWED_EXTENSIONS = {".txt", ".md", ".text"}
 
@@ -41,13 +41,14 @@ class UploadDocumentAPIView(APIView):
             except Workspace.DoesNotExist:
                 return Response({"error": "Workspace not found"}, status=404)
         else:
-            workspace = get_default_flagged_workspace()
-            if workspace is None:
+            try:
+                workspace = require_default_upload_workspace()
+            except Workspace.DoesNotExist:
                 return Response(
                     {
                         "error": (
-                            "No starred workspace; create a workspace and "
-                            "set is_flag=true (toggle-flag), or pass workspace_name"
+                            "No workspace exists; create a workspace or pass "
+                            "workspace_name"
                         )
                     },
                     status=status.HTTP_400_BAD_REQUEST,

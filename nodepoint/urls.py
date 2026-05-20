@@ -2,11 +2,8 @@ from django.urls import path
 
 from nodepoint.views.workspace import (
     CreateWorkspaceAPIView,
-    FlaggedWorkspaceCountAPIView,
     ListWorkspaceAPIView,
     DeleteWorkspaceAPIView,
-    WorkspaceFlagStatusAPIView,
-    ToggleWorkspaceFlagAPIView,
 )
 from nodepoint.views.workspace_catalog import (
     WorkspacePageAPIView,
@@ -24,7 +21,17 @@ from nodepoint.views.preprocess import (
     PreprocessWorkspaceAPIView,
 )
 
-from nodepoint.views.chat import FlaggedChatAPIView, WorkspaceChatAPIView
+from nodepoint.views.chat import (
+    GroupChatAPIView,
+    WorkspaceChatAPIView,
+)
+from nodepoint.views.workspace_group import (
+    AddWorkspaceToGroupAPIView,
+    CreateGroupAPIView,
+    GroupDetailAPIView,
+    ListGroupsAPIView,
+    RemoveWorkspaceFromGroupAPIView,
+)
 
 from nodepoint.views.kg_entity_search import KnowledgeEntitySearchAPIView
 from nodepoint.views.kg_entity_types import KnowledgeGraphEntityTypesAPIView
@@ -57,24 +64,10 @@ urlpatterns = [
         "workspace/page/",
         WorkspacePageAPIView.as_view(),
     ),
-    path(
-        "workspace/flagged/count/",
-        FlaggedWorkspaceCountAPIView.as_view(),
-    ),
 
     path(
         "workspace/delete/<str:name>/",
         DeleteWorkspaceAPIView.as_view()
-    ),
-
-    path(
-        "workspace/<str:name>/flag-status/",
-        WorkspaceFlagStatusAPIView.as_view()
-    ),
-
-    path(
-        "workspace/<str:name>/toggle-flag/",
-        ToggleWorkspaceFlagAPIView.as_view()
     ),
 
     path(
@@ -108,8 +101,29 @@ urlpatterns = [
     ),
 
     path(
-        "chat/",
-        FlaggedChatAPIView.as_view(),
+        "group/create/",
+        CreateGroupAPIView.as_view(),
+    ),
+    path(
+        "group/list/",
+        ListGroupsAPIView.as_view(),
+    ),
+    path(
+        "group/<str:name>/",
+        GroupDetailAPIView.as_view(),
+    ),
+    path(
+        "group/<str:name>/workspaces/",
+        AddWorkspaceToGroupAPIView.as_view(),
+    ),
+    path(
+        "group/<str:name>/workspaces/<str:workspace_name>/",
+        RemoveWorkspaceFromGroupAPIView.as_view(),
+    ),
+
+    path(
+        "chat/group/<str:name>/",
+        GroupChatAPIView.as_view(),
     ),
 
     path(

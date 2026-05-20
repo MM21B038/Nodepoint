@@ -96,7 +96,6 @@ def workspace_chat_summary(workspace: Workspace) -> dict[str, Any]:
     if conversation is None:
         return {
             "workspace": workspace.name,
-            "is_flag": workspace.is_flag,
             "updated_at": None,
             "message_count": 0,
         }
@@ -107,7 +106,6 @@ def workspace_chat_summary(workspace: Workspace) -> dict[str, Any]:
         message_count = 0
     return {
         "workspace": workspace.name,
-        "is_flag": workspace.is_flag,
         "updated_at": conversation.updated_at,
         "message_count": message_count,
     }
@@ -117,8 +115,10 @@ def list_chat_summary_for_workspace(workspace: Workspace) -> dict[str, Any]:
     return workspace_chat_summary(workspace)
 
 
-def list_chat_summary_for_flagged_workspaces() -> list[dict[str, Any]]:
-    workspaces = Workspace.objects.filter(is_flag=True).order_by("name")
+def list_chat_summary_for_group(group_name: str) -> list[dict[str, Any]]:
+    from nodepoint.services.workspace_group import get_group_workspaces_qs
+
+    workspaces = get_group_workspaces_qs(group_name).order_by("name")
     return [workspace_chat_summary(ws) for ws in workspaces]
 
 

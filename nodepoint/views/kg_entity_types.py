@@ -13,8 +13,8 @@ class KnowledgeGraphEntityTypesAPIView(APIView):
         if error:
             return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
 
-        if scope.flagged:
-            return Response(kg_graph.list_entity_types_for_flagged_workspaces())
+        if scope.is_group_scope:
+            return Response(kg_graph.list_entity_types_for_group(scope.group_name))
 
         try:
             payload = kg_graph.list_entity_types_for_workspace_name(

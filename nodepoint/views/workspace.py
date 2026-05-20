@@ -5,11 +5,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from nodepoint.models import Workspace
-from nodepoint.services.workspace import (
-    FLAGGED_CHAT_WORKSPACE_NAME,
-    flagged_workspaces_summary,
-    is_reserved_workspace_name,
-)
+from nodepoint.services.workspace import is_reserved_workspace_name
 
 
 class CreateWorkspaceAPIView(APIView):
@@ -57,18 +53,22 @@ class ListWorkspaceAPIView(APIView):
 
     def get(self, request):
 
+        from nodepoint.services.workspace_group import user_workspaces_qs
+
         workspaces = (
-            Workspace.objects.exclude(name=FLAGGED_CHAT_WORKSPACE_NAME)
+            user_workspaces_qs()
+            .prefetch_related("group_memberships__group")
             .order_by("-created_at")
         )
 
         data = []
 
         for ws in workspaces:
+            groups = sorted(m.group.name for m in ws.group_memberships.all())
             data.append({
                 "name": ws.name,
-                "is_flag": ws.is_flag,
-                "created_at": ws.created_at
+                "groups": groups,
+                "created_at": ws.created_at,
             })
 
         return Response(data)
@@ -99,51 +99,4 @@ class DeleteWorkspaceAPIView(APIView):
 
         return Response({
             "message": "Workspace deleted successfully"
-        })
-
-class WorkspaceFlagStatusAPIView(APIView):
-
-    def get(self, request, name):
-
-        try:
-            workspace = Workspace.objects.get(name=name)
-
-        except Workspace.DoesNotExist:
-            return Response(
-                {"error": "Workspace not found"},
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-        return Response({
-            "workspace": workspace.name,
-            "is_flag": workspace.is_flag
-        })
-
-class FlaggedWorkspaceCountAPIView(APIView):
-    """GET /api/workspace/flagged/count/ — how many workspaces are starred (is_flag=true)."""
-
-    def get(self, request):
-        return Response(flagged_workspaces_summary())
-
-
-class ToggleWorkspaceFlagAPIView(APIView):
-
-    def patch(self, request, name):
-
-        try:
-            workspace = Workspace.objects.get(name=name)
-
-        except Workspace.DoesNotExist:
-            return Response(
-                {"error": "Workspace not found"},
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-        workspace.is_flag = not workspace.is_flag
-        workspace.save()
-
-        return Response({
-            "message": "Workspace flag updated successfully",
-            "workspace": workspace.name,
-            "is_flag": workspace.is_flag
         })

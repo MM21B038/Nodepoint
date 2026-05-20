@@ -32,10 +32,11 @@ Migrations run on web container start (`RUN_MIGRATIONS=1`).
 
 ## Features
 
-- **Workspaces** — isolated document + KG + chat scope; **star** (`is_flag`) for shared search and default upload/chat alias
+- **Workspaces** — isolated document + KG + chat scope
+- **Workspace groups** — named sets of workspaces for cross-workspace KG, search, and group chat
 - **Documents** — upload `.txt` / `.md`; RQ pipeline builds KG and vectors
 - **Knowledge graph** — REST + chat agent tool `Knowledge.search_graph` (resolves hits to sourced markdown)
-- **Chat** — one thread per workspace; `default` alias → first starred workspace; WebSocket token streaming + internal compression
+- **Chat** — one thread per workspace or per group; WebSocket token streaming + internal compression
 
 ## Documentation
 
@@ -48,18 +49,21 @@ Migrations run on web container start (`RUN_MIGRATIONS=1`).
 ## Example flow
 
 ```bash
-# 1. Create workspace and star it
+# 1. Create workspace and group
 curl -X POST http://localhost:8000/api/workspace/create/ \
   -H "Content-Type: application/json" -d '{"name": "main"}'
-curl -X PATCH http://localhost:8000/api/workspace/main/toggle-flag/
+curl -X POST http://localhost:8000/api/group/create/ \
+  -H "Content-Type: application/json" -d '{"name": "research"}'
+curl -X POST http://localhost:8000/api/group/research/workspaces/ \
+  -H "Content-Type: application/json" -d '{"workspace_name": "main"}'
 
-# 2. Upload (workspace_name optional → first starred)
+# 2. Upload (workspace_name optional → oldest workspace)
 curl -X POST http://localhost:8000/api/document/upload/ \
   -F file=@notes.md
 
-# 3. Flagged-scope chat (separate from workspace "main")
-curl "http://localhost:8000/api/chat/?flagged=true"
-# WebSocket: ws://localhost:8000/ws/chat/flagged/
+# 3. Group chat (separate from workspace "main")
+curl "http://localhost:8000/api/chat/group/research/"
+# WebSocket: ws://localhost:8000/ws/chat/group/research/
 # Per-workspace: GET /api/chat/main/  |  ws://localhost:8000/ws/chat/main/
 ```
 

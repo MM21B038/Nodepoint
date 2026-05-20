@@ -9,10 +9,12 @@ from channels.generic.websocket import AsyncWebsocketConsumer
 
 from nodepoint.agent.agent import Agent
 from nodepoint.services import chat_runner, chat_storage_async as storage_async
-from nodepoint.services.workspace import (
-    get_or_create_flagged_chat_workspace,
-    list_starred_workspace_names,
-    resolve_workspace_for_chat,
+from nodepoint.services.workspace import resolve_workspace_for_chat
+from nodepoint.services.workspace_group import (
+    GroupNotFoundError,
+    get_group_by_name,
+    get_or_create_group_chat_workspace,
+    list_group_workspace_names,
 )
 
 logger = logging.getLogger(__name__)
@@ -21,7 +23,7 @@ logger = logging.getLogger(__name__)
 class ChatConsumer(AsyncWebsocketConsumer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.flagged_scope = False
+        self.group_name: str | None = None
         self.workspace_name: str | None = None
         self.conversation_id: uuid.UUID | None = None
         self.active_branch_id: uuid.UUID | None = None
@@ -30,10 +32,18 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
     async def connect(self):
         url_kwargs = self.scope["url_route"]["kwargs"]
-        self.flagged_scope = bool(url_kwargs.get("flagged_scope"))
+        group_name = url_kwargs.get("group_name")
 
-        if self.flagged_scope:
-            workspace = await asyncio.to_thread(get_or_create_flagged_chat_workspace)
+        if group_name:
+            try:
+                await asyncio.to_thread(get_group_by_name, group_name)
+            except GroupNotFoundError:
+                await self.close(code=4004)
+                return
+            self.group_name = group_name
+            workspace = await asyncio.to_thread(
+                get_or_create_group_chat_workspace, group_name
+            )
             self.workspace_name = None
         else:
             workspace_name = url_kwargs.get("workspace_name")
@@ -55,13 +65,13 @@ class ChatConsumer(AsyncWebsocketConsumer):
         self.active_branch_id = active.id
 
         await self.accept()
-        if self.flagged_scope:
+        if self.group_name:
             await self.send_json(
                 {
                     "type": "chat.ready",
-                    "flagged": True,
-                    "starred_workspaces": await asyncio.to_thread(
-                        list_starred_workspace_names
+                    "group": self.group_name,
+                    "workspaces": await asyncio.to_thread(
+                        list_group_workspace_names, self.group_name
                     ),
                 }
             )
@@ -223,7 +233,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 branch_id,
                 self.conversation_id,
                 workspace_name=self.workspace_name,
-                flagged_scope=self.flagged_scope,
+                group_name=self.group_name,
                 tools=tools,
                 exclude_servers=exclude,
                 on_event=on_event,
@@ -244,8 +254,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
             await self.send_json({"type": "chat.cancelled"})
         except Exception as exc:
             logger.exception(
-                "WebSocket agent run failed (conversation=%s workspace=%s)",
+                "WebSocket agent run failed (conversation=%s group=%s workspace=%s)",
                 self.conversation_id,
+                self.group_name,
                 self.workspace_name,
             )
             await self.send_json({"type": "error", "message": str(exc)})

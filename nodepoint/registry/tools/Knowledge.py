@@ -4,7 +4,10 @@ active: true
 
 from nodepoint.registry import Tool
 from nodepoint.services import kg_search
-from nodepoint.services.chat_context import resolve_search_workspace_names
+from nodepoint.services.chat_context import (
+    get_group_scope_chat,
+    resolve_search_workspace_names,
+)
 from nodepoint.services.kg_hybrid_search import hybrid_search
 from nodepoint.services.kg_records import (
     RecordAccessError,
@@ -20,11 +23,24 @@ from nodepoint.services.kg_records import (
 
 
 def _no_workspace_message(query: str) -> str:
+    group_name = get_group_scope_chat()
+    if group_name:
+        return (
+            f'# Knowledge search: "{query}"\n\n'
+            f'No workspaces are in group "{group_name}". Add workspaces to the '
+            "group to include them in knowledge search."
+        )
     return (
         f'# Knowledge search: "{query}"\n\n'
-        "No workspace is flagged (starred). Star at least one workspace "
-        "(is_flag=true) to include it in knowledge search."
+        "No workspace is available for knowledge search in this chat session."
     )
+
+
+def _no_access_message() -> str:
+    group_name = get_group_scope_chat()
+    if group_name:
+        return f"No workspaces are in group \"{group_name}\" for knowledge access."
+    return "No workspace is available for knowledge access in this chat session."
 
 
 def _workspace_scope():
@@ -83,7 +99,7 @@ def search_graph(
 def get_entity_record(entity_id: str) -> str:
     workspaces = _workspace_scope()
     if not workspaces:
-        return "No workspace is flagged for knowledge access."
+        return _no_access_message()
     try:
         rec = get_entity(entity_id, allowed_workspaces=workspaces)
     except RecordNotFoundError as exc:
@@ -100,7 +116,7 @@ def get_entity_record(entity_id: str) -> str:
 def get_relation_record(relation_id: str) -> str:
     workspaces = _workspace_scope()
     if not workspaces:
-        return "No workspace is flagged for knowledge access."
+        return _no_access_message()
     try:
         rec = get_relation(relation_id, allowed_workspaces=workspaces)
     except RecordNotFoundError as exc:
@@ -117,7 +133,7 @@ def get_relation_record(relation_id: str) -> str:
 def get_chunk_record(chunk_id: str) -> str:
     workspaces = _workspace_scope()
     if not workspaces:
-        return "No workspace is flagged for knowledge access."
+        return _no_access_message()
     try:
         rec = get_chunk(chunk_id, allowed_workspaces=workspaces)
     except RecordNotFoundError as exc:
@@ -134,7 +150,7 @@ def get_chunk_record(chunk_id: str) -> str:
 # def get_document_record(document_id: str) -> str:
 #     workspaces = _workspace_scope()
 #     if not workspaces:
-#         return "No workspace is flagged for knowledge access."
+#         return _no_access_message()
 #     try:
 #         rec = get_document(document_id, allowed_workspaces=workspaces)
 #     except RecordNotFoundError as exc:
@@ -163,7 +179,7 @@ def search_entity_by_name(
     if not workspaces:
         return (
             f'# Entity name search: "{name}"\n\n'
-            "No workspace is flagged (starred) for knowledge search."
+            + _no_access_message().replace("knowledge access", "knowledge search")
         )
     if threshold < 0.0 or threshold > 1.0:
         return (

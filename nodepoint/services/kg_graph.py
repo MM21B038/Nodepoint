@@ -7,7 +7,7 @@ from uuid import UUID
 from django.db.models import Count, Q
 
 from nodepoint.models import KnowledgeEntity, KnowledgeRelation, Workspace
-from nodepoint.services.workspace import get_flagged_workspaces_qs
+from nodepoint.services.workspace_group import get_group_workspaces_qs
 
 DEFAULT_GRAPH_LIMIT = 500
 DEFAULT_GRAPH_DEPTH = 1
@@ -18,12 +18,14 @@ MAX_GRAPH_DEPTH = 5
 @dataclass(frozen=True)
 class GraphFilters:
     entity_types: list[str] | None
+    file_names: list[str] | None
     depth: int
     limit: int
 
     def as_response_dict(self) -> dict[str, Any]:
         return {
             "entity_types": self.entity_types,
+            "file_names": self.file_names,
             "depth": self.depth,
             "limit": self.limit,
         }
@@ -38,13 +40,24 @@ def parse_entity_types_param(raw: str | None) -> list[str] | None:
     return types
 
 
+def parse_file_names_param(raw: str | None) -> list[str] | None:
+    if raw is None or not str(raw).strip():
+        return None
+    names = [part.strip() for part in str(raw).split(",") if part.strip()]
+    if not names:
+        raise ValueError("file_name must include at least one non-empty file name")
+    return names
+
+
 def parse_graph_filters(
     *,
     entity_type_raw: str | None,
+    file_name_raw: str | None = None,
     depth_raw: str | None,
     limit_raw: str | None,
 ) -> GraphFilters:
     entity_types = parse_entity_types_param(entity_type_raw)
+    file_names = parse_file_names_param(file_name_raw)
 
     depth = DEFAULT_GRAPH_DEPTH
     if depth_raw is not None and str(depth_raw).strip():
@@ -64,19 +77,19 @@ def parse_graph_filters(
         if limit < 1 or limit > MAX_GRAPH_LIMIT:
             raise ValueError(f"limit must be between 1 and {MAX_GRAPH_LIMIT}")
 
-    return GraphFilters(entity_types=entity_types, depth=depth, limit=limit)
+    return GraphFilters(
+        entity_types=entity_types,
+        file_names=file_names,
+        depth=depth,
+        limit=limit,
+    )
 
 
-def serialize_entity(entity: KnowledgeEntity) -> dict:
+def serialize_graph_node(entity: KnowledgeEntity) -> dict:
     return {
         "id": str(entity.id),
         "name": entity.name,
         "entity_type": entity.entity_type,
-        "attributes": entity.attributes,
-        "document_id": str(entity.document_id),
-        "file_name": entity.document.file_name,
-        "vector": entity.vector,
-        "created_at": entity.created_at,
     }
 
 
@@ -113,9 +126,10 @@ def list_entity_types_for_workspace_name(name: str) -> dict:
     return list_entity_types_for_workspace(workspace)
 
 
-def list_entity_types_for_flagged_workspaces() -> dict:
-    workspaces = get_flagged_workspaces_qs().order_by("name")
+def list_entity_types_for_group(group_name: str) -> dict:
+    workspaces = get_group_workspaces_qs(group_name).order_by("name")
     return {
+        "group": group_name,
         "workspaces": [
             {
                 "workspace": ws.name,
@@ -124,11 +138,15 @@ def list_entity_types_for_flagged_workspaces() -> dict:
                 ),
             }
             for ws in workspaces
-        ]
+        ],
     }
 
 
-def _seed_entities_qs(workspace: Workspace, entity_types: list[str] | None):
+def _seed_entities_qs(
+    workspace: Workspace,
+    entity_types: list[str] | None,
+    file_names: list[str] | None = None,
+):
     qs = (
         KnowledgeEntity.objects.filter(document__workspace=workspace)
         .select_related("document")
@@ -136,6 +154,8 @@ def _seed_entities_qs(workspace: Workspace, entity_types: list[str] | None):
     )
     if entity_types is not None:
         qs = qs.filter(entity_type__in=entity_types)
+    if file_names is not None:
+        qs = qs.filter(document__file_name__in=file_names)
     return qs
 
 
@@ -160,6 +180,7 @@ def build_graph_from_seed_ids(
     depth: int,
     limit: int,
     entity_types: list[str] | None = None,
+    file_names: list[str] | None = None,
 ) -> dict:
     """BFS subgraph from explicit seed entity ids (empty seeds → empty graph)."""
     if not seed_ids:
@@ -180,6 +201,8 @@ def build_graph_from_seed_ids(
     )
     if entity_types is not None:
         seed_qs = seed_qs.filter(entity_type__in=entity_types)
+    if file_names is not None:
+        seed_qs = seed_qs.filter(document__file_name__in=file_names)
     all_seeds = list(seed_qs)
 
     truncated = False
@@ -240,7 +263,7 @@ def build_graph_from_seed_ids(
     return {
         "workspace": workspace.name,
         "truncated": truncated,
-        "nodes": [serialize_entity(e) for e in ordered_nodes],
+        "nodes": [serialize_graph_node(e) for e in ordered_nodes],
         "edges": edges,
     }
 
@@ -249,7 +272,9 @@ def build_filtered_workspace_graph(
     workspace: Workspace,
     filters: GraphFilters,
 ) -> dict:
-    seed_qs = _seed_entities_qs(workspace, filters.entity_types)
+    seed_qs = _seed_entities_qs(
+        workspace, filters.entity_types, filters.file_names
+    )
     all_seeds = list(seed_qs)
     truncated = False
 
@@ -311,7 +336,7 @@ def build_filtered_workspace_graph(
         "workspace": workspace.name,
         "filters": filters.as_response_dict(),
         "truncated": truncated,
-        "nodes": [serialize_entity(e) for e in ordered_nodes],
+        "nodes": [serialize_graph_node(e) for e in ordered_nodes],
         "edges": edges,
     }
 
@@ -324,10 +349,11 @@ def build_filtered_graph_for_workspace_name(
     return build_filtered_workspace_graph(workspace, filters)
 
 
-def build_filtered_graphs_for_flagged_workspaces(
+def build_filtered_graphs_for_group(
+    group_name: str,
     filters: GraphFilters,
 ) -> list[dict]:
-    workspaces = get_flagged_workspaces_qs().order_by("name")
+    workspaces = get_group_workspaces_qs(group_name).order_by("name")
     return [build_filtered_workspace_graph(ws, filters) for ws in workspaces]
 
 
@@ -338,6 +364,7 @@ def build_workspace_graph(workspace: Workspace) -> dict:
         workspace,
         GraphFilters(
             entity_types=None,
+            file_names=None,
             depth=DEFAULT_GRAPH_DEPTH,
             limit=DEFAULT_GRAPH_LIMIT,
         ),
@@ -349,17 +376,10 @@ def build_graph_for_workspace_name(name: str) -> dict:
         name,
         GraphFilters(
             entity_types=None,
+            file_names=None,
             depth=DEFAULT_GRAPH_DEPTH,
             limit=DEFAULT_GRAPH_LIMIT,
         ),
     )
 
 
-def build_graphs_for_flagged_workspaces() -> list[dict]:
-    return build_filtered_graphs_for_flagged_workspaces(
-        GraphFilters(
-            entity_types=None,
-            depth=DEFAULT_GRAPH_DEPTH,
-            limit=DEFAULT_GRAPH_LIMIT,
-        ),
-    )

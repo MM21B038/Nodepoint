@@ -32,6 +32,7 @@ class KnowledgeEntitySearchAPIView(APIView):
                     depth_raw=request.query_params.get("depth"),
                     limit_raw=request.query_params.get("limit"),
                     entity_type_raw=request.query_params.get("entity_type"),
+                    file_name_raw=request.query_params.get("file_name"),
                     threshold_raw=request.query_params.get("threshold"),
                     match_limit_raw=request.query_params.get("match_limit"),
                 )
@@ -39,8 +40,9 @@ class KnowledgeEntitySearchAPIView(APIView):
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        if scope.flagged:
-            payload = kg_entity_search.search_flagged_workspaces_by_name(
+        if scope.is_group_scope:
+            payload = kg_entity_search.search_group_workspaces_by_name(
+                scope.group_name,
                 query,
                 graph_filters,
                 threshold=threshold,

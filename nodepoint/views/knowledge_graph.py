@@ -17,9 +17,12 @@ class KnowledgeGraphAPIView(APIView):
         if filter_error:
             return Response({"error": filter_error}, status=status.HTTP_400_BAD_REQUEST)
 
-        if scope.flagged:
-            graphs = kg_graph.build_filtered_graphs_for_flagged_workspaces(filters)
-            return Response({"graphs": graphs})
+        if scope.is_group_scope:
+            graphs = kg_graph.build_filtered_graphs_for_group(
+                scope.group_name,
+                filters,
+            )
+            return Response({"group": scope.group_name, "graphs": graphs})
 
         try:
             graph = kg_graph.build_filtered_graph_for_workspace_name(

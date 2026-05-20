@@ -2,12 +2,13 @@
 
 Backend-only streaming chat over Django Channels. Requires **ASGI** (`uvicorn config.asgi:application`) and **Redis** for the channel layer.
 
-## Quick start (flagged-scope / “global” chat)
+## Quick start (group-scoped chat)
 
-1. `GET /api/chat/?flagged=true` — separate chat thread (no workspace setup required)
-2. Connect: `ws://localhost:8000/ws/chat/flagged/`
-3. Star workspaces (`PATCH .../toggle-flag/`) so `Knowledge.search_graph` can search their KG
-4. Send `{ "type": "chat.send", "content": "Hello" }`
+1. Create a group: `POST /api/group/create/` with `{ "name": "research" }`
+2. Add workspaces: `POST /api/group/research/workspaces/` with `{ "workspace_name": "..." }`
+3. `GET /api/chat/group/research/` — lazy-create group chat thread
+4. Connect: `ws://localhost:8000/ws/chat/group/research/`
+5. Send `{ "type": "chat.send", "content": "Hello" }`
 
 ## Per-workspace chat
 
@@ -17,8 +18,8 @@ Backend-only streaming chat over Django Channels. Requires **ASGI** (`uvicorn co
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/chat/?flagged=true` | Flagged-scope chat history |
-| DELETE | `/api/chat/?flagged=true` | Clear flagged-scope chat |
+| GET | `/api/chat/group/<name>/` | Group-scoped chat history |
+| DELETE | `/api/chat/group/<name>/` | Clear group-scoped chat |
 | GET | `/api/chat/<workspace_name>/` | Named workspace chat |
 | DELETE | `/api/chat/<workspace_name>/` | Clear named workspace chat |
 
@@ -26,7 +27,7 @@ Backend-only streaming chat over Django Channels. Requires **ASGI** (`uvicorn co
 
 | URL | Scope |
 |-----|--------|
-| `/ws/chat/flagged/` | Flagged-scope chat (`chat.ready` includes `flagged`, `starred_workspaces`) |
+| `/ws/chat/group/<name>/` | Group chat (`chat.ready` includes `group`, `workspaces`) |
 | `/ws/chat/<workspace_name>/` | Single workspace (`chat.ready` includes `workspace`) |
 
 ### Client → server
@@ -48,10 +49,11 @@ Backend-only streaming chat over Django Channels. Requires **ASGI** (`uvicorn co
 
 | Chat mode | `Knowledge.search_graph` searches |
 |-----------|----------------------------------|
-| Flagged (`?flagged=true` / `ws/chat/flagged/`) | User-starred workspaces only |
-| Per-workspace | That workspace + all starred |
+| Group (`/ws/chat/group/<name>/`) | All workspaces in that group |
+| Flagged (`/ws/chat/flagged/`) | Workspaces in group `flagged` |
+| Per-workspace | That workspace only |
 
-If none are starred during flagged chat, the tool returns: *No workspace is flagged…*
+If a group has no member workspaces, the tool returns a message that the group is empty.
 
 ## Concurrency
 

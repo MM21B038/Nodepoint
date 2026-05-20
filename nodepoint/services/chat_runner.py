@@ -33,7 +33,7 @@ async def run_agent_stream(
     conversation_id: uuid.UUID,
     *,
     workspace_name: str | None = None,
-    flagged_scope: bool = False,
+    group_name: str | None = None,
     tools: list[dict[str, Any]] | None = None,
     exclude_servers: set[str] | None = None,
     on_event: Callable[[dict[str, Any]], Awaitable[None]],
@@ -49,15 +49,15 @@ async def run_agent_stream(
     response_buf: list[str] = []
     new_branch_id: uuid.UUID | None = None
 
-    if workspace_name is None and not flagged_scope:
+    if workspace_name is None and group_name is None:
         conversation = await storage_async.get_conversation(conversation_id)
         workspace_name = conversation.workspace.name
 
-    if flagged_scope:
-        flagged_token = chat_context.set_flagged_scope_chat(True)
+    if group_name:
+        group_token = chat_context.set_group_scope_chat(group_name)
         ctx_token = chat_context.set_chat_workspace(None)
     else:
-        flagged_token = None
+        group_token = None
         ctx_token = chat_context.set_chat_workspace(workspace_name)
     search_token = chat_context.init_search_session()
 
@@ -171,8 +171,8 @@ async def run_agent_stream(
     finally:
         chat_context.reset_search_session(search_token)
         chat_context.reset_chat_workspace(ctx_token)
-        if flagged_scope:
-            chat_context.reset_flagged_scope_chat(flagged_token)
+        if group_name:
+            chat_context.reset_group_scope_chat(group_token)
 
     return thread, new_branch_id
 

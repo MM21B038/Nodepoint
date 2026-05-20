@@ -691,8 +691,12 @@ from nodepoint.services.chat_context import (
 
 class KgGraphServiceTests(TestCase):
     def setUp(self):
-        self.flagged_ws = Workspace.objects.create(name="flagged-ws", is_flag=True)
-        self.other_ws = Workspace.objects.create(name="other-ws", is_flag=False)
+        from nodepoint.services import workspace_group as group_svc
+
+        group_svc.create_group("main")
+        self.flagged_ws = Workspace.objects.create(name="flagged-ws")
+        self.other_ws = Workspace.objects.create(name="other-ws")
+        group_svc.add_workspace_to_group("main", self.flagged_ws)
         self.doc_flagged = Document.objects.create(
             workspace=self.flagged_ws,
             file_name="a.md",
@@ -730,23 +734,26 @@ class KgGraphServiceTests(TestCase):
         self.assertIn("filters", graph)
         self.assertIn("truncated", graph)
         node = graph["nodes"][0]
-        self.assertIn("id", node)
-        self.assertIn("name", node)
-        self.assertIn("file_name", node)
+        self.assertEqual(set(node.keys()), {"id", "name", "entity_type"})
         edge = graph["edges"][0]
         self.assertEqual(edge["source"], "Alice")
         self.assertEqual(edge["target"], "Bob")
         self.assertIn("source_id", edge)
         self.assertIn("target_id", edge)
 
-    def test_flagged_bulk_excludes_non_flagged(self):
-        graphs = kg_graph.build_graphs_for_flagged_workspaces()
+    def test_group_bulk_includes_only_members(self):
+        filters = kg_graph.GraphFilters(
+            entity_types=None, file_names=None, depth=1, limit=500
+        )
+        graphs = kg_graph.build_filtered_graphs_for_group("main", filters)
         names = [g["workspace"] for g in graphs]
         self.assertIn("flagged-ws", names)
         self.assertNotIn("other-ws", names)
 
     def test_filtered_entity_type_and_depth_zero(self):
-        filters = kg_graph.GraphFilters(entity_types=["ORG"], depth=0, limit=500)
+        filters = kg_graph.GraphFilters(
+            entity_types=["ORG"], file_names=None, depth=0, limit=500
+        )
         graph = kg_graph.build_filtered_workspace_graph(self.flagged_ws, filters)
         self.assertEqual(len(graph["nodes"]), 0)
         self.assertEqual(len(graph["edges"]), 0)
@@ -760,8 +767,8 @@ class KgGraphServiceTests(TestCase):
 class KnowledgeGraphAPITests(TestCase):
     def setUp(self):
         self.client = APIClient()
-        self.ws = Workspace.objects.create(name="api-kg-ws", is_flag=True)
-        self.ws2 = Workspace.objects.create(name="api-kg-ws-2", is_flag=True)
+        self.ws = Workspace.objects.create(name="api-kg-ws")
+        self.ws2 = Workspace.objects.create(name="api-kg-ws-2")
         self.doc = Document.objects.create(
             workspace=self.ws,
             file_name="doc.md",
@@ -780,6 +787,16 @@ class KnowledgeGraphAPITests(TestCase):
             ),
         ]
         ingest_knowledge_graph(self.doc, entities, relations)
+        self.doc_notes = Document.objects.create(
+            workspace=self.ws,
+            file_name="notes.md",
+            file=SimpleUploadedFile("notes.md", b"n"),
+        )
+        ingest_knowledge_graph(
+            self.doc_notes,
+            [Entity(name="Carol", type="PER", attributes={})],
+            [],
+        )
         doc2 = Document.objects.create(
             workspace=self.ws2,
             file_name="other.md",
@@ -791,6 +808,50 @@ class KnowledgeGraphAPITests(TestCase):
             [],
         )
 
+    def test_nodes_contain_only_id_name_entity_type(self):
+        resp = self.client.get(
+            "/api/knowledge-graph/",
+            {"workspace_name": "api-kg-ws", "depth": "0"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        for node in resp.json()["nodes"]:
+            self.assertEqual(set(node.keys()), {"id", "name", "entity_type"})
+
+    def test_file_name_filter(self):
+        resp = self.client.get(
+            "/api/knowledge-graph/",
+            {
+                "workspace_name": "api-kg-ws",
+                "file_name": "notes.md",
+                "depth": "0",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["filters"]["file_names"], ["notes.md"])
+        names = {n["name"] for n in data["nodes"]}
+        self.assertEqual(names, {"Carol"})
+
+    def test_file_name_csv(self):
+        resp = self.client.get(
+            "/api/knowledge-graph/",
+            {
+                "workspace_name": "api-kg-ws",
+                "file_name": "doc.md,notes.md",
+                "depth": "0",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        names = {n["name"] for n in resp.json()["nodes"]}
+        self.assertEqual(names, {"Alice", "Acme", "Carol"})
+
+    def test_empty_file_name_returns_400(self):
+        resp = self.client.get(
+            "/api/knowledge-graph/",
+            {"workspace_name": "api-kg-ws", "file_name": "  , "},
+        )
+        self.assertEqual(resp.status_code, 400)
+
     def test_get_by_workspace_name(self):
         resp = self.client.get(
             "/api/knowledge-graph/", {"workspace_name": "api-kg-ws"}
@@ -798,16 +859,39 @@ class KnowledgeGraphAPITests(TestCase):
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
         self.assertEqual(data["workspace"], "api-kg-ws")
-        self.assertEqual(len(data["nodes"]), 2)
+        self.assertEqual(len(data["nodes"]), 3)
         self.assertEqual(data["filters"]["depth"], 1)
         self.assertEqual(data["filters"]["limit"], 500)
 
-    def test_get_flagged(self):
-        resp = self.client.get("/api/knowledge-graph/", {"flagged": "true"})
+    def test_get_by_group(self):
+        from nodepoint.services import workspace_group as group_svc
+
+        group_svc.create_group("pair")
+        group_svc.add_workspace_to_group("pair", self.ws)
+        group_svc.add_workspace_to_group("pair", self.ws2)
+        resp = self.client.get("/api/knowledge-graph/", {"group": "pair"})
         self.assertEqual(resp.status_code, 200)
-        workspaces = [g["workspace"] for g in resp.json()["graphs"]]
+        data = resp.json()
+        self.assertEqual(data["group"], "pair")
+        workspaces = [g["workspace"] for g in data["graphs"]]
         self.assertIn("api-kg-ws", workspaces)
         self.assertIn("api-kg-ws-2", workspaces)
+
+    def test_get_by_group_name(self):
+        from nodepoint.services import workspace_group as group_svc
+
+        group_svc.get_or_create_group("research")
+        ws = Workspace.objects.create(name="research-only")
+        group_svc.add_workspace_to_group("research", ws)
+        resp = self.client.get(
+            "/api/knowledge-graph/",
+            {"group": "research", "depth": "0"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["group"], "research")
+        self.assertEqual(len(data["graphs"]), 1)
+        self.assertEqual(data["graphs"][0]["workspace"], "research-only")
 
     def test_entity_type_filter_per_only(self):
         resp = self.client.get(
@@ -816,8 +900,9 @@ class KnowledgeGraphAPITests(TestCase):
         )
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
-        self.assertEqual(len(data["nodes"]), 1)
-        self.assertEqual(data["nodes"][0]["name"], "Alice")
+        self.assertEqual(len(data["nodes"]), 2)
+        names = {n["name"] for n in data["nodes"]}
+        self.assertEqual(names, {"Alice", "Carol"})
         self.assertEqual(data["edges"], [])
 
     def test_entity_type_csv_and_depth_one(self):
@@ -833,7 +918,7 @@ class KnowledgeGraphAPITests(TestCase):
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
         names = {n["name"] for n in data["nodes"]}
-        self.assertEqual(names, {"Alice", "Acme"})
+        self.assertEqual(names, {"Alice", "Acme", "Carol"})
         self.assertEqual(len(data["edges"]), 1)
 
     def test_limit_truncated(self):
@@ -868,7 +953,7 @@ class KnowledgeGraphAPITests(TestCase):
 class KnowledgeGraphEntityTypesAPITests(TestCase):
     def setUp(self):
         self.client = APIClient()
-        self.ws = Workspace.objects.create(name="types-ws", is_flag=True)
+        self.ws = Workspace.objects.create(name="types-ws")
         self.doc = Document.objects.create(
             workspace=self.ws,
             file_name="doc.md",
@@ -896,9 +981,12 @@ class KnowledgeGraphEntityTypesAPITests(TestCase):
         self.assertEqual(types["PER"], 2)
         self.assertEqual(types["ORG"], 1)
 
-    def test_entity_types_flagged(self):
+    def test_entity_types_by_group(self):
+        from nodepoint.services import workspace_group as group_svc
+
+        group_svc.add_workspace_to_group("flagged", self.ws)
         resp = self.client.get(
-            "/api/knowledge-graph/entity-types/", {"flagged": "true"}
+            "/api/knowledge-graph/entity-types/", {"group": "flagged"}
         )
         self.assertEqual(resp.status_code, 200)
         names = [w["workspace"] for w in resp.json()["workspaces"]]
@@ -919,7 +1007,7 @@ class KnowledgeGraphEntityTypesAPITests(TestCase):
 class KnowledgeEntitySearchAPITests(TestCase):
     def setUp(self):
         self.client = APIClient()
-        self.ws = Workspace.objects.create(name="entity-search-ws", is_flag=True)
+        self.ws = Workspace.objects.create(name="entity-search-ws")
         self.doc = Document.objects.create(
             workspace=self.ws,
             file_name="doc.md",
@@ -939,6 +1027,16 @@ class KnowledgeEntitySearchAPITests(TestCase):
             ),
         ]
         ingest_knowledge_graph(self.doc, entities, relations)
+        self.doc_other = Document.objects.create(
+            workspace=self.ws,
+            file_name="other.md",
+            file=SimpleUploadedFile("other.md", b"y"),
+        )
+        ingest_knowledge_graph(
+            self.doc_other,
+            [Entity(name="Acme Corp", type="ORG", attributes={})],
+            [],
+        )
 
     def test_fuzzy_search_returns_matches_and_graph(self):
         resp = self.client.get(
@@ -958,9 +1056,42 @@ class KnowledgeEntitySearchAPITests(TestCase):
         names = {m["name"] for m in data["matches"]}
         self.assertTrue(names & {"Alice", "Alicia"})
         self.assertGreaterEqual(data["matches"][0]["score"], 0.6)
+        for match in data["matches"]:
+            self.assertEqual(
+                set(match.keys()),
+                {"id", "name", "entity_type", "score", "workspace"},
+            )
         graph = data["graph"]
         self.assertIn("nodes", graph)
         self.assertIn("edges", graph)
+        for node in graph["nodes"]:
+            self.assertEqual(set(node.keys()), {"id", "name", "entity_type"})
+
+    def test_entity_search_file_name_filter(self):
+        resp_all = self.client.get(
+            "/api/knowledge/entities/search/",
+            {
+                "q": "Acme Corp",
+                "workspace_name": "entity-search-ws",
+                "threshold": "0.9",
+            },
+        )
+        self.assertEqual(resp_all.status_code, 200)
+        self.assertEqual(len(resp_all.json()["matches"]), 2)
+
+        resp = self.client.get(
+            "/api/knowledge/entities/search/",
+            {
+                "q": "Acme Corp",
+                "workspace_name": "entity-search-ws",
+                "file_name": "doc.md",
+                "threshold": "0.9",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(len(data["matches"]), 1)
+        self.assertEqual(data["matches"][0]["name"], "Acme Corp")
 
     def test_threshold_excludes_weak_matches(self):
         resp = self.client.get(
@@ -982,10 +1113,13 @@ class KnowledgeEntitySearchAPITests(TestCase):
         )
         self.assertEqual(resp.status_code, 400)
 
-    def test_flagged_scope(self):
+    def test_group_scope(self):
+        from nodepoint.services import workspace_group as group_svc
+
+        group_svc.add_workspace_to_group("flagged", self.ws)
         resp = self.client.get(
             "/api/knowledge/entities/search/",
-            {"q": "Alice", "flagged": "true"},
+            {"q": "Alice", "group": "flagged"},
         )
         self.assertEqual(resp.status_code, 200)
         names = [w["workspace"] for w in resp.json()["workspaces"]]
@@ -1090,7 +1224,7 @@ class WorkspaceChatAPITests(TestCase):
 class ChatSummaryAPITests(TestCase):
     def setUp(self):
         self.client = APIClient()
-        self.ws = Workspace.objects.create(name="summary-ws", is_flag=True)
+        self.ws = Workspace.objects.create(name="summary-ws")
         chat_storage.create_conversation(self.ws)
 
     def test_summary_by_workspace(self):
@@ -1102,18 +1236,21 @@ class ChatSummaryAPITests(TestCase):
         self.assertGreaterEqual(data["message_count"], 1)
         self.assertNotIn("conversations", data)
 
-    def test_summary_flagged(self):
-        resp = self.client.get("/api/chat/summary/", {"flagged": "true"})
+    def test_summary_by_group(self):
+        from nodepoint.services import workspace_group as group_svc
+
+        group_svc.add_workspace_to_group("flagged", self.ws)
+        resp = self.client.get("/api/chat/summary/", {"group": "flagged"})
         self.assertEqual(resp.status_code, 200)
         names = [w["workspace"] for w in resp.json()["workspaces"]]
         self.assertIn("summary-ws", names)
 
 
 class ChatContextSearchScopeTests(TestCase):
-    def test_resolve_includes_chat_workspace_and_flagged(self):
-        Workspace.objects.create(name="chat-only", is_flag=False)
-        Workspace.objects.create(name="flag-a", is_flag=True)
-        Workspace.objects.create(name="flag-b", is_flag=True)
+    def test_resolve_per_workspace_chat_is_active_workspace_only(self):
+        Workspace.objects.create(name="chat-only")
+        Workspace.objects.create(name="flag-a")
+        Workspace.objects.create(name="flag-b")
 
         token = set_chat_workspace("chat-only")
         try:
@@ -1121,24 +1258,61 @@ class ChatContextSearchScopeTests(TestCase):
         finally:
             reset_chat_workspace(token)
 
-        self.assertEqual(names, ["chat-only", "flag-a", "flag-b"])
+        self.assertEqual(names, ["chat-only"])
 
-    def test_flagged_scope_chat_searches_only_starred(self):
-        from nodepoint.services.chat_context import (
-            reset_flagged_scope_chat,
-            set_flagged_scope_chat,
-        )
+    def test_resolve_excludes_other_workspaces_in_per_workspace_chat(self):
+        Workspace.objects.create(name="other")
+        Workspace.objects.create(name="flag-a")
 
-        Workspace.objects.create(name="chat-only", is_flag=False)
-        Workspace.objects.create(name="flag-a", is_flag=True)
-
-        token = set_flagged_scope_chat(True)
+        token = set_chat_workspace("other")
         try:
             names = resolve_search_workspace_names()
         finally:
-            reset_flagged_scope_chat(token)
+            reset_chat_workspace(token)
+
+        self.assertEqual(names, ["other"])
+        self.assertNotIn("flag-a", names)
+
+    def test_group_scope_chat_searches_group_members(self):
+        from nodepoint.services import workspace_group as group_svc
+        from nodepoint.services.chat_context import (
+            reset_group_scope_chat,
+            set_group_scope_chat,
+        )
+
+        group_svc.create_group("stars")
+        Workspace.objects.create(name="chat-only")
+        flag_a = Workspace.objects.create(name="flag-a")
+        group_svc.add_workspace_to_group("stars", flag_a)
+
+        token = set_group_scope_chat("stars")
+        try:
+            names = resolve_search_workspace_names()
+        finally:
+            reset_group_scope_chat(token)
 
         self.assertEqual(names, ["flag-a"])
+
+    def test_custom_group_scope_searches_member_workspaces(self):
+        from nodepoint.services import workspace_group as group_svc
+        from nodepoint.services.chat_context import (
+            reset_group_scope_chat,
+            set_group_scope_chat,
+        )
+
+        group_svc.create_group("research")
+        Workspace.objects.create(name="in-group")
+        ws = Workspace.objects.get(name="in-group")
+        group_svc.add_workspace_to_group("research", ws)
+        Workspace.objects.create(name="out-group")
+
+        token = set_group_scope_chat("research")
+        try:
+            names = resolve_search_workspace_names()
+        finally:
+            reset_group_scope_chat(token)
+
+        self.assertEqual(names, ["in-group"])
 
 
 class KgSearchTests(TestCase):
@@ -1171,7 +1345,6 @@ class KgSearchTests(TestCase):
             "who is Alice",
         )
         self.assertIn("[entity](", doc)
-        self.assertIn("notes.md", doc)
         self.assertIn("Alice", doc)
 
     def test_resolve_hits_loads_entity(self):
@@ -1192,47 +1365,108 @@ class ChatSystemPromptTests(TestCase):
         self.assertEqual(conversation.system_prompt, Prompt["chat_system"])
 
 
-class FlaggedScopeChatAPITests(TestCase):
+class GroupChatAPITests(TestCase):
     def setUp(self):
         self.client = APIClient()
 
-    def test_flagged_chat_without_query_returns_400(self):
-        self.assertEqual(self.client.get("/api/chat/").status_code, 400)
+    def test_group_chat_empty_members(self):
+        from nodepoint.services import workspace_group as group_svc
 
-    def test_flagged_chat_works_without_user_starred_workspaces(self):
-        resp = self.client.get("/api/chat/", {"flagged": "true"})
+        group_svc.create_group("empty-chat")
+        resp = self.client.get("/api/chat/group/empty-chat/")
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
-        self.assertTrue(data["flagged"])
-        self.assertEqual(data["starred_workspaces"], [])
+        self.assertEqual(data["group"], "empty-chat")
+        self.assertEqual(data["workspaces"], [])
         self.assertEqual(len(data["messages"]), 1)
         self.assertEqual(data["messages"][0]["role"], "system")
 
-    def test_flagged_chat_separate_from_named_workspace(self):
-        Workspace.objects.create(name="123", is_flag=True)
+    def test_group_chat_separate_from_named_workspace(self):
+        from nodepoint.services import workspace_group as group_svc
+
+        group_svc.create_group("g1")
+        Workspace.objects.create(name="123")
         chat_storage.get_or_create_workspace_chat(Workspace.objects.get(name="123"))
-        flagged_resp = self.client.get("/api/chat/", {"flagged": "true"})
+        group_resp = self.client.get("/api/chat/group/g1/")
         ws_resp = self.client.get("/api/chat/123/")
-        self.assertEqual(flagged_resp.status_code, 200)
+        self.assertEqual(group_resp.status_code, 200)
         self.assertEqual(ws_resp.status_code, 200)
-        self.assertTrue(flagged_resp.json()["flagged"])
+        self.assertEqual(group_resp.json()["group"], "g1")
         self.assertEqual(ws_resp.json()["workspace"], "123")
 
-    def test_flagged_chat_lists_starred_workspaces(self):
-        Workspace.objects.create(name="older", is_flag=True)
-        Workspace.objects.create(name="newer", is_flag=True)
-        resp = self.client.get("/api/chat/", {"flagged": "true"})
-        self.assertEqual(resp.json()["starred_workspaces"], ["older", "newer"])
+    def test_group_chat_lists_member_workspaces(self):
+        from nodepoint.services import workspace_group as group_svc
+
+        group_svc.create_group("listed")
+        older = Workspace.objects.create(name="older")
+        newer = Workspace.objects.create(name="newer")
+        group_svc.add_workspace_to_group("listed", older)
+        group_svc.add_workspace_to_group("listed", newer)
+        resp = self.client.get("/api/chat/group/listed/")
+        self.assertEqual(resp.json()["workspaces"], ["older", "newer"])
 
 
-class UploadDefaultFlaggedTests(TestCase):
+class WorkspaceGroupAPITests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+    def test_create_and_list_groups(self):
+        resp = self.client.post(
+            "/api/group/create/",
+            {"name": "research"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201)
+        resp = self.client.get("/api/group/list/")
+        self.assertEqual(resp.status_code, 200)
+        names = [g["name"] for g in resp.json()["groups"]]
+        self.assertIn("research", names)
+
+    def test_add_remove_workspace_and_detail(self):
+        from nodepoint.services import workspace_group as group_svc
+
+        group_svc.create_group("team-a")
+        ws = Workspace.objects.create(name="member-ws")
+        add_resp = self.client.post(
+            "/api/group/team-a/workspaces/",
+            {"workspace_name": "member-ws"},
+            format="json",
+        )
+        self.assertEqual(add_resp.status_code, 200)
+        detail = self.client.get("/api/group/team-a/")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["workspace_count"], 1)
+        self.assertEqual(detail.json()["workspaces"][0]["name"], "member-ws")
+
+        rm_resp = self.client.delete("/api/group/team-a/workspaces/member-ws/")
+        self.assertEqual(rm_resp.status_code, 200)
+        detail2 = self.client.get("/api/group/team-a/")
+        self.assertEqual(detail2.json()["workspace_count"], 0)
+
+    def test_delete_group(self):
+        from nodepoint.services import workspace_group as group_svc
+
+        group_svc.create_group("temp")
+        resp = self.client.delete("/api/group/temp/")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_group_chat_endpoint(self):
+        from nodepoint.services import workspace_group as group_svc
+
+        group_svc.create_group("chat-group")
+        resp = self.client.get("/api/chat/group/chat-group/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["group"], "chat-group")
+
+
+class UploadDefaultWorkspaceTests(TestCase):
     def setUp(self):
         self.client = APIClient()
 
     @patch("nodepoint.views.document.enqueue_preprocess_pipeline")
-    def test_upload_without_workspace_uses_first_flagged(self, mock_pipeline):
-        Workspace.objects.create(name="first-star", is_flag=True)
-        Workspace.objects.create(name="second-star", is_flag=True)
+    def test_upload_without_workspace_uses_oldest_workspace(self, mock_pipeline):
+        Workspace.objects.create(name="first-star")
+        Workspace.objects.create(name="second-star")
         mock_pipeline.return_value = {"message": "ok", "steps": [], "jobs": {}}
         resp = self.client.post(
             "/api/document/upload/",
@@ -1245,7 +1479,7 @@ class UploadDefaultFlaggedTests(TestCase):
         doc = Document.objects.get(id=resp.json()["id"])
         self.assertEqual(doc.workspace.name, "first-star")
 
-    def test_upload_without_workspace_400_when_none_flagged(self):
+    def test_upload_without_workspace_400_when_none_exist(self):
         resp = self.client.post(
             "/api/document/upload/",
             {"file": SimpleUploadedFile("note.md", b"content")},
@@ -1257,8 +1491,8 @@ class UploadDefaultFlaggedTests(TestCase):
 class WorkspaceCatalogAPITests(TestCase):
     def setUp(self):
         self.client = APIClient()
-        self.ws_a = Workspace.objects.create(name="cat-ws-a", is_flag=True)
-        self.ws_b = Workspace.objects.create(name="cat-ws-b", is_flag=False)
+        self.ws_a = Workspace.objects.create(name="cat-ws-a")
+        self.ws_b = Workspace.objects.create(name="cat-ws-b")
         doc = Document.objects.create(
             workspace=self.ws_a,
             file_name="f.md",
@@ -1290,15 +1524,15 @@ class WorkspaceCatalogAPITests(TestCase):
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
         self.assertGreaterEqual(data["total"], 2)
-        self.assertEqual(data["flagged"] + data["non_flagged"], data["total"])
+        self.assertEqual(data["in_group"] + data["ungrouped"], data["total"])
 
     def test_workspace_page_all(self):
         resp = self.client.get(
-            "/api/workspace/page/", {"page": "1", "page_size": "10", "flag": "all"}
+            "/api/workspace/page/", {"page": "1", "page_size": "10"}
         )
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
-        self.assertEqual(data["filter"], "all")
+        self.assertIsNone(data["group"])
         names = [w["name"] for w in data["workspaces"]]
         self.assertIn("cat-ws-a", names)
         row = next(w for w in data["workspaces"] if w["name"] == "cat-ws-a")
@@ -1307,58 +1541,25 @@ class WorkspaceCatalogAPITests(TestCase):
         self.assertEqual(row["counts"]["relations"], 1)
         self.assertEqual(row["counts"]["chunks"], 1)
 
-    def test_workspace_page_flagged_filter(self):
-        resp = self.client.get("/api/workspace/page/", {"flag": "flagged"})
+    def test_workspace_page_group_filter(self):
+        from nodepoint.services import workspace_group as group_svc
+
+        group_svc.create_group("page-filter")
+        group_svc.add_workspace_to_group("page-filter", self.ws_a)
+        resp = self.client.get("/api/workspace/page/", {"group": "page-filter"})
         self.assertEqual(resp.status_code, 200)
-        self.assertTrue(all(w["is_flag"] for w in resp.json()["workspaces"]))
-
-    def test_workspace_page_invalid_flag(self):
-        resp = self.client.get("/api/workspace/page/", {"flag": "maybe"})
-        self.assertEqual(resp.status_code, 400)
+        names = [w["name"] for w in resp.json()["workspaces"]]
+        self.assertEqual(names, ["cat-ws-a"])
 
 
-class FlaggedWorkspaceCountAPITests(TestCase):
-    def setUp(self):
-        self.client = APIClient()
-
-    def test_count_starred_workspaces(self):
-        Workspace.objects.create(name="star-a", is_flag=True)
-        Workspace.objects.create(name="star-b", is_flag=True)
-        Workspace.objects.create(name="plain", is_flag=False)
-        resp = self.client.get("/api/workspace/flagged/count/")
-        self.assertEqual(resp.status_code, 200)
-        data = resp.json()
-        self.assertEqual(data["count"], 2)
-        self.assertEqual(data["workspaces"], ["star-a", "star-b"])
-
-    def test_count_zero_when_none_starred(self):
-        Workspace.objects.create(name="only-plain", is_flag=False)
-        resp = self.client.get("/api/workspace/flagged/count/")
-        self.assertEqual(resp.json()["count"], 0)
-        self.assertEqual(resp.json()["workspaces"], [])
-
-
-class CreateWorkspaceReservedNameTests(TestCase):
-    def setUp(self):
-        self.client = APIClient()
-
-    def test_rejects_reserved_name_flagged(self):
-        resp = self.client.post(
-            "/api/workspace/create/",
-            {"name": "flagged"},
-            format="json",
-        )
-        self.assertEqual(resp.status_code, 400)
-
-
-class KnowledgeToolFlaggedScopeTests(TestCase):
+class KnowledgeToolGroupScopeTests(TestCase):
     @patch("nodepoint.registry.tools.Knowledge.resolve_search_workspace_names")
-    def test_search_graph_no_flagged_workspaces_message(self, mock_resolve):
+    def test_search_graph_empty_group_message(self, mock_resolve):
         mock_resolve.return_value = []
         from nodepoint.registry.tools import Knowledge as knowledge_tools
 
         result = knowledge_tools.search_graph("query")
-        self.assertIn("No workspace is flagged", result)
+        self.assertIn("No workspace", result)
 
 
 class AsyncChatConcurrencyTests(TestCase):
@@ -1448,8 +1649,7 @@ class ChatRunnerToolTests(TestCase):
         self.assertIn("Knowledge.search_graph", names)
         self.assertIn("Knowledge.get_entity_record", names)
         self.assertIn("Knowledge.search_entity_by_name", names)
-        self.assertIn("Knowledge.get_document_record", names)
-        self.assertEqual(len(names), 6)
+        self.assertEqual(len(names), 5)
 
 
 class QdrantSearchTests(TestCase):
@@ -1529,7 +1729,7 @@ class KnowledgeToolTests(TestCase):
         from nodepoint.registry.tools import Knowledge as knowledge_tools
 
         result = knowledge_tools.search_graph("query")
-        self.assertIn("No workspace is flagged", result)
+        self.assertIn("No workspace", result)
 
 
 class KgRecordsTests(TestCase):

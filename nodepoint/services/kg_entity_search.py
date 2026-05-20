@@ -9,7 +9,7 @@ from rapidfuzz import fuzz
 from nodepoint.models import KnowledgeEntity, Workspace
 from nodepoint.services import kg_graph
 from nodepoint.services.kg_graph import GraphFilters, parse_graph_filters
-from nodepoint.services.workspace import get_flagged_workspaces_qs
+from nodepoint.services.workspace_group import get_group_workspaces_qs
 
 DEFAULT_MATCH_LIMIT = 20
 MAX_MATCH_LIMIT = 100
@@ -26,11 +26,13 @@ def parse_entity_search_params(
     depth_raw: str | None,
     limit_raw: str | None,
     entity_type_raw: str | None,
+    file_name_raw: str | None = None,
     threshold_raw: str | None,
     match_limit_raw: str | None,
 ) -> tuple[GraphFilters, float, int]:
     filters = parse_graph_filters(
         entity_type_raw=entity_type_raw,
+        file_name_raw=file_name_raw,
         depth_raw=depth_raw,
         limit_raw=limit_raw,
     )
@@ -58,12 +60,15 @@ def parse_entity_search_params(
 def _base_entity_qs(
     workspace_names: list[str],
     entity_types: list[str] | None,
+    file_names: list[str] | None = None,
 ):
     qs = KnowledgeEntity.objects.filter(
         document__workspace__name__in=workspace_names,
     ).select_related("document", "document__workspace")
     if entity_types is not None:
         qs = qs.filter(entity_type__in=entity_types)
+    if file_names is not None:
+        qs = qs.filter(document__file_name__in=file_names)
     return qs
 
 
@@ -111,6 +116,7 @@ def gather_entity_candidates(
     workspace_names: list[str],
     query: str,
     entity_types: list[str] | None,
+    file_names: list[str] | None = None,
     *,
     include_broad_sample: bool = True,
 ) -> list[KnowledgeEntity]:
@@ -127,7 +133,7 @@ def gather_entity_candidates(
     if not q:
         return []
 
-    base = _base_entity_qs(workspace_names, entity_types)
+    base = _base_entity_qs(workspace_names, entity_types, file_names)
     merged: dict[UUID, KnowledgeEntity] = {}
 
     if len(q) >= 2:
@@ -176,20 +182,21 @@ def fuzzy_match_entities(
     threshold: float = DEFAULT_FUZZY_THRESHOLD,
     match_limit: int = DEFAULT_MATCH_LIMIT,
     entity_types: list[str] | None = None,
+    file_names: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     q = query.strip()
     if not q or not workspace_names:
         return []
 
     candidates = gather_entity_candidates(
-        workspace_names, q, entity_types, include_broad_sample=True
+        workspace_names, q, entity_types, file_names, include_broad_sample=True
     )
     scored = _rank_entities(q, candidates, threshold=threshold)
     top = scored[:match_limit]
 
     results: list[dict[str, Any]] = []
     for entity, score in top:
-        row = kg_graph.serialize_entity(entity)
+        row = kg_graph.serialize_graph_node(entity)
         row["score"] = round(score, 4)
         row["workspace"] = entity.document.workspace.name
         results.append(row)
@@ -225,6 +232,7 @@ def search_workspace_by_name(
         threshold=threshold,
         match_limit=match_limit,
         entity_types=graph_filters.entity_types,
+        file_names=graph_filters.file_names,
     )
     seed_ids = [UUID(m["id"]) for m in matches]
     graph = kg_graph.build_graph_from_seed_ids(
@@ -233,6 +241,7 @@ def search_workspace_by_name(
         depth=graph_filters.depth,
         limit=graph_filters.limit,
         entity_types=graph_filters.entity_types,
+        file_names=graph_filters.file_names,
     )
     graph_filters_dict = graph_filters.as_response_dict()
     graph_filters_dict["threshold"] = threshold
@@ -246,14 +255,15 @@ def search_workspace_by_name(
     }
 
 
-def search_flagged_workspaces_by_name(
+def search_group_workspaces_by_name(
+    group_name: str,
     query: str,
     graph_filters: GraphFilters,
     *,
     threshold: float,
     match_limit: int,
 ) -> dict[str, Any]:
-    workspaces = list(get_flagged_workspaces_qs().order_by("name"))
+    workspaces = list(get_group_workspaces_qs(group_name).order_by("name"))
     graph_filters_dict = graph_filters.as_response_dict()
     graph_filters_dict["threshold"] = threshold
     graph_filters_dict["match_limit"] = match_limit
@@ -266,6 +276,7 @@ def search_flagged_workspaces_by_name(
             threshold=threshold,
             match_limit=match_limit,
             entity_types=graph_filters.entity_types,
+            file_names=graph_filters.file_names,
         )
         seed_ids = [UUID(m["id"]) for m in matches]
         graph = kg_graph.build_graph_from_seed_ids(
@@ -274,6 +285,7 @@ def search_flagged_workspaces_by_name(
             depth=graph_filters.depth,
             limit=graph_filters.limit,
             entity_types=graph_filters.entity_types,
+            file_names=graph_filters.file_names,
         )
         results.append(
             {
@@ -285,6 +297,7 @@ def search_flagged_workspaces_by_name(
 
     return {
         "query": query.strip(),
+        "group": group_name,
         "filters": graph_filters_dict,
         "workspaces": results,
     }
