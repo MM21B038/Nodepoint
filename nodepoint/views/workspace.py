@@ -50,28 +50,30 @@ class CreateWorkspaceAPIView(APIView):
         })
     
 class ListWorkspaceAPIView(APIView):
+    """
+    GET /api/workspace/list/ — lightweight paginated workspace list (no KG counts).
+
+    Query: page, page_size (same defaults as /api/workspace/page/).
+    For file/entity counts use GET /api/workspace/page/.
+    """
 
     def get(self, request):
+        from nodepoint.services import workspace_catalog
 
-        from nodepoint.services.workspace_group import user_workspaces_qs
+        try:
+            page, page_size = workspace_catalog.parse_pagination(
+                request.query_params.get("page"),
+                request.query_params.get("page_size"),
+            )
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        workspaces = (
-            user_workspaces_qs()
-            .prefetch_related("group_memberships__group")
-            .order_by("-created_at")
+        payload = workspace_catalog.list_workspaces_paginated(
+            page=page,
+            page_size=page_size,
+            include_counts=False,
         )
-
-        data = []
-
-        for ws in workspaces:
-            groups = sorted(m.group.name for m in ws.group_memberships.all())
-            data.append({
-                "name": ws.name,
-                "groups": groups,
-                "created_at": ws.created_at,
-            })
-
-        return Response(data)
+        return Response(payload)
     
 class DeleteWorkspaceAPIView(APIView):
 

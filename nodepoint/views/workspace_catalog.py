@@ -31,6 +31,9 @@ class WorkspacePageAPIView(APIView):
                 request.query_params.get("page"),
                 request.query_params.get("page_size"),
             )
+            include_counts = workspace_catalog.parse_include_counts(
+                request.query_params.get("include_counts")
+            )
         except GroupNotFoundError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_404_NOT_FOUND)
         except ValueError as exc:
@@ -40,5 +43,6 @@ class WorkspacePageAPIView(APIView):
             group_name=group_name,
             page=page,
             page_size=page_size,
+            include_counts=include_counts,
         )
         return Response(payload)

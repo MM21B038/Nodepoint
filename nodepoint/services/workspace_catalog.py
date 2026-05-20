@@ -1,19 +1,30 @@
 from __future__ import annotations
 
-from django.core.paginator import EmptyPage, Paginator
 from django.db.models import Count, QuerySet
 
-from nodepoint.models import Workspace
+from nodepoint.models import (
+    Document,
+    DocumentChunk,
+    KnowledgeEntity,
+    KnowledgeRelation,
+    Workspace,
+)
 from nodepoint.services.workspace_group import user_workspaces_qs
 
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
 
+_EMPTY_COUNTS = {"files": 0, "chunks": 0, "entities": 0, "relations": 0}
+
 
 def get_workspace_count_stats() -> dict:
-    qs = user_workspaces_qs()
-    total = qs.count()
-    in_group = qs.filter(group_memberships__isnull=False).distinct().count()
+    base = user_workspaces_qs()
+    total = base.count()
+    in_group = (
+        base.filter(group_memberships__isnull=False)
+        .distinct()
+        .count()
+    )
     return {
         "total": total,
         "in_group": in_group,
@@ -35,28 +46,69 @@ def filter_workspaces_by_group(
     return qs.filter(group_memberships__group__name=group_name).distinct()
 
 
-def workspaces_with_counts_qs() -> QuerySet[Workspace]:
-    return user_workspaces_qs().annotate(
-        file_count=Count("documents", distinct=True),
-        chunk_count=Count("documents__chunks", distinct=True),
-        entity_count=Count("documents__entities", distinct=True),
-        relation_count=Count("documents__relations", distinct=True),
+def workspaces_base_qs(group_name: str | None = None) -> QuerySet[Workspace]:
+    return filter_workspaces_by_group(
+        user_workspaces_qs().order_by("-created_at", "name"),
+        group_name,
     )
 
 
-def serialize_workspace_row(ws: Workspace) -> dict:
+def bulk_counts_for_workspace_ids(workspace_ids: list[int]) -> dict[int, dict[str, int]]:
+    """Per-workspace file/chunk/entity/relation counts (page-sized batches only)."""
+    if not workspace_ids:
+        return {}
+
+    result = {wid: dict(_EMPTY_COUNTS) for wid in workspace_ids}
+
+    for wid, count in (
+        Document.objects.filter(workspace_id__in=workspace_ids)
+        .values("workspace_id")
+        .annotate(c=Count("id"))
+        .values_list("workspace_id", "c")
+    ):
+        result[wid]["files"] = count
+
+    for wid, count in (
+        DocumentChunk.objects.filter(document__workspace_id__in=workspace_ids)
+        .values("document__workspace_id")
+        .annotate(c=Count("id"))
+        .values_list("document__workspace_id", "c")
+    ):
+        result[wid]["chunks"] = count
+
+    for wid, count in (
+        KnowledgeEntity.objects.filter(document__workspace_id__in=workspace_ids)
+        .values("document__workspace_id")
+        .annotate(c=Count("id"))
+        .values_list("document__workspace_id", "c")
+    ):
+        result[wid]["entities"] = count
+
+    for wid, count in (
+        KnowledgeRelation.objects.filter(document__workspace_id__in=workspace_ids)
+        .values("document__workspace_id")
+        .annotate(c=Count("id"))
+        .values_list("document__workspace_id", "c")
+    ):
+        result[wid]["relations"] = count
+
+    return result
+
+
+def serialize_workspace_row(
+    ws: Workspace,
+    *,
+    counts: dict[str, int] | None = None,
+) -> dict:
     groups = sorted(m.group.name for m in ws.group_memberships.all())
-    return {
+    row = {
         "name": ws.name,
         "groups": groups,
         "created_at": ws.created_at,
-        "counts": {
-            "files": getattr(ws, "file_count", 0),
-            "chunks": getattr(ws, "chunk_count", 0),
-            "entities": getattr(ws, "entity_count", 0),
-            "relations": getattr(ws, "relation_count", 0),
-        },
     }
+    if counts is not None:
+        row["counts"] = counts
+    return row
 
 
 def parse_pagination(
@@ -84,34 +136,66 @@ def parse_pagination(
     return page, page_size
 
 
+def parse_include_counts(raw: str | None) -> bool:
+    if raw is None or not str(raw).strip():
+        return True
+    value = str(raw).strip().lower()
+    if value in ("1", "true", "yes"):
+        return True
+    if value in ("0", "false", "no"):
+        return False
+    raise ValueError("include_counts must be true or false")
+
+
+def paginate_queryset(
+    qs: QuerySet,
+    *,
+    page: int,
+    page_size: int,
+) -> tuple[list, dict]:
+    total_items = qs.count()
+    total_pages = max(1, (total_items + page_size - 1) // page_size) if total_items else 1
+    page = min(max(1, page), total_pages)
+    offset = (page - 1) * page_size
+    items = list(qs[offset : offset + page_size])
+    return items, {
+        "page": page,
+        "page_size": page_size,
+        "total_items": total_items,
+        "total_pages": total_pages,
+        "has_next": page < total_pages,
+        "has_previous": page > 1,
+    }
+
+
 def list_workspaces_paginated(
     *,
     group_name: str | None = None,
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
+    include_counts: bool = True,
 ) -> dict:
-    qs = filter_workspaces_by_group(
-        workspaces_with_counts_qs()
-        .prefetch_related("group_memberships__group")
-        .order_by("-created_at", "name"),
-        group_name,
+    base = workspaces_base_qs(group_name).prefetch_related(
+        "group_memberships__group"
     )
-    paginator = Paginator(qs, page_size)
-    try:
-        page_obj = paginator.page(page)
-    except EmptyPage:
-        page_obj = paginator.page(paginator.num_pages) if paginator.num_pages else paginator.page(1)
+    page_list, pagination = paginate_queryset(
+        base, page=page, page_size=page_size
+    )
 
-    items = [serialize_workspace_row(ws) for ws in page_obj.object_list]
+    counts_by_id: dict[int, dict[str, int]] = {}
+    if include_counts and page_list:
+        counts_by_id = bulk_counts_for_workspace_ids([ws.pk for ws in page_list])
+
+    items = [
+        serialize_workspace_row(
+            ws,
+            counts=counts_by_id.get(ws.pk, _EMPTY_COUNTS) if include_counts else None,
+        )
+        for ws in page_list
+    ]
     return {
         "group": group_name,
-        "pagination": {
-            "page": page_obj.number,
-            "page_size": page_size,
-            "total_items": paginator.count,
-            "total_pages": paginator.num_pages,
-            "has_next": page_obj.has_next(),
-            "has_previous": page_obj.has_previous(),
-        },
+        "include_counts": include_counts,
+        "pagination": pagination,
         "workspaces": items,
     }

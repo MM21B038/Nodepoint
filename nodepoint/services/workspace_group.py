@@ -77,25 +77,37 @@ def list_groups() -> list[dict]:
     ]
 
 
-def get_group_detail(name: str) -> dict:
+def get_group_detail(
+    name: str,
+    *,
+    page: int = 1,
+    page_size: int = 50,
+) -> dict:
+    from nodepoint.services.workspace_catalog import paginate_queryset
+
     group = get_group_by_name(name)
     memberships = (
         WorkspaceGroupMembership.objects.filter(group=group)
         .select_related("workspace")
         .order_by("workspace__name")
     )
+    total_count = memberships.count()
+    page_rows, pagination = paginate_queryset(
+        memberships, page=page, page_size=page_size
+    )
     workspaces = [
         {
             "name": m.workspace.name,
             "created_at": m.workspace.created_at,
         }
-        for m in memberships
+        for m in page_rows
     ]
     return {
         "name": group.name,
         "created_at": group.created_at,
-        "workspace_count": len(workspaces),
+        "workspace_count": total_count,
         "workspaces": workspaces,
+        "pagination": pagination,
     }
 
 

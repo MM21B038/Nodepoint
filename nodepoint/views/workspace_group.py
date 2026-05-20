@@ -33,8 +33,19 @@ class ListGroupsAPIView(APIView):
 
 class GroupDetailAPIView(APIView):
     def get(self, request, name):
+        from nodepoint.services import workspace_catalog
+
         try:
-            return Response(group_svc.get_group_detail(name))
+            page, page_size = workspace_catalog.parse_pagination(
+                request.query_params.get("page"),
+                request.query_params.get("page_size"),
+            )
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            return Response(
+                group_svc.get_group_detail(name, page=page, page_size=page_size)
+            )
         except group_svc.GroupNotFoundError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_404_NOT_FOUND)
 

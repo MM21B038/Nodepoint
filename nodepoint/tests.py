@@ -1435,8 +1435,10 @@ class WorkspaceGroupAPITests(TestCase):
         self.assertEqual(add_resp.status_code, 200)
         detail = self.client.get("/api/group/team-a/")
         self.assertEqual(detail.status_code, 200)
-        self.assertEqual(detail.json()["workspace_count"], 1)
-        self.assertEqual(detail.json()["workspaces"][0]["name"], "member-ws")
+        body = detail.json()
+        self.assertEqual(body["workspace_count"], 1)
+        self.assertEqual(body["workspaces"][0]["name"], "member-ws")
+        self.assertIn("pagination", body)
 
         rm_resp = self.client.delete("/api/group/team-a/workspaces/member-ws/")
         self.assertEqual(rm_resp.status_code, 200)
@@ -1550,6 +1552,27 @@ class WorkspaceCatalogAPITests(TestCase):
         self.assertEqual(resp.status_code, 200)
         names = [w["name"] for w in resp.json()["workspaces"]]
         self.assertEqual(names, ["cat-ws-a"])
+
+    def test_workspace_page_without_counts(self):
+        resp = self.client.get(
+            "/api/workspace/page/",
+            {"page": "1", "page_size": "10", "include_counts": "false"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertFalse(data["include_counts"])
+        row = next(w for w in data["workspaces"] if w["name"] == "cat-ws-a")
+        self.assertNotIn("counts", row)
+
+    def test_workspace_list_is_paginated_without_counts(self):
+        resp = self.client.get(
+            "/api/workspace/list/", {"page": "1", "page_size": "10"}
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("pagination", data)
+        self.assertIn("workspaces", data)
+        self.assertFalse(data["include_counts"])
 
 
 class KnowledgeToolGroupScopeTests(TestCase):

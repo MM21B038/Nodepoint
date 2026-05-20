@@ -234,16 +234,18 @@ Create a workspace and its media directory.
 
 ### `GET /api/workspace/list/`
 
-**Response `200`** — array, newest first. Internal `__flagged_chat__` is omitted.
+Lightweight paginated list (name, groups, `created_at` only — **no** file/entity counts). Same pagination query params as `GET /api/workspace/page/`. For counts use `/api/workspace/page/`.
+
+**Response `200`** — object with `workspaces`, `pagination`, `include_counts` (always `false`). Internal chat workspaces omitted.
 
 ```json
-[
-  {
-    "name": "PRAJNA",
-    
-    "created_at": "2026-05-15T12:00:00.123456Z"
-  }
-]
+{
+  "include_counts": false,
+  "pagination": { "page": 1, "page_size": 20, "total_items": 522, "total_pages": 27, "has_next": true, "has_previous": false },
+  "workspaces": [
+    { "name": "PRAJNA", "groups": ["research"], "created_at": "2026-05-15T12:00:00.123456Z" }
+  ]
+}
 ```
 
 ---
@@ -289,10 +291,14 @@ Paginated workspace list with per-workspace resource counts.
 | `page` | `1` | — | Page number (1-based); out-of-range pages clamp to last page |
 | `page_size` | `20` | `100` | Items per page |
 | `group` | — | — | Optional: filter to workspaces in this group name |
+| `include_counts` | `true` | — | Set `false` for a faster directory view (omits `counts` on each row) |
+
+Counts are computed **only for the current page** (not all workspaces). With 500+ workspaces, use `include_counts=false` when browsing and load counts on demand.
 
 **Request**
 
 ```bash
+curl "http://localhost:8000/api/workspace/page/?page=1&page_size=20&include_counts=false"
 curl "http://localhost:8000/api/workspace/page/?page=1&page_size=10&group=research"
 ```
 
@@ -342,25 +348,18 @@ Sorted by `created_at` descending, then `name` ascending.
 
 ### `GET /api/group/<name>/`
 
-Group member workspaces are listed via `GET /api/group/<name>/` before calling group-scope KG/chat APIs.
-
-Uses the same scope as `?group=<name>` on knowledge-graph and entity search (excludes internal `__flagged_chat__`).
+Group detail with **paginated** member list (`page`, `page_size`; default page size 20, max 100). `workspace_count` is the full membership total; `workspaces` is only the current page.
 
 **Response `200`**
 
 ```json
 {
-  "count": 2,
-  "workspaces": ["main", "PRAJNA"]
+  "name": "research",
+  "workspace_count": 522,
+  "pagination": { "page": 1, "page_size": 20, "total_items": 522, "total_pages": 27, "has_next": true, "has_previous": false },
+  "workspaces": [{ "name": "main", "created_at": "..." }]
 }
 ```
-
-| Field | Meaning |
-|-------|---------|
-| `count` | Number of group member workspaces |
-| `workspaces` | Their names, sorted alphabetically |
-
-`count: 0` means no workspace exists — group chat search and `?group=<name>` graph APIs return empty scope.
 
 ---
 
