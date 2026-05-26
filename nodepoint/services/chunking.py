@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from uuid import UUID
 
 import django_rq
 from django.db.models import Count, Q
 from rq import Retry
+from rq.job import Job, JobStatus
 
 from nodepoint.backend.content_extractor import read_document_content
 from nodepoint.backend.kg_builder import split_doc
@@ -18,7 +20,17 @@ logger = logging.getLogger(__name__)
 
 CHUNK_JOB_TIMEOUT = "5m"
 CHUNK_JOB_WAIT_SECONDS = 5 * 60
+_CHUNK_JOB_POLL_INTERVAL_SECONDS = 0.5
 _CHUNK_RETRY = Retry(max=3, interval=[10, 30, 60])
+
+_TERMINAL_CHUNK_JOB_STATUSES = frozenset(
+    {
+        JobStatus.FINISHED,
+        JobStatus.FAILED,
+        JobStatus.STOPPED,
+        JobStatus.CANCELED,
+    }
+)
 
 _INCOMPLETE_CHUNK_STATUSES = (
     Status.PENDING,
@@ -146,13 +158,35 @@ def run_prepare_legacy_batch(workspace_name: str | None = None) -> int:
     return prepared
 
 
-def wait_for_chunk_jobs(jobs: list) -> None:
+def _wait_for_chunk_job(job: Job, timeout_seconds: int) -> None:
+    """Poll RQ until the job reaches a terminal status or timeout elapses."""
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        status = job.get_status(refresh=True)
+        if status in _TERMINAL_CHUNK_JOB_STATUSES:
+            if status != JobStatus.FINISHED:
+                logger.warning("chunk job %s ended with status %s", job.id, status)
+            return
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"chunk job {job.id} did not finish within {timeout_seconds}s"
+            )
+        time.sleep(_CHUNK_JOB_POLL_INTERVAL_SECONDS)
+
+
+def wait_for_chunk_jobs(jobs: list[Job]) -> None:
     """Block until each enqueued process_chunk RQ job finishes (or times out)."""
     for job in jobs:
         try:
-            job.wait(timeout=CHUNK_JOB_WAIT_SECONDS)
+            _wait_for_chunk_job(job, CHUNK_JOB_WAIT_SECONDS)
+        except TimeoutError:
+            logger.error(
+                "chunk job %s did not finish within %ss",
+                job.id,
+                CHUNK_JOB_WAIT_SECONDS,
+            )
         except Exception:
-            logger.exception("chunk job %s did not finish within %ss", job.id, CHUNK_JOB_WAIT_SECONDS)
+            logger.exception("chunk job %s: error while waiting", job.id)
 
 
 def enqueue_chunks_for_documents(
