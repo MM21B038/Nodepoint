@@ -398,6 +398,7 @@ class Agent:
         reasoning: str | None,
         tools: List[Dict[str, Any]] | None,
         stream: bool,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": model,
@@ -409,6 +410,8 @@ class Agent:
             payload["reasoning"] = {"effort": reasoning}
         if tools is not None:
             payload["tools"] = tools
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         return payload
 
     def _payload_log_context(self, payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -688,11 +691,14 @@ class Agent:
         self,
         messages: Thread,
         model: str | None = None,
-        temperature: float = 0.3,
+        temperature: float = 0.2,
+        max_tokens: int | None = None,
     ) -> Union[AgentToolCallsResult, AgentTextResult]:
         """Non-streaming summarization call; omits reasoning by default for gateway compatibility."""
         resolved = self._resolve_model(model, self.model)
         self._validate_model(resolved)
+        if max_tokens is None:
+            max_tokens = int(os.getenv("CHAT_COMPRESS_MAX_OUTPUT_TOKENS", "1000"))
         reasoning: str | None = None
         if not _env_truthy("CHAT_COMPRESS_OMIT_REASONING", default=True):
             reasoning = "low"
@@ -703,6 +709,7 @@ class Agent:
             reasoning=reasoning,
             tools=None,
             stream=False,
+            max_tokens=max_tokens,
         )
         raw_response = self._request("POST", "/chat/completions", payload)
         if "error" in raw_response:
@@ -741,10 +748,11 @@ class Agent:
         self,
         messages: Thread,
         model: str | None = None,
-        temperature: float = 0.3,
+        temperature: float = 0.2,
+        max_tokens: int | None = None,
     ) -> Union[AgentToolCallsResult, AgentTextResult]:
         return await asyncio.to_thread(
-            self.invoke_compression, messages, model, temperature
+            self.invoke_compression, messages, model, temperature, max_tokens
         )
 
     async def stream_async(

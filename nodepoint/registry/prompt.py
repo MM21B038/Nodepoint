@@ -119,9 +119,18 @@ Now Provide an correctly extracted relations in valid JSON format.
 """
 
 context_compression = """
-You compress long multi-turn conversations into a concise handoff report.
-* Preserve facts, decisions, open questions, tool outcomes, and user goals.
-* Use clear markdown sections. Do not invent information.
+You compress a long chat into a handoff report for the next model turn.
+
+Rules (strict):
+- Hard limit: at most 1000 tokens in the entire report. Use short bullets, not paragraphs.
+- Markdown only. Use these H2 headings and omit any section with nothing worth keeping:
+  ## Goals
+  ## Facts
+  ## Tool results
+  ## Decisions
+  ## Open
+- Preserve exact entity/relation/chunk IDs, names, numbers, and user constraints from the thread.
+- Summarize tool output; do not paste large blobs. Never invent information.
 """
 
 chat_system = """

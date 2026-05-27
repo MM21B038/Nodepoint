@@ -111,9 +111,22 @@ async def run_agent_stream(
             threshold,
         )
         try:
+            await on_event(
+                {
+                    "type": "chat.compress_started",
+                    "message": "Summarizing conversation context to free window space…",
+                }
+            )
             conversation = await storage_async.get_conversation(conversation_id)
             parent_branch = await storage_async.get_branch(effective_branch_id)
             summary = await chat_compression.compress_async(agent, thread)
+            await on_event(
+                {
+                    "type": "chat.compress_completed",
+                    "message": "Context summary ready; continuing on a fresh branch.",
+                    "summary_chars": len(summary),
+                }
+            )
             new_branch = await storage_async.create_branch_from_compression(
                 conversation, parent_branch, summary
             )

@@ -1746,7 +1746,9 @@ class ChatCompressionTests(TestCase):
                     )
 
         types = [e.get("type") for e in events]
+        self.assertIn("chat.compress_started", types)
         self.assertIn("chat.compress_failed", types)
+        self.assertNotIn("chat.compress_completed", types)
         self.assertNotIn("chat.compressed", types)
 
     def test_invoke_compression_omits_reasoning_by_default(self):
@@ -1774,6 +1776,18 @@ class ChatCompressionTests(TestCase):
 
         payload = mock_req.call_args[0][2]
         self.assertNotIn("reasoning", payload)
+        self.assertEqual(payload.get("max_tokens"), 1000)
+
+    def test_cap_summary_tokens(self):
+        from nodepoint.services.chat_compression import cap_summary_tokens
+
+        text = "word " * 5000
+        capped = cap_summary_tokens(text, max_tokens=50)
+        import tiktoken
+
+        enc = tiktoken.get_encoding("cl100k_base")
+        self.assertLessEqual(len(enc.encode(capped)), 55)
+        self.assertIn("summary capped", capped)
 
 
 class WebSocketStreamReconnectTests(TransactionTestCase):

@@ -1435,6 +1435,8 @@ Tools and control events are **single frames** (full payload per event):
 | `agent_turn_start` | Model round started | `turn_index` |
 | `model_turn_complete` | Model round ended | `finish_reason` |
 | `agent_session_done` | Agent loop finished text turn | — |
+| `chat.compress_started` | Context compression began | `message` |
+| `chat.compress_completed` | Handoff summary generated | `message`, `summary_chars` |
 | `chat.compressed` | Context compression (server switched branch internally) | — |
 | `chat.compress_failed` | Compression failed; turn continues without new branch | `message` |
 | `chat.done` | Entire user turn complete | — |
@@ -1503,10 +1505,12 @@ Persisted messages:
 
 When the active thread exceeds **`CHAT_COMPRESS_TOKEN_THRESHOLD`** (default **64000**):
 
-1. Server generates a compression report (not sent to client).
-2. Creates an **internal** child branch with a handoff user message (model-only).
-3. Switches `active_branch_id` to the new branch.
-4. Emits `{ "type": "chat.compressed" }` (no branch IDs exposed).
+1. Emits `{ "type": "chat.compress_started", "message": "…" }` (UI status; wrapped in `section: compression`).
+2. Calls the compression model with **`CHAT_COMPRESS_MAX_OUTPUT_TOKENS`** (default **1000**) and a terse handoff prompt.
+3. Emits `{ "type": "chat.compress_completed", "message": "…", "summary_chars": N }`.
+4. Creates an **internal** child branch with the handoff report (not shown in REST root history).
+5. Switches `active_branch_id` to the new branch and emits `{ "type": "chat.compressed" }`.
+6. On failure: `{ "type": "chat.compress_failed", "message": "…" }` and the turn continues without a new branch.
 
 REST history (`messages` on GET chat) stays on the **root** branch only.
 
@@ -1595,6 +1599,9 @@ Returns matches with `score` (fuzzy mode), outgoing/incoming relations (relation
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `CHAT_COMPRESS_TOKEN_THRESHOLD` | `64000` | Trigger internal branch compression |
+| `CHAT_COMPRESS_MAX_OUTPUT_TOKENS` | `1000` | Max tokens in handoff report |
+| `CHAT_COMPRESS_TEMPERATURE` | `0.2` | Compression LLM temperature |
+| `CHAT_COMPRESS_MAX_MESSAGES` | `30` | Max thread messages sent to compression |
 | `CHAT_MAX_CONCURRENT_SEARCHES` | `8` | Max parallel Knowledge tool runs per web worker |
 | `WEB_WORKERS` | `4` | Uvicorn worker processes for ASGI |
 | `DB_CONN_MAX_AGE` | `60` | Postgres connection reuse (seconds) |
@@ -1643,7 +1650,7 @@ Alphabetical by path segment. See sections above for full request/response bodie
 | Connect | `ws://<host>/ws/chat/group/<name>/` | [WebSocket](#chat-websocket) |
 | Connect | `ws://<host>/ws/chat/<workspace_name>/` | [WebSocket](#chat-websocket) |
 | Client → server | `ping`, `chat.send`, `chat.cancel` | [Client → server](#client--server) |
-| Server → client | `chat.ready`, `thinking_token`, `assistant_response_token`, `section`, tools, `chat.compressed`, `chat.done`, `error`, `pong` | [Server → client](#server--client-message-categories) |
+| Server → client | `chat.ready`, `thinking_token`, `assistant_response_token`, `section`, tools, `chat.compress_*`, `chat.compressed`, `chat.done`, `error`, `pong` | [Server → client](#server--client-message-categories) |
 
 ### Agent tools (WebSocket only)
 

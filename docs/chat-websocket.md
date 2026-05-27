@@ -48,6 +48,8 @@ Backend-only streaming chat over Django Channels. Requires **ASGI** (`uvicorn co
 - `chat.status` — reply to `chat.status` (`agent_busy`, `turn_id`, `turn_started_at`)
 - `chat.branch_updated` — active branch changed after compression
 - Agent stream events — see `nodepoint/agent/schema.py` (via channel-layer fan-out)
+- `chat.compress_started` — compression LLM call began (`message`)
+- `chat.compress_completed` — summary ready (`message`, `summary_chars`)
 - `chat.compressed` — internal context compression succeeded (new branch)
 - `chat.compress_failed` — compression failed; turn continues on same branch (non-fatal)
 - `chat.done` — turn finished (`turn_id`, optional `active_branch_id`)
@@ -96,7 +98,9 @@ If a group has no member workspaces, the tool returns a message that the group i
 - `CHAT_COMPRESS_TOKEN_THRESHOLD` — default `64000`
 - `CHAT_COMPRESS_MAX_TOOL_CHARS` — max chars per tool message in compression request (default `4000`)
 - `CHAT_COMPRESS_MAX_ASSISTANT_CHARS` — max chars per assistant message (default `8000`)
-- `CHAT_COMPRESS_MAX_MESSAGES` — max messages sent to compression (default `40`)
+- `CHAT_COMPRESS_MAX_MESSAGES` — max messages sent to compression (default `30`)
+- `CHAT_COMPRESS_MAX_OUTPUT_TOKENS` — max tokens in the handoff report (default `1000`)
+- `CHAT_COMPRESS_TEMPERATURE` — compression LLM temperature (default `0.2`)
 - `CHAT_COMPRESS_OMIT_REASONING` — default `true` (omit `reasoning` field for vLLM-compatible gateways)
 - `CHAT_COMPRESS_MODEL` — optional model override for summaries
 - `LOG_LEVEL` — Django/app log level (default `INFO`)

@@ -9,6 +9,7 @@ class ChatStreamFormatter:
     def __init__(self) -> None:
         self.thinking_open = False
         self.response_open = False
+        self.compression_open = False
 
     def format(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         ev_type = payload.get("type")
@@ -50,6 +51,26 @@ class ChatStreamFormatter:
             frames.append(
                 {"type": "section", "section": "tool_completed", "action": "close"}
             )
+        elif ev_type == "chat.compress_started":
+            frames.extend(self._close_open_sections())
+            frames.append(
+                {"type": "section", "section": "compression", "action": "open"}
+            )
+            frames.append(payload)
+            self.compression_open = True
+        elif ev_type in ("chat.compress_completed", "chat.compress_failed"):
+            frames.append(payload)
+            if self.compression_open:
+                frames.append(
+                    {
+                        "type": "section",
+                        "section": "compression",
+                        "action": "close",
+                    }
+                )
+                self.compression_open = False
+        elif ev_type == "chat.compressed":
+            frames.append(payload)
         else:
             frames.append(payload)
 

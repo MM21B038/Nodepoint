@@ -5,6 +5,7 @@ import logging
 import os
 from typing import Any
 
+import tiktoken
 from django.conf import settings
 
 from nodepoint.agent.agent import Agent
@@ -20,8 +21,8 @@ from nodepoint.registry import Prompt, Thread
 logger = logging.getLogger(__name__)
 
 COMPRESSION_USER_PROMPT = (
-    "max-token / window handoff, now generate an report for this overall "
-    "conversation till the last message"
+    "Write the handoff report for the conversation above. "
+    "Stay within 1000 tokens; prefer bullets; skip empty sections."
 )
 
 _TRUNCATION_SUFFIX = "\n\n...[truncated for compression]..."
@@ -96,6 +97,22 @@ def _compression_model(agent: Agent) -> str:
     return override or agent.model
 
 
+def cap_summary_tokens(text: str, max_tokens: int | None = None) -> str:
+    """Enforce output budget after the model returns (gateway may ignore max_tokens)."""
+    limit = max_tokens if max_tokens is not None else int(
+        getattr(settings, "CHAT_COMPRESS_MAX_OUTPUT_TOKENS", 1000)
+    )
+    if limit <= 0 or not text:
+        return text
+    encoding = tiktoken.get_encoding("cl100k_base")
+    tokens = encoding.encode(text)
+    if len(tokens) <= limit:
+        return text
+    suffix = "\n\n...[summary capped]"
+    keep = max(1, limit - len(encoding.encode(suffix)))
+    return encoding.decode(tokens[:keep]) + suffix
+
+
 async def compress_async(agent: Agent, thread: Thread) -> str:
     temp_thread = build_compression_thread(thread)
     model = _compression_model(agent)
@@ -112,8 +129,16 @@ async def compress_async(agent: Agent, thread: Thread) -> str:
         roles = [getattr(m, "role", type(m).__name__) for m in temp_thread.messages]
         logger.debug("compression_message_roles=%s", roles)
 
+    max_output = int(getattr(settings, "CHAT_COMPRESS_MAX_OUTPUT_TOKENS", 1000))
+    temperature = float(getattr(settings, "CHAT_COMPRESS_TEMPERATURE", 0.2))
+
     try:
-        resp = await agent.invoke_compression_async(messages=temp_thread, model=model)
+        resp = await agent.invoke_compression_async(
+            messages=temp_thread,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_output,
+        )
     except Exception as exc:
         logger.warning(
             "context_compression_failed model=%s estimated_tokens=%s payload_bytes=%s error=%s",
@@ -132,10 +157,12 @@ async def compress_async(agent: Agent, thread: Thread) -> str:
     else:
         summary = str(getattr(resp, "response", "") or "")
 
+    summary = cap_summary_tokens(summary, max_output)
     logger.info(
-        "context_compression_done model=%s summary_chars=%s",
+        "context_compression_done model=%s summary_chars=%s summary_tokens≈%s",
         model,
         len(summary),
+        len(tiktoken.get_encoding("cl100k_base").encode(summary)),
     )
     return summary
 
