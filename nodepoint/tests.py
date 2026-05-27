@@ -1776,7 +1776,7 @@ class ChatCompressionTests(TestCase):
 
         payload = mock_req.call_args[0][2]
         self.assertNotIn("reasoning", payload)
-        self.assertEqual(payload.get("max_tokens"), 2000)
+        self.assertEqual(payload.get("max_tokens"), 4000)
 
     def test_cap_summary_tokens(self):
         from nodepoint.services.chat_compression import cap_summary_tokens

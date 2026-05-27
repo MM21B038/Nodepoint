@@ -1503,10 +1503,10 @@ Persisted messages:
 
 ### Context compression
 
-When the active thread exceeds **`CHAT_COMPRESS_TOKEN_THRESHOLD`** (default **64000**):
+When the active thread exceeds **`CHAT_COMPRESS_TOKEN_THRESHOLD`** (default **80000**):
 
 1. Emits `{ "type": "chat.compress_started", "message": "…" }` (UI status; wrapped in `section: compression`).
-2. Calls the compression model with **`CHAT_COMPRESS_MAX_OUTPUT_TOKENS`** (default **2000**) and a terse handoff prompt.
+2. Calls the compression model with **`CHAT_COMPRESS_MAX_OUTPUT_TOKENS`** (default **4000**) and a terse handoff prompt.
 3. Emits `{ "type": "chat.compress_completed", "message": "…", "summary_chars": N }`.
 4. Creates an **internal** child branch with the handoff report (not shown in REST root history).
 5. Switches `active_branch_id` to the new branch and emits `{ "type": "chat.compressed" }`.
@@ -1598,8 +1598,8 @@ Returns matches with `score` (fuzzy mode), outgoing/incoming relations (relation
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `CHAT_COMPRESS_TOKEN_THRESHOLD` | `64000` | Trigger internal branch compression |
-| `CHAT_COMPRESS_MAX_OUTPUT_TOKENS` | `2000` | Max tokens in handoff report |
+| `CHAT_COMPRESS_TOKEN_THRESHOLD` | `80000` | Trigger internal branch compression |
+| `CHAT_COMPRESS_MAX_OUTPUT_TOKENS` | `4000` | Max tokens in handoff report |
 | `CHAT_COMPRESS_TEMPERATURE` | `0.2` | Compression LLM temperature |
 | `CHAT_COMPRESS_MAX_MESSAGES` | `30` | Max thread messages sent to compression |
 | `CHAT_MAX_CONCURRENT_SEARCHES` | `8` | Max parallel Knowledge tool runs per web worker |

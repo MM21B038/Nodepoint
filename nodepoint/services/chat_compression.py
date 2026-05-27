@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 COMPRESSION_USER_PROMPT = (
     "Write the handoff report for the conversation above. "
-    "Stay within 2000 tokens; prefer bullets; skip empty sections. "
+    "Stay within 4000 tokens; prefer bullets; skip empty sections. "
     "Prioritize details needed to answer the last user request."
 )
 
@@ -101,7 +101,7 @@ def _compression_model(agent: Agent) -> str:
 def cap_summary_tokens(text: str, max_tokens: int | None = None) -> str:
     """Enforce output budget after the model returns (gateway may ignore max_tokens)."""
     limit = max_tokens if max_tokens is not None else int(
-        getattr(settings, "CHAT_COMPRESS_MAX_OUTPUT_TOKENS", 2000)
+        getattr(settings, "CHAT_COMPRESS_MAX_OUTPUT_TOKENS", 4000)
     )
     if limit <= 0 or not text:
         return text
@@ -130,7 +130,7 @@ async def compress_async(agent: Agent, thread: Thread) -> str:
         roles = [getattr(m, "role", type(m).__name__) for m in temp_thread.messages]
         logger.debug("compression_message_roles=%s", roles)
 
-    max_output = int(getattr(settings, "CHAT_COMPRESS_MAX_OUTPUT_TOKENS", 2000))
+    max_output = int(getattr(settings, "CHAT_COMPRESS_MAX_OUTPUT_TOKENS", 4000))
     temperature = float(getattr(settings, "CHAT_COMPRESS_TEMPERATURE", 0.2))
 
     try:

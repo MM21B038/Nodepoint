@@ -227,8 +227,6 @@ async def run_agent_stream(
                     }
                 )
                 tools_remaining -= 1
-                if tools_remaining <= 0:
-                    await maybe_compress()
             elif isinstance(ev, AgentSessionDoneEvent):
                 text = "".join(response_buf)
                 if text:
@@ -240,6 +238,8 @@ async def run_agent_stream(
                         reasoning_content="".join(thinking_buf) or None,
                     )
                     segment_saved = True
+                # Only compress after the final assistant response is complete and persisted,
+                # never mid-stream (avoids visible pauses / branch switches while streaming).
                 await maybe_compress()
                 break
             elif isinstance(ev, ErrorEvent):
