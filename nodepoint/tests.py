@@ -1813,6 +1813,64 @@ class ChatCompressionTests(TestCase):
         self.assertIn("summary capped", capped)
 
 
+class ChatStreamFormatTests(TestCase):
+    def test_multi_round_keeps_distinct_thinking_segments(self):
+        from nodepoint.services.chat_stream_format import ChatStreamFormatter
+
+        fmt = ChatStreamFormatter()
+        frames: list[dict] = []
+
+        def feed(payload: dict) -> None:
+            frames.extend(fmt.format(payload))
+
+        feed({"type": "agent_turn_start", "turn_index": 0})
+        feed({"type": "thinking_token", "token": "a"})
+        feed(
+            {
+                "type": "assistant_tool_calls_message",
+                "tool_calls": [{"function": {"name": "Knowledge.search_graph"}}],
+                "content": "searching",
+            }
+        )
+        feed({"type": "tool_result", "tool_name": "Knowledge.search_graph", "tool_call_id": "c1", "ok": True})
+        feed({"type": "agent_turn_start", "turn_index": 1})
+        feed({"type": "thinking_token", "token": "b"})
+        feed({"type": "assistant_response_token", "token": "Answer"})
+        frames.extend(fmt.close_sections())
+
+        thinking_opens = [
+            f["segment_index"]
+            for f in frames
+            if f.get("type") == "section"
+            and f.get("section") == "thinking"
+            and f.get("action") == "open"
+        ]
+        self.assertEqual(len(thinking_opens), 2)
+        self.assertNotEqual(thinking_opens[0], thinking_opens[1])
+
+        response_closes = [
+            f
+            for f in frames
+            if f.get("type") == "section"
+            and f.get("section") == "response"
+            and f.get("action") == "close"
+        ]
+        self.assertTrue(any(c.get("is_intermediate") is True for c in response_closes))
+        self.assertTrue(any(c.get("is_intermediate") is False for c in response_closes))
+
+        meta = fmt.turn_metadata()
+        self.assertEqual(meta["latest_response_segment_index"], response_closes[-1]["segment_index"])
+
+    def test_tokens_carry_segment_index(self):
+        from nodepoint.services.chat_stream_format import ChatStreamFormatter
+
+        fmt = ChatStreamFormatter()
+        frames = fmt.format({"type": "thinking_token", "token": "x"})
+        token_frames = [f for f in frames if f.get("type") == "thinking_token"]
+        self.assertEqual(len(token_frames), 1)
+        self.assertIn("segment_index", token_frames[0])
+
+
 class WebSocketStreamReconnectTests(TransactionTestCase):
     @patch("nodepoint.services.chat_runner.chat_compression.compress_async", new_callable=AsyncMock)
     @patch.object(chat_runner.Agent, "stream_agent_events_async")

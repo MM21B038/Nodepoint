@@ -193,12 +193,6 @@ async def run_agent_stream(
                 segment_saved = True
                 pending_calls = tool_call_items_to_normalized(ev.tool_calls)
                 tools_remaining = len(ev.tool_calls)
-                await on_event(
-                    {
-                        "type": "tool_calls",
-                        "names": [tc.function.name for tc in ev.tool_calls],
-                    }
-                )
             elif isinstance(ev, ToolResultEvent):
                 if pending_calls is None:
                     continue
@@ -221,14 +215,6 @@ async def run_agent_stream(
                         tool_call_id=ev.tool_call_id or call.id,
                         tool_name=ev.tool_name,
                     )
-                await on_event(
-                    {
-                        "type": "tool_completed",
-                        "tool_name": ev.tool_name,
-                        "tool_call_id": ev.tool_call_id,
-                        "ok": ev.ok,
-                    }
-                )
                 tools_remaining -= 1
             elif isinstance(ev, AgentSessionDoneEvent):
                 text = "".join(response_buf)
