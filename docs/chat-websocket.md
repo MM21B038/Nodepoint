@@ -34,16 +34,43 @@ Backend-only streaming chat over Django Channels. Requires **ASGI** (`uvicorn co
 
 ```json
 { "type": "chat.send", "content": "...", "exclude_servers": ["WikiServer"] }
+{ "type": "chat.reconnect" }
 { "type": "chat.cancel" }
+{ "type": "chat.status" }
 { "type": "ping" }
 ```
 
 ### Server → client
 
-- `chat.ready` — on connect
-- Agent stream events — see `nodepoint/agent/schema.py`
+- `chat.ready` — on connect (`conversation_id`, `active_branch_id`; `agent_busy: true` if a turn is still running — live stream auto-attaches)
+- `chat.turn_started` — turn accepted (`turn_id`)
+- `chat.reconnected` — reply to `chat.reconnect`
+- `chat.status` — reply to `chat.status` (`agent_busy`, `turn_id`, `turn_started_at`)
+- `chat.branch_updated` — active branch changed after compression
+- Agent stream events — see `nodepoint/agent/schema.py` (via channel-layer fan-out)
 - `chat.compressed` — internal context compression
-- `chat.done` — turn finished
+- `chat.done` — turn finished (`turn_id`, optional `active_branch_id`)
+- `chat.interrupted` — partial assistant text was saved (disconnect/cancel mid-stream)
+- `chat.cancelled` — turn stopped by `chat.cancel`
+
+### Disconnect and reconnect (live stream)
+
+If the WebSocket drops **during** a turn:
+
+- The agent **keeps running** (not cancelled).
+- Events are broadcast on the conversation channel group (`chat_{conversation_id}`), so **any** reconnect to the same workspace/group chat receives **live** tokens from that point on.
+- Partial assistant text is still **flushed to Postgres** on cancel/disconnect mid-stream.
+
+After reconnect:
+
+1. Open WebSocket again (or send `{ "type": "chat.reconnect" }` on an existing socket).
+2. On `chat.ready` with `agent_busy: true`, you are already subscribed — live events flow immediately.
+3. **Once**, call `GET /api/chat/<workspace>/` or `GET /api/chat/group/<name>/` to fill text that arrived while you were offline (no token replay).
+4. Send `chat.send` only when `agent_busy` is false.
+
+Use `ping` / `pong` for keepalive on long tool or LLM runs (`AGENT_REQUEST_TIMEOUT` defaults to 300s).
+
+Multiple tabs on the same chat each receive the same live stream.
 
 ## Search scope
 

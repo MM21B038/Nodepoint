@@ -3,7 +3,7 @@ import uuid
 from unittest.mock import MagicMock, patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase, override_settings
+from django.test import TestCase, TransactionTestCase, override_settings
 
 from nodepoint.backend.kg_builder import ingest_knowledge_graph
 from nodepoint.enums import Status
@@ -563,6 +563,8 @@ class LegacyDerivePhaseTests(TestCase):
         )
         self.assertEqual(phase, "needs_prepare")
 
+
+import asyncio
 
 from unittest.mock import AsyncMock, patch
 
@@ -1603,6 +1605,185 @@ class KnowledgeToolGroupScopeTests(TestCase):
 
         result = knowledge_tools.search_graph("query")
         self.assertIn("No workspace", result)
+
+
+class ChatRunnerPersistenceTests(TestCase):
+    @patch("nodepoint.services.chat_runner.chat_compression.compress_async", new_callable=AsyncMock)
+    @patch.object(chat_runner.Agent, "stream_agent_events_async")
+    def test_flush_partial_assistant_on_cancel(self, mock_stream, mock_compress):
+        from asgiref.sync import async_to_sync
+        from nodepoint.agent.schema import AssistantResponseTokenEvent
+        from nodepoint.services.chat_runner import run_agent_stream
+
+        async def stream_then_cancel(*args, **kwargs):
+            yield AssistantResponseTokenEvent(token="Partial ")
+            yield AssistantResponseTokenEvent(token="answer")
+            raise asyncio.CancelledError()
+
+        mock_stream.side_effect = stream_then_cancel
+        mock_compress.return_value = "summary"
+
+        workspace = Workspace.objects.create(name="partial-save-ws")
+        conversation, root = chat_storage.create_conversation(workspace)
+        thread, _, _ = chat_storage.load_thread(root.id)
+
+        with patch.dict(
+            "os.environ",
+            {"BASE_URL": "http://test", "API_KEY": "test-key"},
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                async_to_sync(run_agent_stream)(
+                    thread,
+                    chat_runner.Agent(),
+                    root.id,
+                    conversation.id,
+                    tools=[],
+                    on_event=AsyncMock(),
+                )
+
+        messages = chat_storage.load_branch_messages(root.id)
+        assistant = [m for m in messages if m.role == "assistant"]
+        self.assertEqual(len(assistant), 1)
+        self.assertEqual(assistant[0].content, "Partial answer")
+
+    @patch("nodepoint.services.chat_runner.chat_compression.compress_async", new_callable=AsyncMock)
+    @patch.object(chat_runner.Agent, "stream_agent_events_async")
+    def test_turn_completes_normally_without_duplicate_assistant(self, mock_stream, mock_compress):
+        from asgiref.sync import async_to_sync
+        from nodepoint.agent.schema import (
+            AgentSessionDoneEvent,
+            AssistantResponseTokenEvent,
+        )
+        from nodepoint.services.chat_runner import run_agent_stream
+
+        async def stream(*args, **kwargs):
+            yield AssistantResponseTokenEvent(token="Done")
+            yield AgentSessionDoneEvent()
+
+        mock_stream.side_effect = stream
+        mock_compress.return_value = "summary"
+
+        workspace = Workspace.objects.create(name="done-save-ws")
+        conversation, root = chat_storage.create_conversation(workspace)
+        thread, _, _ = chat_storage.load_thread(root.id)
+
+        with patch.dict(
+            "os.environ",
+            {"BASE_URL": "http://test", "API_KEY": "test-key"},
+        ):
+            async_to_sync(run_agent_stream)(
+                thread,
+                chat_runner.Agent(),
+                root.id,
+                conversation.id,
+                tools=[],
+                on_event=AsyncMock(),
+            )
+
+        assistant = [
+            m
+            for m in chat_storage.load_branch_messages(root.id)
+            if m.role == "assistant"
+        ]
+        self.assertEqual(len(assistant), 1)
+        self.assertEqual(assistant[0].content, "Done")
+
+
+class WebSocketStreamReconnectTests(TransactionTestCase):
+    @patch("nodepoint.services.chat_runner.chat_compression.compress_async", new_callable=AsyncMock)
+    @patch.object(chat_runner.Agent, "stream_agent_events_async")
+    def test_second_socket_receives_live_stream_after_disconnect(
+        self, mock_stream, mock_compress
+    ):
+        from asgiref.sync import async_to_sync
+        from channels.testing import WebsocketCommunicator
+        from config.asgi import application
+        from nodepoint.agent.schema import (
+            AgentSessionDoneEvent,
+            AssistantResponseTokenEvent,
+        )
+
+        mock_compress.return_value = "summary"
+
+        async def delayed_stream(*args, **kwargs):
+            await asyncio.sleep(0.15)
+            yield AssistantResponseTokenEvent(token="Live")
+            yield AgentSessionDoneEvent()
+
+        mock_stream.side_effect = delayed_stream
+
+        Workspace.objects.create(name="ws-reconnect-live")
+
+        async def run():
+            with patch.dict(
+                "os.environ",
+                {"BASE_URL": "http://test", "API_KEY": "test-key"},
+            ):
+                comm1 = WebsocketCommunicator(
+                    application, "/ws/chat/ws-reconnect-live/"
+                )
+                connected, _ = await comm1.connect()
+                self.assertTrue(connected)
+                ready1 = await comm1.receive_json_from(timeout=2)
+                self.assertEqual(ready1["type"], "chat.ready")
+
+                await comm1.send_json_to(
+                    {"type": "chat.send", "content": "hello"}
+                )
+                started = await comm1.receive_json_from(timeout=2)
+                self.assertEqual(started["type"], "chat.turn_started")
+
+                await comm1.disconnect()
+
+                comm2 = WebsocketCommunicator(
+                    application, "/ws/chat/ws-reconnect-live/"
+                )
+                connected2, _ = await comm2.connect()
+                self.assertTrue(connected2)
+                ready2 = await comm2.receive_json_from(timeout=2)
+                self.assertEqual(ready2["type"], "chat.ready")
+                self.assertTrue(ready2.get("agent_busy"))
+
+                saw_live = False
+                saw_done = False
+                for _ in range(20):
+                    msg = await asyncio.wait_for(
+                        comm2.receive_json_from(), timeout=2
+                    )
+                    if msg.get("type") == "assistant_response_token":
+                        if msg.get("token") == "Live":
+                            saw_live = True
+                    if msg.get("type") == "chat.done":
+                        saw_done = True
+                        break
+
+                await comm2.disconnect()
+                self.assertTrue(saw_live, "reconnected socket should receive live tokens")
+                self.assertTrue(saw_done)
+
+        async_to_sync(run)()
+
+    def test_chat_reconnect_when_idle(self):
+        from asgiref.sync import async_to_sync
+        from channels.testing import WebsocketCommunicator
+        from config.asgi import application
+
+        Workspace.objects.create(name="ws-reconnect-idle")
+
+        async def run():
+            comm = WebsocketCommunicator(
+                application, "/ws/chat/ws-reconnect-idle/"
+            )
+            connected, _ = await comm.connect()
+            self.assertTrue(connected)
+            await comm.receive_json_from(timeout=2)
+            await comm.send_json_to({"type": "chat.reconnect"})
+            reply = await comm.receive_json_from(timeout=2)
+            self.assertEqual(reply["type"], "chat.reconnected")
+            self.assertFalse(reply.get("agent_busy"))
+            await comm.disconnect()
+
+        async_to_sync(run)()
 
 
 class AsyncChatConcurrencyTests(TestCase):

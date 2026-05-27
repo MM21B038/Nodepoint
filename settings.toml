@@ -1,7 +1,8 @@
 [agent]
-model = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
-parser = "openai/gpt-oss-120b:free"
-vector = "nvidia/llama-nemotron-embed-vl-1b-v2:free"
+model = "GLM5"
+parser = "Basic"
+vector = "Qwen3-Embedding-8B"
+dim = 256
 
 [postgresql]
 name = "nodepoint"

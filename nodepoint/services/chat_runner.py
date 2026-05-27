@@ -48,6 +48,8 @@ async def run_agent_stream(
     thinking_buf: list[str] = []
     response_buf: list[str] = []
     new_branch_id: uuid.UUID | None = None
+    segment_saved = False
+    effective_branch_id = branch_id
 
     if workspace_name is None and group_name is None:
         conversation = await storage_async.get_conversation(conversation_id)
@@ -66,8 +68,36 @@ async def run_agent_stream(
         payload["type"] = payload.get("type", ev.__class__.__name__)
         await on_event(payload)
 
+    async def flush_streaming_segment(*, interrupted: bool = False) -> bool:
+        """Persist in-progress assistant text (e.g. disconnect or cancel mid-stream)."""
+        nonlocal segment_saved
+        if segment_saved:
+            return False
+        text = "".join(response_buf)
+        reasoning = "".join(thinking_buf) or None
+        if not text and not reasoning:
+            return False
+        thread.addAssistant(text)
+        await storage_async.append_message(
+            effective_branch_id,
+            role=ChatMessageRole.ASSISTANT,
+            content=text,
+            reasoning_content=reasoning,
+        )
+        segment_saved = True
+        thinking_buf.clear()
+        response_buf.clear()
+        if interrupted:
+            await on_event(
+                {
+                    "type": "chat.interrupted",
+                    "message": "Response saved; reconnect or refresh history to continue.",
+                }
+            )
+        return True
+
     async def maybe_compress() -> None:
-        nonlocal thread, new_branch_id
+        nonlocal thread, new_branch_id, effective_branch_id, segment_saved
         token_count = await asyncio.to_thread(thread.root_count_tokens)
         if token_count < settings.CHAT_COMPRESS_TOKEN_THRESHOLD:
             return
@@ -78,6 +108,10 @@ async def run_agent_stream(
             conversation, parent_branch, summary
         )
         new_branch_id = new_branch.id
+        effective_branch_id = new_branch.id
+        segment_saved = False
+        thinking_buf.clear()
+        response_buf.clear()
         thread, _, _ = await storage_async.load_thread(new_branch.id)
         await on_event({"type": "chat.compressed"})
 
@@ -104,12 +138,13 @@ async def run_agent_stream(
                     }
                 )
                 await storage_async.append_message(
-                    branch_id,
+                    effective_branch_id,
                     role=ChatMessageRole.ASSISTANT,
                     content=ev.content or "",
                     reasoning_content=ev.reasoning_content,
                     tool_calls=[tc.model_dump(mode="json") for tc in ev.tool_calls],
                 )
+                segment_saved = True
                 pending_calls = tool_call_items_to_normalized(ev.tool_calls)
                 tools_remaining = len(ev.tool_calls)
                 await on_event(
@@ -133,7 +168,7 @@ async def run_agent_stream(
                 if call is not None:
                     thread.addTool(call, ev.result)
                     await storage_async.append_message(
-                        branch_id,
+                        effective_branch_id,
                         role=ChatMessageRole.TOOL,
                         content=ev.result,
                         tool_call_id=ev.tool_call_id or call.id,
@@ -155,20 +190,33 @@ async def run_agent_stream(
                 if text:
                     thread.addAssistant(text)
                     await storage_async.append_message(
-                        branch_id,
+                        effective_branch_id,
                         role=ChatMessageRole.ASSISTANT,
                         content=text,
                         reasoning_content="".join(thinking_buf) or None,
                     )
+                    segment_saved = True
                 await maybe_compress()
                 break
             elif isinstance(ev, ErrorEvent):
+                await flush_streaming_segment(interrupted=True)
                 await on_event({"type": "error", "message": ev.message})
                 break
+    except asyncio.CancelledError:
+        await flush_streaming_segment(interrupted=True)
+        raise
     except Exception as exc:
-        logger.exception("Agent stream failed for branch %s", branch_id)
+        logger.exception("Agent stream failed for branch %s", effective_branch_id)
+        await flush_streaming_segment(interrupted=True)
         await on_event({"type": "error", "message": str(exc)})
     finally:
+        try:
+            await flush_streaming_segment(interrupted=False)
+        except Exception:
+            logger.exception(
+                "Failed to flush partial assistant for branch %s",
+                effective_branch_id,
+            )
         chat_context.reset_search_session(search_token)
         chat_context.reset_chat_workspace(ctx_token)
         if group_name:

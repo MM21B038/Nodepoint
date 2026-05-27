@@ -1217,8 +1217,8 @@ Reserved: names starting with `__group_chat__` is not a user workspace name.
 1. Create a group and add workspaces: `POST /api/group/create/`, `POST /api/group/<name>/workspaces/`
 2. `GET /api/knowledge-graph/entity-types/?group=<name>` and `GET /api/knowledge-graph/?group=<name>&entity_type=...` — optional KG UI data
 3. `GET /api/chat/group/<name>/` — load group chat history
-4. Connect `ws://<host>/ws/chat/group/<name>/` → `chat.ready`
-5. Send `chat.send` → stream → `chat.done`
+4. Connect `ws://<host>/ws/chat/group/<name>/` → `chat.ready` (if `agent_busy`, turn still running — live stream auto-attaches)
+5. Send `chat.send` → `chat.turn_started` → stream → `chat.done`
 6. `GET /api/chat/?group=<name>` again — refresh messages
 
 ### Typical client flow (per-workspace)
@@ -1268,6 +1268,37 @@ One JSON object per text frame.
 ```
 
 **Response:** `{ "type": "chat.cancelled" }`
+
+#### Reconnect (live stream attach)
+
+```json
+{ "type": "chat.reconnect" }
+```
+
+Use after a drop **or** rely on auto-attach: `chat.ready` with `agent_busy: true` already subscribes to the in-flight turn.
+
+**Response (turn running):**
+
+```json
+{
+  "type": "chat.reconnected",
+  "agent_busy": true,
+  "turn_id": "...",
+  "hint": "Refresh chat history via REST for content received while offline; live stream continues from reconnect."
+}
+```
+
+**Response (idle):** `{ "type": "chat.reconnected", "agent_busy": false }`
+
+While offline, call `GET /api/chat/<workspace>/` or `GET /api/chat/group/<name>/` once to fill the gap; live tokens resume on the WebSocket from reconnect onward (no token replay).
+
+#### Turn status
+
+```json
+{ "type": "chat.status" }
+```
+
+**Response:** `{ "type": "chat.status", "agent_busy": true|false, "turn_id": "...", "turn_started_at": "..." }`
 
 ---
 
