@@ -1735,7 +1735,7 @@ class ChatCompressionTests(TestCase):
                 "os.environ",
                 {"BASE_URL": "http://test", "API_KEY": "test-key", "CHAT_COMPRESS_TOKEN_THRESHOLD": "1"},
             ):
-                with patch.object(Thread, "root_count_tokens", return_value=99999):
+                with patch.object(Thread, "count_tokens", return_value=99999):
                     async_to_sync(run_agent_stream)(
                         thread,
                         chat_runner.Agent(),
@@ -1776,7 +1776,7 @@ class ChatCompressionTests(TestCase):
 
         payload = mock_req.call_args[0][2]
         self.assertNotIn("reasoning", payload)
-        self.assertEqual(payload.get("max_tokens"), 1000)
+        self.assertEqual(payload.get("max_tokens"), 2000)
 
     def test_cap_summary_tokens(self):
         from nodepoint.services.chat_compression import cap_summary_tokens

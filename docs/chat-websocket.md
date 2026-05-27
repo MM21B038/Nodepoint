@@ -99,7 +99,7 @@ If a group has no member workspaces, the tool returns a message that the group i
 - `CHAT_COMPRESS_MAX_TOOL_CHARS` — max chars per tool message in compression request (default `4000`)
 - `CHAT_COMPRESS_MAX_ASSISTANT_CHARS` — max chars per assistant message (default `8000`)
 - `CHAT_COMPRESS_MAX_MESSAGES` — max messages sent to compression (default `30`)
-- `CHAT_COMPRESS_MAX_OUTPUT_TOKENS` — max tokens in the handoff report (default `1000`)
+- `CHAT_COMPRESS_MAX_OUTPUT_TOKENS` — max tokens in the handoff report (default `2000`)
 - `CHAT_COMPRESS_TEMPERATURE` — compression LLM temperature (default `0.2`)
 - `CHAT_COMPRESS_OMIT_REASONING` — default `true` (omit `reasoning` field for vLLM-compatible gateways)
 - `CHAT_COMPRESS_MODEL` — optional model override for summaries

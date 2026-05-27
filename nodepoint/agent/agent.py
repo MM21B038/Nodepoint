@@ -698,7 +698,7 @@ class Agent:
         resolved = self._resolve_model(model, self.model)
         self._validate_model(resolved)
         if max_tokens is None:
-            max_tokens = int(os.getenv("CHAT_COMPRESS_MAX_OUTPUT_TOKENS", "1000"))
+            max_tokens = int(os.getenv("CHAT_COMPRESS_MAX_OUTPUT_TOKENS", "2000"))
         reasoning: str | None = None
         if not _env_truthy("CHAT_COMPRESS_OMIT_REASONING", default=True):
             reasoning = "low"

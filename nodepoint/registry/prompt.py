@@ -122,13 +122,15 @@ context_compression = """
 You compress a long chat into a handoff report for the next model turn.
 
 Rules (strict):
-- Hard limit: at most 1000 tokens in the entire report. Use short bullets, not paragraphs.
+- Hard limit: at most 2000 tokens in the entire report. Use short bullets, not paragraphs.
 - Markdown only. Use these H2 headings and omit any section with nothing worth keeping:
   ## Goals
+  ## Last user query
   ## Facts
   ## Tool results
   ## Decisions
   ## Open
+- Keep only information that is relevant to answering the last user query (plus critical constraints).
 - Preserve exact entity/relation/chunk IDs, names, numbers, and user constraints from the thread.
 - Summarize tool output; do not paste large blobs. Never invent information.
 """

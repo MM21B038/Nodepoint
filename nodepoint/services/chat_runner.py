@@ -98,7 +98,9 @@ async def run_agent_stream(
 
     async def maybe_compress() -> None:
         nonlocal thread, new_branch_id, effective_branch_id, segment_saved
-        token_count = await asyncio.to_thread(thread.root_count_tokens)
+        # Count the current active branch (not the root conversation), otherwise
+        # compression can re-trigger immediately after switching to a compressed branch.
+        token_count = await asyncio.to_thread(thread.count_tokens)
         threshold = settings.CHAT_COMPRESS_TOKEN_THRESHOLD
         if token_count < threshold:
             return
