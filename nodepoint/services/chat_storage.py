@@ -144,6 +144,16 @@ def _next_sequence(branch_id: uuid.UUID) -> int:
     return 0 if current is None else current + 1
 
 
+COMPRESSION_HANDOFF_PREFIX = "Context handoff (compression):"
+
+
+def is_compression_handoff_content(content: str) -> bool:
+    text = (content or "").strip()
+    return text.startswith(COMPRESSION_HANDOFF_PREFIX) or text.startswith(
+        "max-token / window handoff"
+    )
+
+
 def append_message(
     branch_id: uuid.UUID,
     *,
@@ -164,6 +174,83 @@ def append_message(
         tool_call_id=tool_call_id,
         tool_name=tool_name,
     )
+
+
+def append_message_visible(
+    conversation_id: uuid.UUID,
+    branch_id: uuid.UUID,
+    *,
+    role: str,
+    content: str = "",
+    reasoning_content: str | None = None,
+    tool_calls: list | dict | None = None,
+    tool_call_id: str | None = None,
+    tool_name: str | None = None,
+) -> ChatMessage:
+    """
+    Persist on the agent branch and mirror user-visible roles to the root branch.
+
+    REST chat history (`load_root_messages`) only exposes the root branch; internal
+    compression branches hold agent context. Mirroring keeps streamed turns visible.
+    """
+    msg = append_message(
+        branch_id,
+        role=role,
+        content=content,
+        reasoning_content=reasoning_content,
+        tool_calls=tool_calls,
+        tool_call_id=tool_call_id,
+        tool_name=tool_name,
+    )
+    root = get_root_branch(conversation_id)
+    if branch_id == root.id:
+        return msg
+    if role == ChatMessageRole.SYSTEM:
+        return msg
+    if role == ChatMessageRole.USER and is_compression_handoff_content(content):
+        return msg
+    append_message(
+        root.id,
+        role=role,
+        content=content,
+        reasoning_content=reasoning_content,
+        tool_calls=tool_calls,
+        tool_call_id=tool_call_id,
+        tool_name=tool_name,
+    )
+    return msg
+
+
+def sync_visible_messages_to_root(
+    conversation_id: uuid.UUID, branch_id: uuid.UUID
+) -> None:
+    """Copy messages from an internal branch onto root (deduped), e.g. before compression."""
+    root = get_root_branch(conversation_id)
+    if branch_id == root.id:
+        return
+    root_keys = {
+        (m.role, m.content or "", m.tool_call_id or "")
+        for m in load_branch_messages(root.id)
+        if m.role != ChatMessageRole.SYSTEM
+    }
+    for msg in load_branch_messages(branch_id):
+        if msg.role == ChatMessageRole.SYSTEM:
+            continue
+        if msg.role == ChatMessageRole.USER and is_compression_handoff_content(msg.content):
+            continue
+        key = (msg.role, msg.content or "", msg.tool_call_id or "")
+        if key in root_keys:
+            continue
+        append_message(
+            root.id,
+            role=msg.role,
+            content=msg.content,
+            reasoning_content=msg.reasoning_content,
+            tool_calls=msg.tool_calls,
+            tool_call_id=msg.tool_call_id,
+            tool_name=msg.tool_name,
+        )
+        root_keys.add(key)
 
 
 def load_thread(branch_id: uuid.UUID) -> tuple[Thread, ChatBranch, Conversation]:
@@ -216,6 +303,8 @@ def create_branch_from_compression(
 ) -> ChatBranch:
     label = (summary[:200] + "…") if len(summary) > 200 else summary
     with transaction.atomic():
+        sync_visible_messages_to_root(conversation.id, parent_branch.id)
+
         compressions = list(conversation.compressions or [])
         compressions.append(summary)
         conversation.compressions = compressions
@@ -228,10 +317,7 @@ def create_branch_from_compression(
             is_internal=True,
             label=label,
         )
-        handoff = (
-            "max-token / window handoff, now generate a report for this overall "
-            f"conversation till the last message.\n\n{summary}"
-        )
+        handoff = f"{COMPRESSION_HANDOFF_PREFIX}\n\n{summary}"
         append_message(new_branch.id, role=ChatMessageRole.USER, content=handoff)
     return new_branch
 

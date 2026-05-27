@@ -232,7 +232,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
         branch_id = self.active_branch_id
         thread, _, _ = await storage_async.load_thread(branch_id)
         thread.addUser(content)
-        await storage_async.append_message(
+        await storage_async.append_message_visible(
+            self.conversation_id,
             branch_id,
             role="user",
             content=content,

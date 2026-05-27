@@ -78,7 +78,8 @@ async def run_agent_stream(
         if not text and not reasoning:
             return False
         thread.addAssistant(text)
-        await storage_async.append_message(
+        await storage_async.append_message_visible(
+            conversation_id,
             effective_branch_id,
             role=ChatMessageRole.ASSISTANT,
             content=text,
@@ -181,7 +182,8 @@ async def run_agent_stream(
                         "reasoning_content": ev.reasoning_content,
                     }
                 )
-                await storage_async.append_message(
+                await storage_async.append_message_visible(
+                    conversation_id,
                     effective_branch_id,
                     role=ChatMessageRole.ASSISTANT,
                     content=ev.content or "",
@@ -211,7 +213,8 @@ async def run_agent_stream(
                     )
                 if call is not None:
                     thread.addTool(call, ev.result)
-                    await storage_async.append_message(
+                    await storage_async.append_message_visible(
+                        conversation_id,
                         effective_branch_id,
                         role=ChatMessageRole.TOOL,
                         content=ev.result,
@@ -231,7 +234,8 @@ async def run_agent_stream(
                 text = "".join(response_buf)
                 if text:
                     thread.addAssistant(text)
-                    await storage_async.append_message(
+                    await storage_async.append_message_visible(
+                        conversation_id,
                         effective_branch_id,
                         role=ChatMessageRole.ASSISTANT,
                         content=text,

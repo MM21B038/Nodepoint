@@ -1512,7 +1512,9 @@ When the active thread exceeds **`CHAT_COMPRESS_TOKEN_THRESHOLD`** (default **80
 5. Switches `active_branch_id` to the new branch and emits `{ "type": "chat.compressed" }`.
 6. On failure: `{ "type": "chat.compress_failed", "message": "…" }` and the turn continues without a new branch.
 
-REST history (`messages` on GET chat) stays on the **root** branch only.
+REST history (`messages` on GET chat) is served from the **root** branch. User/assistant/tool
+messages are mirrored to root as they are saved (compression handoff text stays internal-only).
+On compression, any messages on the parent branch are synced to root before the internal child is created.
 
 ---
 

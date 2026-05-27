@@ -1222,6 +1222,29 @@ class WorkspaceChatAPITests(TestCase):
         self.assertIn("visible", contents)
         self.assertNotIn("hidden compression report", contents)
 
+    def test_messages_on_internal_branch_mirror_to_root(self):
+        conversation, root = chat_storage.get_or_create_workspace_chat(self.ws)
+        internal = chat_storage.create_branch_from_compression(
+            conversation, root, "hidden compression report"
+        )
+        chat_storage.append_message_visible(
+            conversation.id,
+            internal.id,
+            role=ChatMessageRole.USER,
+            content="after compress user",
+        )
+        chat_storage.append_message_visible(
+            conversation.id,
+            internal.id,
+            role=ChatMessageRole.ASSISTANT,
+            content="after compress assistant",
+        )
+        resp = self.client.get("/api/chat/detail-ws/")
+        contents = [m["content"] for m in resp.json()["messages"]]
+        self.assertIn("after compress user", contents)
+        self.assertIn("after compress assistant", contents)
+        self.assertNotIn("hidden compression report", contents)
+
     def test_delete_clears_chat(self):
         conversation, root = chat_storage.get_or_create_workspace_chat(self.ws)
         chat_storage.append_message(

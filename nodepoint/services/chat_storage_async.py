@@ -31,6 +31,13 @@ def append_message(branch_id: uuid.UUID, **kwargs: Any) -> ChatMessage:
 
 
 @database_sync_to_async
+def append_message_visible(
+    conversation_id: uuid.UUID, branch_id: uuid.UUID, **kwargs: Any
+) -> ChatMessage:
+    return chat_storage.append_message_visible(conversation_id, branch_id, **kwargs)
+
+
+@database_sync_to_async
 def get_conversation(conversation_id: uuid.UUID) -> Conversation:
     return Conversation.objects.select_related("workspace").get(id=conversation_id)
 
