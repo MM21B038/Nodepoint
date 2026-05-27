@@ -98,11 +98,7 @@ async def _run_turn(
             on_event=on_event,
         )
         await publish_frames(conversation_id, formatter.close_sections())
-        done_frame: dict[str, Any] = {
-            "type": "chat.done",
-            "turn_id": str(turn_id),
-            **formatter.turn_metadata(),
-        }
+        done_frame: dict[str, Any] = {"type": "chat.done", "turn_id": str(turn_id)}
         if new_branch_id:
             done_frame["active_branch_id"] = str(new_branch_id)
         await publish_frame(conversation_id, done_frame)

@@ -48,7 +48,6 @@ Backend-only streaming chat over Django Channels. Requires **ASGI** (`uvicorn co
 - `chat.status` — reply to `chat.status` (`agent_busy`, `turn_id`, `turn_started_at`)
 - `chat.branch_updated` — active branch changed after compression
 - Agent stream events — see `nodepoint/agent/schema.py` (via channel-layer fan-out)
-- Stream blocks use **`segment_index`** on each `section` open/close and token frame; keep an array of segments (do not replace one thinking/tools panel). `chat.done` includes **`latest_response_segment_index`** — use only that segment for citation / interactive icons.
 - `chat.compress_started` — compression LLM call began (`message`)
 - `chat.compress_completed` — summary ready (`message`, `summary_chars`)
 - `chat.compressed` — internal context compression succeeded (new branch)

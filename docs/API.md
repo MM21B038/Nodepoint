@@ -1401,16 +1401,6 @@ Before/after token blocks, the server may send **section** frames so the client 
 | `tool_calls` | `open` / `close` | Tool invocation phase |
 | `tool_completed` | `open` / `close` | Single tool finished |
 
-Each section frame includes **`segment_index`** (monotonic per turn). Append tokens to `segments[segment_index]` — do not reuse a single buffer per section name.
-
-| Field | Where | Meaning |
-|-------|--------|---------|
-| `segment_index` | `section`, tokens, tool events | Ordered block id within the turn |
-| `turn_index` | Optional on frames | Model round (0-based) from `agent_turn_start` |
-| `is_intermediate` | `response` section close | `true` when text is pre-tool, not the final answer |
-| `latest_response_segment_index` | `chat.done` | Attach citation / interactive UI **only** to this segment |
-| `response_segment_indices` | `chat.done` | All response blocks in order |
-
 Sections are **hints** for layout. Token categorization still comes from `thinking_token` vs `assistant_response_token`.
 
 #### Example transcript (one turn)
