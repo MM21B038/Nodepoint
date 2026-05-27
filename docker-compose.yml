@@ -78,6 +78,7 @@ services:
       REDIS_HOST: redis
       QDRANT_HOST: qdrant
       WEB_WORKERS: ${WEB_WORKERS:-4}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - ./media:/app/media
       - ./settings.toml:/app/settings.toml:ro
@@ -94,7 +95,7 @@ services:
       [
         "/bin/sh",
         "-c",
-        "exec /app/.venv/bin/uvicorn config.asgi:application --host 0.0.0.0 --port 8000 --workers $${WEB_WORKERS:-4}",
+        "exec /app/.venv/bin/uvicorn config.asgi:application --host 0.0.0.0 --port 8000 --workers $${WEB_WORKERS:-4} --log-level info",
       ]
 
   worker:

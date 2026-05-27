@@ -163,9 +163,48 @@ CHANNEL_LAYERS = {
 }
 
 CHAT_COMPRESS_TOKEN_THRESHOLD = int(os.getenv("CHAT_COMPRESS_TOKEN_THRESHOLD", "64000"))
+CHAT_COMPRESS_MAX_TOOL_CHARS = int(os.getenv("CHAT_COMPRESS_MAX_TOOL_CHARS", "4000"))
+CHAT_COMPRESS_MAX_ASSISTANT_CHARS = int(
+    os.getenv("CHAT_COMPRESS_MAX_ASSISTANT_CHARS", "8000")
+)
+CHAT_COMPRESS_MAX_MESSAGES = int(os.getenv("CHAT_COMPRESS_MAX_MESSAGES", "40"))
+CHAT_COMPRESS_OMIT_REASONING = os.getenv("CHAT_COMPRESS_OMIT_REASONING", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 CHAT_DEFAULT_SYSTEM = os.getenv("CHAT_DEFAULT_SYSTEM", Prompt["chat_system"])
 CHAT_MAX_CONCURRENT_SEARCHES = int(os.getenv("CHAT_MAX_CONCURRENT_SEARCHES", "8"))
 WEB_WORKERS = int(os.getenv("WEB_WORKERS", "4"))
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "standard": {
+            "format": "%(levelname)s %(asctime)s %(name)s %(message)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "standard",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": LOG_LEVEL,
+    },
+    "loggers": {
+        "django": {"level": "INFO", "propagate": True},
+        "django.request": {"level": "WARNING", "propagate": True},
+        "nodepoint": {"level": LOG_LEVEL, "propagate": True},
+        "urllib3": {"level": "WARNING", "propagate": True},
+    },
+}
 
 _db_conn_max_age = os.getenv("DB_CONN_MAX_AGE", "60")
 DATABASES["default"]["CONN_MAX_AGE"] = int(_db_conn_max_age)

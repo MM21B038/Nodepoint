@@ -1689,6 +1689,93 @@ class ChatRunnerPersistenceTests(TestCase):
         self.assertEqual(assistant[0].content, "Done")
 
 
+class ChatCompressionTests(TestCase):
+    def test_build_compression_thread_truncates_tool_content(self):
+        from nodepoint.agent.schema import ToolMessage
+        from nodepoint.registry import Thread
+        from nodepoint.services.chat_compression import build_compression_thread
+
+        thread = Thread()
+        thread.addSystem("chat system")
+        thread.addUser("hello")
+        huge = "x" * 10000
+        thread.addTool(
+            type("T", (), {"id": "call-1"})(),
+            huge,
+        )
+        slim = build_compression_thread(thread)
+        tool_msgs = [m for m in slim.messages if isinstance(m, ToolMessage)]
+        self.assertEqual(len(tool_msgs), 1)
+        self.assertLess(len(tool_msgs[0].content), 5000)
+        self.assertIn("truncated for compression", tool_msgs[0].content)
+
+    @patch.object(chat_runner.Agent, "invoke_compression_async", new_callable=AsyncMock)
+    def test_maybe_compress_continues_on_failure(self, mock_compress):
+        from asgiref.sync import async_to_sync
+        from nodepoint.agent.schema import AgentSessionDoneEvent
+        from nodepoint.registry import Thread
+        from nodepoint.services.chat_runner import run_agent_stream
+
+        mock_compress.side_effect = RuntimeError("upstream 500")
+
+        async def empty_stream(*args, **kwargs):
+            yield AgentSessionDoneEvent()
+
+        workspace = Workspace.objects.create(name="compress-fail-ws")
+        conversation, root = chat_storage.create_conversation(workspace)
+        thread, _, _ = chat_storage.load_thread(root.id)
+
+        events: list[dict] = []
+
+        async def on_event(payload):
+            events.append(payload)
+
+        with patch.object(chat_runner.Agent, "stream_agent_events_async", side_effect=empty_stream):
+            with patch.dict(
+                "os.environ",
+                {"BASE_URL": "http://test", "API_KEY": "test-key", "CHAT_COMPRESS_TOKEN_THRESHOLD": "1"},
+            ):
+                with patch.object(Thread, "root_count_tokens", return_value=99999):
+                    async_to_sync(run_agent_stream)(
+                        thread,
+                        chat_runner.Agent(),
+                        root.id,
+                        conversation.id,
+                        tools=[],
+                        on_event=on_event,
+                    )
+
+        types = [e.get("type") for e in events]
+        self.assertIn("chat.compress_failed", types)
+        self.assertNotIn("chat.compressed", types)
+
+    def test_invoke_compression_omits_reasoning_by_default(self):
+        from nodepoint.registry import Thread
+
+        agent = chat_runner.Agent.__new__(chat_runner.Agent)
+        agent.model = "test-model"
+        agent.base_url = "http://test/v1"
+        agent.verify_ssl = False
+        agent.session = MagicMock()
+        agent.skip_model_validation = True
+        agent._model_ids = {"test-model"}
+
+        thread = Thread()
+        thread.addUser("summarize")
+
+        with patch.dict("os.environ", {"CHAT_COMPRESS_OMIT_REASONING": "true"}, clear=False):
+            with patch.object(agent, "_request", return_value={
+                "choices": [{"message": {"content": "summary"}, "finish_reason": "stop"}],
+                "usage": {},
+            }) as mock_req:
+                with patch.object(agent, "_validate_model"):
+                    with patch.object(agent, "_resolve_model", return_value="test-model"):
+                        agent.invoke_compression(thread)
+
+        payload = mock_req.call_args[0][2]
+        self.assertNotIn("reasoning", payload)
+
+
 class WebSocketStreamReconnectTests(TransactionTestCase):
     @patch("nodepoint.services.chat_runner.chat_compression.compress_async", new_callable=AsyncMock)
     @patch.object(chat_runner.Agent, "stream_agent_events_async")

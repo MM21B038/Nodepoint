@@ -99,21 +99,50 @@ async def run_agent_stream(
     async def maybe_compress() -> None:
         nonlocal thread, new_branch_id, effective_branch_id, segment_saved
         token_count = await asyncio.to_thread(thread.root_count_tokens)
-        if token_count < settings.CHAT_COMPRESS_TOKEN_THRESHOLD:
+        threshold = settings.CHAT_COMPRESS_TOKEN_THRESHOLD
+        if token_count < threshold:
             return
-        conversation = await storage_async.get_conversation(conversation_id)
-        parent_branch = await storage_async.get_branch(branch_id)
-        summary = await chat_compression.compress_async(agent, thread)
-        new_branch = await storage_async.create_branch_from_compression(
-            conversation, parent_branch, summary
+        logger.info(
+            "context_compression_triggered conversation_id=%s branch_id=%s "
+            "token_count=%s threshold=%s",
+            conversation_id,
+            effective_branch_id,
+            token_count,
+            threshold,
         )
-        new_branch_id = new_branch.id
-        effective_branch_id = new_branch.id
-        segment_saved = False
-        thinking_buf.clear()
-        response_buf.clear()
-        thread, _, _ = await storage_async.load_thread(new_branch.id)
-        await on_event({"type": "chat.compressed"})
+        try:
+            conversation = await storage_async.get_conversation(conversation_id)
+            parent_branch = await storage_async.get_branch(effective_branch_id)
+            summary = await chat_compression.compress_async(agent, thread)
+            new_branch = await storage_async.create_branch_from_compression(
+                conversation, parent_branch, summary
+            )
+            new_branch_id = new_branch.id
+            effective_branch_id = new_branch.id
+            segment_saved = False
+            thinking_buf.clear()
+            response_buf.clear()
+            thread, _, _ = await storage_async.load_thread(new_branch.id)
+            await on_event({"type": "chat.compressed"})
+        except Exception as exc:
+            logger.warning(
+                "context_compression_skipped conversation_id=%s branch_id=%s "
+                "token_count=%s error=%s",
+                conversation_id,
+                effective_branch_id,
+                token_count,
+                exc,
+                exc_info=True,
+            )
+            await on_event(
+                {
+                    "type": "chat.compress_failed",
+                    "message": (
+                        "Context compression failed; continuing without compress. "
+                        f"{exc}"
+                    ),
+                }
+            )
 
     try:
         async for ev in agent.stream_agent_events_async(

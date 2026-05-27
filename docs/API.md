@@ -1436,6 +1436,7 @@ Tools and control events are **single frames** (full payload per event):
 | `model_turn_complete` | Model round ended | `finish_reason` |
 | `agent_session_done` | Agent loop finished text turn | — |
 | `chat.compressed` | Context compression (server switched branch internally) | — |
+| `chat.compress_failed` | Compression failed; turn continues without new branch | `message` |
 | `chat.done` | Entire user turn complete | — |
 | `error` | Failure | `message` |
 

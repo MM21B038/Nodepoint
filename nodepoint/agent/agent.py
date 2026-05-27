@@ -389,9 +389,47 @@ class Agent:
     def _resolve_dim(self, dim: int | None) -> int | None:
         return self.dim if dim is None else dim
 
+    def _build_chat_payload(
+        self,
+        messages: Thread,
+        model: str,
+        *,
+        temperature: float,
+        reasoning: str | None,
+        tools: List[Dict[str, Any]] | None,
+        stream: bool,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages.to_json(),
+            "stream": bool(stream),
+            "temperature": temperature,
+        }
+        if reasoning is not None:
+            payload["reasoning"] = {"effort": reasoning}
+        if tools is not None:
+            payload["tools"] = tools
+        return payload
+
+    def _payload_log_context(self, payload: dict[str, Any] | None) -> dict[str, Any]:
+        if not payload:
+            return {"payload_bytes": 0}
+        try:
+            payload_bytes = len(
+                json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            )
+        except (TypeError, ValueError):
+            payload_bytes = -1
+        return {
+            "model": payload.get("model"),
+            "payload_bytes": payload_bytes,
+            "message_count": len(payload.get("messages") or []),
+        }
+
     def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         url = f"{self.base_url.rstrip('/')}/{path.lstrip('/')}"
+        log_ctx = self._payload_log_context(payload)
         try:
             resp = self.session.request(
                 method=method,
@@ -401,11 +439,29 @@ class Agent:
                 timeout=self._request_timeout(),
             )
             if not resp.ok:
-                print("Status:", resp.status_code)
-                print("Response text:", resp.text)  # 👈 THIS IS KEY
+                preview = (resp.text or "")[:2048]
+                logger.error(
+                    "LLM request failed method=%s path=%s status=%s model=%s "
+                    "payload_bytes=%s message_count=%s response_preview=%s",
+                    method,
+                    path,
+                    resp.status_code,
+                    log_ctx.get("model"),
+                    log_ctx.get("payload_bytes"),
+                    log_ctx.get("message_count"),
+                    preview,
+                )
                 resp.raise_for_status()
             return resp.json()
         except requests.RequestException as e:
+            logger.error(
+                "LLM request exception method=%s path=%s model=%s payload_bytes=%s error=%s",
+                method,
+                path,
+                log_ctx.get("model"),
+                log_ctx.get("payload_bytes"),
+                e,
+            )
             raise RuntimeError(f"Request failed for {path}: {e}") from e
         except ValueError as e:
             raise RuntimeError(f"Server returned invalid JSON for {path}") from e
@@ -539,15 +595,14 @@ class Agent:
         model = self._resolve_model(model, self.model)
         self._validate_model(model)
 
-        payload: dict[str, Any] = {
-            "model": model,
-            "messages": messages.to_json(),
-            "stream": bool(stream),
-            "temperature": temperature,
-            "reasoning": {"effort": reasoning},
-        }
-        if tools is not None:
-            payload["tools"] = tools
+        payload = self._build_chat_payload(
+            messages,
+            model,
+            temperature=temperature,
+            reasoning=reasoning,
+            tools=tools,
+            stream=stream,
+        )
 
         if stream:
             return self._request_stream("/chat/completions", payload)
@@ -628,6 +683,69 @@ class Agent:
                 "`Agent.stream_events_async(...)` / `Agent.stream_agent_events_async(...)` for typed streaming."
             )
         return await asyncio.to_thread(self.invoke, messages, model, tools, temperature, reasoning, False)
+
+    def invoke_compression(
+        self,
+        messages: Thread,
+        model: str | None = None,
+        temperature: float = 0.3,
+    ) -> Union[AgentToolCallsResult, AgentTextResult]:
+        """Non-streaming summarization call; omits reasoning by default for gateway compatibility."""
+        resolved = self._resolve_model(model, self.model)
+        self._validate_model(resolved)
+        reasoning: str | None = None
+        if not _env_truthy("CHAT_COMPRESS_OMIT_REASONING", default=True):
+            reasoning = "low"
+        payload = self._build_chat_payload(
+            messages,
+            resolved,
+            temperature=temperature,
+            reasoning=reasoning,
+            tools=None,
+            stream=False,
+        )
+        raw_response = self._request("POST", "/chat/completions", payload)
+        if "error" in raw_response:
+            raise RuntimeError(f"API Error: {raw_response['error']}")
+        response = ChatCompletionResponse.model_validate(raw_response)
+        usage = response.usage
+        choice = response.choices[0]
+        finish_reason = choice.finish_reason or "stop"
+        msg = choice.message
+        reasoning_text = msg.reasoning_content or msg.reasoning or ""
+        if finish_reason == "tool_calls":
+            raw_calls = msg.tool_calls or []
+            tool_calls = [
+                ToolCallNormalized(
+                    name=tc.function.name,
+                    args=_parse_function_arguments(tc.function.arguments),
+                    id=tc.id,
+                )
+                for tc in raw_calls
+            ]
+            return AgentToolCallsResult(
+                tool_calls=tool_calls,
+                reasoning=reasoning_text,
+                message=msg,
+                usage=usage,
+            )
+        return AgentTextResult(
+            finish_reason=finish_reason or "stop",
+            response=msg.content or "",
+            reasoning=reasoning_text,
+            message=msg,
+            usage=usage,
+        )
+
+    async def invoke_compression_async(
+        self,
+        messages: Thread,
+        model: str | None = None,
+        temperature: float = 0.3,
+    ) -> Union[AgentToolCallsResult, AgentTextResult]:
+        return await asyncio.to_thread(
+            self.invoke_compression, messages, model, temperature
+        )
 
     async def stream_async(
         self,
