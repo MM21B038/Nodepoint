@@ -39,7 +39,7 @@ class UploadDocumentAPIView(APIView):
             try:
                 workspace = Workspace.objects.get(name=workspace_name)
             except Workspace.DoesNotExist:
-                return Response({"error": "Workspace not found"}, status=404)
+                workspace = Workspace.objects.create(name=workspace_name)
         else:
             try:
                 workspace = require_default_upload_workspace()

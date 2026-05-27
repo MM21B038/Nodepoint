@@ -1,5 +1,5 @@
 [agent]
-model = "GLM5"
+model = "Basic"
 vector = "Qwen-Embedding-8B"
 dim = 256
 

@@ -143,7 +143,6 @@ Every factual claim must cite at least one source using ONLY these markdown link
 * [entity](<entity-uuid>)
 * [relation](<relation-uuid>)
 * [chunk](<chunk-uuid>)
-* [doc](<document-uuid>)
 Copy the exact **cite** / **id** lines from tool output. Never cite with [source: file_name], file paths, or bare filenames.
 Prefer the most specific record (entity, relation, or chunk). Use [doc](uuid) when referring to the whole uploaded file.
 Use Knowledge.get_document_record when you need full document text by document id.
