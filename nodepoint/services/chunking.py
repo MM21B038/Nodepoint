@@ -18,8 +18,16 @@ from nodepoint.mongo.manager import delete_chunks_for_document, ingest_chunk
 
 logger = logging.getLogger(__name__)
 
-CHUNK_JOB_TIMEOUT = "5m"
-CHUNK_JOB_WAIT_SECONDS = 5 * 60
+# KG extraction (LLM) per chunk can be slow; keep job timeout >= batch wait budget per chunk.
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    return int(str(raw).strip())
+
+
+CHUNK_JOB_TIMEOUT = os.getenv("CHUNK_JOB_TIMEOUT", "30m")
+CHUNK_BATCH_WAIT_SECONDS = _env_int("CHUNK_BATCH_WAIT_SECONDS", 2 * 60 * 60)
 _CHUNK_JOB_POLL_INTERVAL_SECONDS = 0.5
 _CHUNK_RETRY = Retry(max=3, interval=[10, 30, 60])
 
@@ -175,18 +183,40 @@ def _wait_for_chunk_job(job: Job, timeout_seconds: int) -> None:
 
 
 def wait_for_chunk_jobs(jobs: list[Job]) -> None:
-    """Block until each enqueued process_chunk RQ job finishes (or times out)."""
-    for job in jobs:
-        try:
-            _wait_for_chunk_job(job, CHUNK_JOB_WAIT_SECONDS)
-        except TimeoutError:
-            logger.error(
-                "chunk job %s did not finish within %ss",
-                job.id,
-                CHUNK_JOB_WAIT_SECONDS,
-            )
-        except Exception:
-            logger.exception("chunk job %s: error while waiting", job.id)
+    """
+    Block until all enqueued process_chunk jobs finish or the batch deadline elapses.
+
+    Uses one shared deadline (not per-job 300s) so parallel workers can drain a large
+    backlog without the orchestrator giving up early or hitting RQ's default 1800s cap.
+    """
+    if not jobs:
+        return
+    deadline = time.monotonic() + CHUNK_BATCH_WAIT_SECONDS
+    pending: dict[str, Job] = {job.id: job for job in jobs}
+    while pending and time.monotonic() < deadline:
+        finished_ids: list[str] = []
+        for job_id, job in pending.items():
+            try:
+                status = job.get_status(refresh=True)
+            except Exception:
+                logger.exception("chunk job %s: error while polling status", job_id)
+                finished_ids.append(job_id)
+                continue
+            if status in _TERMINAL_CHUNK_JOB_STATUSES:
+                if status != JobStatus.FINISHED:
+                    logger.warning("chunk job %s ended with status %s", job_id, status)
+                finished_ids.append(job_id)
+        for job_id in finished_ids:
+            pending.pop(job_id, None)
+        if pending:
+            time.sleep(_CHUNK_JOB_POLL_INTERVAL_SECONDS)
+    if pending:
+        logger.error(
+            "%s chunk job(s) did not finish within batch wait %ss: %s",
+            len(pending),
+            CHUNK_BATCH_WAIT_SECONDS,
+            ", ".join(sorted(pending.keys())[:20]),
+        )
 
 
 def enqueue_chunks_for_documents(

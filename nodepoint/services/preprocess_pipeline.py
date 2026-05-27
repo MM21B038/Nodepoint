@@ -6,6 +6,7 @@ from typing import Any
 from uuid import UUID
 
 import django_rq
+from django.conf import settings
 from rq import Retry
 
 from nodepoint.backend.content_extractor import read_document_content
@@ -22,7 +23,13 @@ from nodepoint.services.vector import vector_preprocess
 
 logger = logging.getLogger(__name__)
 
-_ORCHESTRATOR_TIMEOUT = "30m"
+def _orchestrator_timeout() -> str:
+    return os.getenv(
+        "PREPROCESS_JOB_TIMEOUT",
+        getattr(settings, "PREPROCESS_JOB_TIMEOUT", "3h"),
+    )
+
+
 _RETRY = Retry(max=3, interval=[10, 30, 60])
 
 
@@ -134,7 +141,7 @@ def enqueue_preprocess_pipeline(
     workspace_name: str | None = None,
 ) -> dict[str, Any]:
     queue = django_rq.get_queue("default")
-    job_kwargs = {"job_timeout": _ORCHESTRATOR_TIMEOUT, "retry": _RETRY}
+    job_kwargs = {"job_timeout": _orchestrator_timeout(), "retry": _RETRY}
 
     steps: list[str] = []
     jobs: dict[str, str | None] = {}

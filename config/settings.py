@@ -142,10 +142,14 @@ MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
 _redis = redis_config()
+# RQ worker default was 1800s; orchestrator batch-waits for chunk jobs need longer.
+RQ_DEFAULT_JOB_TIMEOUT = int(os.getenv("RQ_DEFAULT_JOB_TIMEOUT", "10800"))
+PREPROCESS_JOB_TIMEOUT = os.getenv("PREPROCESS_JOB_TIMEOUT", "3h")
+_rq_queue = {**_redis, "DEFAULT_TIMEOUT": RQ_DEFAULT_JOB_TIMEOUT}
 RQ_QUEUES = {
-    "high": _redis,
-    "default": _redis,
-    "low": _redis,
+    "high": _rq_queue,
+    "default": _rq_queue,
+    "low": _rq_queue,
 }
 
 CHANNEL_LAYERS = {

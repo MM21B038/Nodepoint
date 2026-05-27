@@ -245,6 +245,29 @@ class ChunkPipelineTests(TestCase):
         self.assertEqual(mock_job.get_status.call_count, 3)
         self.assertEqual(mock_sleep.call_count, 2)
 
+    @patch("nodepoint.services.chunking.time.sleep")
+    @patch("nodepoint.services.chunking.time.monotonic")
+    def test_wait_for_chunk_jobs_uses_batch_deadline(self, mock_monotonic, mock_sleep):
+        from nodepoint.services.chunking import wait_for_chunk_jobs
+        from rq.job import JobStatus
+
+        job_a = MagicMock()
+        job_a.id = "job-a"
+        job_b = MagicMock()
+        job_b.id = "job-b"
+        job_a.get_status.side_effect = [JobStatus.STARTED, JobStatus.FINISHED]
+        job_b.get_status.side_effect = [JobStatus.QUEUED, JobStatus.FINISHED]
+        mock_monotonic.side_effect = [0.0, 0.1, 0.2, 0.3]
+
+        with patch(
+            "nodepoint.services.chunking.CHUNK_BATCH_WAIT_SECONDS",
+            600,
+        ):
+            wait_for_chunk_jobs([job_a, job_b])
+
+        self.assertGreaterEqual(job_a.get_status.call_count, 1)
+        self.assertGreaterEqual(job_b.get_status.call_count, 1)
+
     @patch("nodepoint.services.chunking.wait_for_chunk_jobs")
     @patch("nodepoint.services.chunking.django_rq.get_queue")
     def test_enqueue_chunks_can_wait_for_jobs(self, mock_get_queue, mock_wait):

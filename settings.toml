@@ -1,6 +1,6 @@
 [agent]
 model = "GLM5"
-parser = "Basic"
+parser = "DeepSeek"
 vector = "Qwen3-Embedding-8B"
 dim = 256
 

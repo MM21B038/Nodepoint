@@ -113,6 +113,10 @@ services:
       MONGO_HOST: mongo
       REDIS_HOST: redis
       QDRANT_HOST: qdrant
+      RQ_DEFAULT_JOB_TIMEOUT: ${RQ_DEFAULT_JOB_TIMEOUT:-10800}
+      CHUNK_JOB_TIMEOUT: ${CHUNK_JOB_TIMEOUT:-30m}
+      CHUNK_BATCH_WAIT_SECONDS: ${CHUNK_BATCH_WAIT_SECONDS:-7200}
+      PREPROCESS_JOB_TIMEOUT: ${PREPROCESS_JOB_TIMEOUT:-3h}
     volumes:
       - ./media:/app/media
       - ./settings.toml:/app/settings.toml:ro
@@ -127,10 +131,7 @@ services:
         condition: service_healthy
     command:
       [
-        "/app/.venv/bin/python",
-        "manage.py",
-        "rqworker",
-        "default",
-        "high",
-        "low",
+        "/bin/sh",
+        "-c",
+        "exec /app/.venv/bin/python manage.py rqworker default high low --job-timeout $${RQ_DEFAULT_JOB_TIMEOUT:-10800}",
       ]
