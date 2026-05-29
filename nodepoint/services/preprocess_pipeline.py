@@ -354,8 +354,8 @@ def _other_workspaces_needing_preprocess(exclude: str) -> list[str]:
 def enqueue_priority_workspace_preprocess(
     workspace_name: str,
     *,
-    priority: bool = True,
-    include_other_workspaces: bool = True,
+    priority: bool = False,
+    include_other_workspaces: bool = False,
 ) -> dict[str, Any]:
     """
     POST preprocess: prioritize one workspace and optionally queue the rest.

@@ -54,10 +54,10 @@ class PreprocessWorkspaceAPIView(APIView):
             return Response({"error": "Workspace not found"}, status=status.HTTP_404_NOT_FOUND)
 
         params = {**request.query_params.dict(), **request.data}
-        priority = _parse_bool_param(params.get("priority"), default=True)
+        priority = _parse_bool_param(params.get("priority"), default=False)
         include_other_workspaces = _parse_bool_param(
             params.get("include_other_workspaces"),
-            default=True,
+            default=False,
         )
 
         result = enqueue_priority_workspace_preprocess(

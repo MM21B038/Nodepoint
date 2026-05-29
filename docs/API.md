@@ -484,18 +484,18 @@ Deletes the Postgres row, related KG rows (cascade), and the file on disk when p
 
 Queues the **full workspace preprocess pipeline** for the named workspace (no single-document upload). One call runs **prepare legacy → chunk KG (parallel workers) → embeddings → mongo repair** — no separate manual preprocess needed to migrate old documents.
 
-By default the clicked workspace is **prioritized** on the RQ **`high`** orchestrator queue, and **other workspaces** that still have incomplete preprocess work are queued on the **`low`** orchestrator queue in the background. Per-workspace Redis coalescing locks are unchanged (a workspace already running or queued is skipped, not double-started).
+By default only the **named workspace** is queued on the standard RQ **`orchestrator`** queue (no `high` / `low` routing). Per-workspace Redis coalescing locks are unchanged (a workspace already running or queued is skipped, not double-started).
 
 **Query / body parameters**
 
 | Param | Default | Description |
 |-------|---------|-------------|
-| `priority` | `true` | When `true`, enqueue the named workspace on the **`high`** queue; when `false`, use the standard **`orchestrator`** queue (legacy single-workspace behavior). |
-| `include_other_workspaces` | `true` | When `true`, also enqueue pipelines for every other workspace that is not `overall.ready` (on **`low`** when `priority=true`, else **`orchestrator`**). When `false`, only the named workspace is queued. |
+| `priority` | `false` | When `true`, enqueue the named workspace on the **`high`** queue; when `false`, use the standard **`orchestrator`** queue. |
+| `include_other_workspaces` | `false` | When `true`, also enqueue pipelines for every other workspace that is not `overall.ready` (on **`low`** when `priority=true`, else **`orchestrator`**). When `false`, only the named workspace is queued. |
 
-Accepts parameters in the query string or JSON body (`priority`, `include_other_workspaces`).
+Accepts parameters in the query string or JSON body (`priority`, `include_other_workspaces`). Set `?priority=true&include_other_workspaces=true` to prioritize the named workspace on **`high`** and queue other incomplete workspaces on **`low`**.
 
-**RQ worker (orchestrator):** `worker-orchestrator` should listen to **`high orchestrator low`** (in that order) so priority jobs run before background and default orchestrator work. Chunk/vector workers stay on **`chunk`** and **`vector`**; scaling those pools increases throughput for all workspaces.
+**RQ worker (orchestrator):** `worker-orchestrator` should listen to **`high orchestrator low`** (in that order) when using priority/background opt-in. Chunk/vector workers stay on **`chunk`** and **`vector`**; scaling those pools increases throughput for all workspaces.
 
 **Pipeline steps (RQ orchestrator queue)**
 
@@ -511,7 +511,7 @@ Accepts parameters in the query string or JSON body (`priority`, `include_other_
 
 **Coalescing:** Repeated uploads or POST preprocess calls for the same workspace share one workspace tail (vector sweep + mongo repair) via a Redis lock. Upload always runs prepare + document-scoped chunk enqueue immediately.
 
-**RQ queues:** `high` / `orchestrator` / `low` (pipeline steps; POST uses `high` + `low` by default), `chunk` (`process_chunk`), `vector` (`process_vector`). Docker Compose runs a dedicated `worker-orchestrator` service (`high orchestrator low`) plus `worker` on `chunk` and `vector`.
+**RQ queues:** `high` / `orchestrator` / `low` (pipeline steps; POST uses **`orchestrator`** by default), `chunk` (`process_chunk`), `vector` (`process_vector`). Docker Compose runs a dedicated `worker-orchestrator` service (`high orchestrator low`) plus `worker` on `chunk` and `vector`.
 
 **Stuck / failed retry:** Chunk enqueue includes documents in `INPROGRESS` (stuck after worker loss) and chunks in `PENDING` / `FAILED` / `QUEUED`. Vector sweep includes `PENDING` and `FAILED` embeddings.
 
@@ -523,7 +523,7 @@ Accepts parameters in the query string or JSON body (`priority`, `include_other_
 
 ```json
 {
-  "message": "Preprocess pipeline queued: prepare legacy → chunk KG (parallel) → embeddings → mongo repair (workspace=PRAJNA); 2 other workspace(s) queued for background preprocess",
+  "message": "Preprocess pipeline queued: prepare legacy → chunk KG (parallel) → embeddings → mongo repair (workspace=PRAJNA)",
   "priority_workspace": "PRAJNA",
   "priority_pipeline": {
     "message": "Preprocess pipeline queued: prepare legacy → chunk KG (parallel) → embeddings → mongo repair (workspace=PRAJNA)",
@@ -540,24 +540,11 @@ Accepts parameters in the query string or JSON body (`priority`, `include_other_
       "chunk_mongo_repair": "rq-job-id-4"
     }
   },
-  "other_workspaces": [
-    {
-      "workspace": "OTHER",
-      "queued": true,
-      "coalesced": false,
-      "skipped_reason": null
-    },
-    {
-      "workspace": "BUSY",
-      "queued": false,
-      "coalesced": true,
-      "skipped_reason": "pipeline_already_queued"
-    }
-  ]
+  "other_workspaces": []
 }
 ```
 
-Set `?priority=false&include_other_workspaces=false` for the previous single-workspace-only response shape (only `priority_pipeline` is populated; `other_workspaces` is `[]`).
+With `?priority=true&include_other_workspaces=true`, `other_workspaces` lists background pipelines and the `message` may append a count of other workspaces queued on **`low`**.
 
 ---
 

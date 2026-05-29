@@ -164,7 +164,7 @@ class PreprocessPipelineTests(TestCase):
         )
 
     @patch("nodepoint.views.preprocess.enqueue_priority_workspace_preprocess")
-    def test_post_preprocess_defaults_priority_and_others(self, mock_enqueue):
+    def test_post_preprocess_defaults_current_workspace_only(self, mock_enqueue):
         from rest_framework.test import APIClient
 
         mock_enqueue.return_value = {
@@ -179,32 +179,32 @@ class PreprocessPipelineTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         mock_enqueue.assert_called_once_with(
             "post-ws",
-            priority=True,
-            include_other_workspaces=True,
+            priority=False,
+            include_other_workspaces=False,
         )
         self.assertEqual(resp.data["priority_workspace"], "post-ws")
 
     @patch("nodepoint.views.preprocess.enqueue_priority_workspace_preprocess")
-    def test_post_preprocess_query_params(self, mock_enqueue):
+    def test_post_preprocess_opt_in_priority_and_others(self, mock_enqueue):
         from rest_framework.test import APIClient
 
         mock_enqueue.return_value = {
             "message": "ok",
             "priority_workspace": "post-ws",
             "priority_pipeline": {},
-            "other_workspaces": [],
+            "other_workspaces": [{"workspace": "other-ws", "queued": True}],
         }
         client = APIClient()
         Workspace.objects.create(name="post-ws")
         resp = client.post(
             "/api/workspace/preprocess/post-ws/"
-            "?priority=false&include_other_workspaces=false"
+            "?priority=true&include_other_workspaces=true"
         )
         self.assertEqual(resp.status_code, 200)
         mock_enqueue.assert_called_once_with(
             "post-ws",
-            priority=False,
-            include_other_workspaces=False,
+            priority=True,
+            include_other_workspaces=True,
         )
 
     @patch("nodepoint.services.preprocess_pipeline._enqueue_workspace_preprocess")
@@ -241,18 +241,14 @@ class PreprocessPipelineTests(TestCase):
         )
 
     @patch("nodepoint.services.preprocess_pipeline._enqueue_workspace_preprocess")
-    def test_enqueue_priority_single_workspace_no_others(self, mock_enqueue):
+    def test_enqueue_priority_defaults_single_workspace_orchestrator(self, mock_enqueue):
         from nodepoint.services.preprocess_pipeline import (
             enqueue_priority_workspace_preprocess,
         )
 
         mock_enqueue.return_value = {"coalesced": False, "jobs": {}}
 
-        enqueue_priority_workspace_preprocess(
-            "ws-a",
-            priority=False,
-            include_other_workspaces=False,
-        )
+        enqueue_priority_workspace_preprocess("ws-a")
 
         mock_enqueue.assert_called_once_with(
             "ws-a", orchestrator_queue_name="orchestrator"
