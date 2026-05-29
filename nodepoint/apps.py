@@ -22,3 +22,8 @@ class NodepointConfig(AppConfig):
             reset_mongo_connection()
 
         django_rq.utils.reset_db_connections = reset_connections
+
+        if "orchestrator" in sys.argv:
+            from nodepoint.services.preprocess_recovery import maybe_run_startup_recovery
+
+            maybe_run_startup_recovery()

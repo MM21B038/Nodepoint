@@ -518,6 +518,8 @@ Accepts parameters in the query string or JSON body (`priority`, `include_other_
 
 **Stuck / failed retry:** Chunk enqueue only submits `process_chunk` for chunks in `PENDING` or `FAILED` (not `COMPLETED`, `QUEUED`, or `INPROGRESS`, so clicking preprocess again does not reset finished work). Prepare legacy only runs for documents with **zero** chunks (not merely `content=false`). Vector sweep includes `PENDING` and `FAILED` embeddings.
 
+**Startup recovery (after `docker compose` restart):** When `worker-orchestrator` starts, it runs a one-shot recovery (Redis lock `nodepoint:preprocess:recovery:startup`) that resets orphaned `QUEUED`/`INPROGRESS` chunks to `PENDING`, then re-enqueues global chunk and vector backlog. Disable with `PREPROCESS_RECOVERY_ON_STARTUP=0`. Manual run: `python manage.py recover_preprocess` (`--force` skips the lock). Poll `database.chunks_orphaned` on queue-status; it should drop to `0` after recovery.
+
 **Legacy documents:** Files uploaded before chunk migration may show `document_status: COMPLETED` with **no** `DocumentChunk` rows and `chunk_id=null` on KG rows. POST preprocess backfills chunks; poll preprocess-status until `overall.ready` is true.
 
 **Per chunk:** Mongo stores chunk text; KG extraction runs in parallel RQ workers (`process_chunk` on the **chunk** queue). Embeddings enqueue immediately after each chunk completes KG ingest (`process_vector` on the **vector** queue). A document is marked `COMPLETED` only when **all** its chunks reach `COMPLETED`.
@@ -614,6 +616,7 @@ Use this to debug idle workers, stuck `nodepoint:preprocess:pipeline:{workspace}
   "database": {
     "documents": { "PENDING": 0, "QUEUED": 1, "INPROGRESS": 0, "COMPLETED": 5, "FAILED": 0, "total": 6 },
     "chunks": { "PENDING": 0, "QUEUED": 3, "INPROGRESS": 1, "COMPLETED": 20, "FAILED": 0, "total": 24 },
+    "chunks_orphaned": 4,
     "vectors": {
       "entities": { "pending": 4, "failed": 0, "completed": 0, "total": 4 },
       "relations": { "pending": 2, "failed": 0, "completed": 0, "total": 2 },
@@ -649,6 +652,7 @@ Use this to debug idle workers, stuck `nodepoint:preprocess:pipeline:{workspace}
 | `rq.workers` | `Worker.all()` — which queue names each worker listens on and optional `current_job_id` |
 | `redis.pipeline_locks` | Keys `nodepoint:preprocess:pipeline:{workspace}` and TTL seconds (`-1` / missing → `null`) |
 | `database.documents` / `chunks` | Row counts by `status` (global or filtered workspace) |
+| `database.chunks_orphaned` | Chunks in `QUEUED` or `INPROGRESS` while the **chunk** RQ queue has no `queued` or `started` jobs (stale after restart; `worker-orchestrator` startup recovery resets and re-enqueues these) |
 | `database.vectors.*` | Rows with vector status `PENDING` or `FAILED` only (embedding backlog) |
 | `database.workspaces_incomplete` | Omitted when `?workspace=` is set; otherwise workspaces where per-workspace preprocess is not `ready` |
 | `active_pipelines` | Workspaces with a pipeline lock and/or matching orchestrator queue jobs |

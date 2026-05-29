@@ -301,11 +301,29 @@ def _relation_qs(workspace: str | None):
     return qs
 
 
+def _orphaned_chunk_count(*, workspace: str | None = None) -> int:
+    """
+    Chunks marked QUEUED/INPROGRESS in Postgres while the chunk RQ queue is idle.
+
+    Indicates work lost after a worker/Redis restart; run recover_preprocess or
+    restart worker-orchestrator with PREPROCESS_RECOVERY_ON_STARTUP enabled.
+    """
+    chunk_queue = getattr(settings, "RQ_QUEUE_CHUNK", "chunk")
+    connection = get_connection()
+    counts = _queue_counts(chunk_queue, connection)
+    if counts["queued"] + counts["started"] > 0:
+        return 0
+    return _chunk_qs(workspace).filter(
+        status__in=[Status.QUEUED, Status.INPROGRESS],
+    ).count()
+
+
 def build_database_backlog(*, workspace: str | None = None) -> dict[str, Any]:
     pending_failed = [Status.PENDING, Status.FAILED]
     result: dict[str, Any] = {
         "documents": _status_counts(_document_qs(workspace)),
         "chunks": _status_counts(_chunk_qs(workspace)),
+        "chunks_orphaned": _orphaned_chunk_count(workspace=workspace),
         "vectors": {
             "entities": _vector_backlog_counts(
                 _entity_qs(workspace).filter(vector__in=pending_failed)
