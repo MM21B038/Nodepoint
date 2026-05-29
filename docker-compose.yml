@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:16-alpine
+    command: ["postgres", "-c", "max_connections=200"]
     environment:
       POSTGRES_DB: nodepoint
       POSTGRES_USER: nodepoint
@@ -98,6 +99,45 @@ services:
         "exec /app/.venv/bin/uvicorn config.asgi:application --host 0.0.0.0 --port 8000 --workers $${WEB_WORKERS:-4} --log-level info",
       ]
 
+  worker-orchestrator:
+    build: .
+    env_file:
+      - .env
+    environment:
+      NODEPOINT_SETTINGS: /app/settings.toml
+      DEBUG: "False"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_NAME: nodepoint
+      POSTGRES_USER: nodepoint
+      POSTGRES_PASSWORD: nodepoint
+      MONGO_HOST: mongo
+      REDIS_HOST: redis
+      QDRANT_HOST: qdrant
+      DB_CONN_MAX_AGE: "0"
+      RQ_DEFAULT_JOB_TIMEOUT: ${RQ_DEFAULT_JOB_TIMEOUT:-10800}
+      PREPROCESS_JOB_TIMEOUT: ${PREPROCESS_JOB_TIMEOUT:-3h}
+      PREPROCESS_PIPELINE_LOCK_TTL: ${PREPROCESS_PIPELINE_LOCK_TTL:-14400}
+    volumes:
+      - ./media:/app/media
+      - ./settings.toml:/app/settings.toml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    command:
+      [
+        "/app/.venv/bin/python",
+        "manage.py",
+        "rqworker",
+        "orchestrator",
+      ]
+
   worker:
     build: .
     env_file:
@@ -113,9 +153,9 @@ services:
       MONGO_HOST: mongo
       REDIS_HOST: redis
       QDRANT_HOST: qdrant
+      DB_CONN_MAX_AGE: "0"
       RQ_DEFAULT_JOB_TIMEOUT: ${RQ_DEFAULT_JOB_TIMEOUT:-10800}
       CHUNK_JOB_TIMEOUT: ${CHUNK_JOB_TIMEOUT:-30m}
-      CHUNK_BATCH_WAIT_SECONDS: ${CHUNK_BATCH_WAIT_SECONDS:-7200}
       PREPROCESS_JOB_TIMEOUT: ${PREPROCESS_JOB_TIMEOUT:-3h}
     volumes:
       - ./media:/app/media
@@ -131,7 +171,9 @@ services:
         condition: service_healthy
     command:
       [
-        "/bin/sh",
-        "-c",
-        "exec /app/.venv/bin/python manage.py rqworker default high low --job-timeout $${RQ_DEFAULT_JOB_TIMEOUT:-10800}",
+        "/app/.venv/bin/python",
+        "manage.py",
+        "rqworker",
+        "chunk",
+        "vector",
       ]

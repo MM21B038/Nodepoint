@@ -65,37 +65,60 @@ class KnowledgeGraphIngestTests(TestCase):
 
 
 class PreprocessPipelineTests(TestCase):
-    @patch("nodepoint.services.preprocess_pipeline.django_rq.get_queue")
+    @patch("nodepoint.services.preprocess_pipeline._orchestrator_queue")
     def test_enqueue_pipeline_with_upload_sequential_order(self, mock_get_queue):
         from nodepoint.services.preprocess_pipeline import enqueue_preprocess_pipeline
 
         mock_queue = MagicMock()
         mock_get_queue.return_value = mock_queue
-        j1, j2, j3, j4 = MagicMock(), MagicMock(), MagicMock(), MagicMock()
-        j1.id, j2.id, j3.id, j4.id = "j1", "j2", "j3", "j4"
-        mock_queue.enqueue.side_effect = [j1, j2, j3, j4]
+        j1, j2, j3 = MagicMock(), MagicMock(), MagicMock()
+        j1.id, j2.id, j3.id = "j1", "j2", "j3"
+        mock_queue.enqueue.side_effect = [j1, j2, j3]
 
         doc_id = uuid.uuid4()
-        result = enqueue_preprocess_pipeline(uploaded_document_id=doc_id)
+        result = enqueue_preprocess_pipeline(
+            uploaded_document_id=doc_id,
+            workspace_name="upload-ws",
+        )
 
-        self.assertEqual(mock_queue.enqueue.call_count, 4)
-        self.assertEqual(len(result["steps"]), 4)
-        self.assertIn("prepare document", result["message"])
+        self.assertEqual(mock_queue.enqueue.call_count, 3)
+        self.assertEqual(len(result["steps"]), 3)
+        self.assertIn("document-scoped", result["message"])
 
         calls = mock_queue.enqueue.call_args_list
         self.assertEqual(calls[0][0][0].__name__, "run_prepare_document")
         self.assertEqual(calls[0][0][1], doc_id)
         self.assertEqual(calls[1][0][0].__name__, "run_chunk_preprocess_batch")
+        self.assertEqual(calls[1][0][1], "upload-ws")
+        self.assertEqual(calls[1][1]["document_ids"], [doc_id])
         self.assertEqual(calls[1][1]["depends_on"], [j1])
-        self.assertEqual(calls[2][0][0].__name__, "run_vector_preprocess_batch")
-        self.assertEqual(calls[2][1]["depends_on"], j2)
-        self.assertEqual(calls[3][0][0].__name__, "run_chunk_mongo_repair_batch")
-        self.assertEqual(calls[3][1]["depends_on"], j3)
+        self.assertEqual(calls[2][0][0].__name__, "schedule_workspace_pipeline_tail")
+        self.assertEqual(calls[2][0][1], "upload-ws")
+        self.assertEqual(calls[2][1]["depends_on"], [j2])
 
-    @patch("nodepoint.services.preprocess_pipeline.django_rq.get_queue")
-    def test_enqueue_pipeline_post_prepare_legacy_then_sequential(self, mock_get_queue):
+    @patch("nodepoint.services.preprocess_pipeline.try_acquire_workspace_pipeline_lock")
+    @patch("nodepoint.services.preprocess_pipeline._orchestrator_queue")
+    def test_enqueue_workspace_pipeline_coalesces_when_lock_held(
+        self, mock_get_queue, mock_acquire
+    ):
         from nodepoint.services.preprocess_pipeline import enqueue_preprocess_pipeline
 
+        mock_acquire.return_value = False
+        result = enqueue_preprocess_pipeline(workspace_name="my-ws")
+
+        mock_get_queue.assert_not_called()
+        self.assertTrue(result["coalesced"])
+        self.assertEqual(result["steps"], [])
+        self.assertIn("already queued", result["message"])
+
+    @patch("nodepoint.services.preprocess_pipeline.try_acquire_workspace_pipeline_lock")
+    @patch("nodepoint.services.preprocess_pipeline._orchestrator_queue")
+    def test_enqueue_pipeline_post_prepare_legacy_then_sequential(
+        self, mock_get_queue, mock_acquire
+    ):
+        from nodepoint.services.preprocess_pipeline import enqueue_preprocess_pipeline
+
+        mock_acquire.return_value = True
         mock_queue = MagicMock()
         mock_get_queue.return_value = mock_queue
         j1, j2, j3, j4 = MagicMock(), MagicMock(), MagicMock(), MagicMock()
@@ -111,8 +134,34 @@ class PreprocessPipelineTests(TestCase):
         self.assertEqual(calls[0][0][0].__name__, "run_prepare_legacy_batch")
         self.assertEqual(calls[0][0][1], "my-ws")
         self.assertEqual(calls[1][1]["depends_on"], [j1])
-        self.assertEqual(calls[2][1]["depends_on"], j2)
-        self.assertEqual(calls[3][1]["depends_on"], j3)
+        self.assertEqual(calls[2][1]["depends_on"], [j2])
+        self.assertEqual(calls[3][1]["depends_on"], [j3])
+
+    @patch("nodepoint.services.preprocess_pipeline.try_acquire_workspace_pipeline_lock")
+    @patch("nodepoint.services.preprocess_pipeline._orchestrator_queue")
+    def test_schedule_workspace_pipeline_tail_coalesces(self, mock_get_queue, mock_acquire):
+        from nodepoint.services.preprocess_pipeline import schedule_workspace_pipeline_tail
+
+        mock_acquire.return_value = False
+        result = schedule_workspace_pipeline_tail("busy-ws")
+        self.assertTrue(result["coalesced"])
+        mock_get_queue.assert_not_called()
+
+    @patch("nodepoint.services.preprocess_pipeline.enqueue_chunks_for_documents", return_value=2)
+    def test_run_chunk_preprocess_batch_non_blocking(self, mock_enqueue):
+        from nodepoint.services.preprocess_pipeline import run_chunk_preprocess_batch
+
+        doc_id = uuid.uuid4()
+        count = run_chunk_preprocess_batch(
+            workspace_name="ws",
+            document_ids=[doc_id],
+        )
+        self.assertEqual(count, 2)
+        mock_enqueue.assert_called_once_with(
+            document_ids=[doc_id],
+            workspace_name="ws",
+            wait=False,
+        )
 
     @patch("nodepoint.views.preprocess.enqueue_preprocess_pipeline")
     def test_post_preprocess_passes_workspace_name(self, mock_enqueue):
@@ -359,6 +408,68 @@ class DocPreprocessTests(TestCase):
             from nodepoint.services.chunk_process import process_chunk
 
             self.assertEqual(args[0], process_chunk)
+        mock_get_queue.assert_called_with("chunk")
+
+
+class PerChunkVectorEnqueueTests(TestCase):
+    @patch("nodepoint.services.vector._vector_queue")
+    def test_enqueue_vectors_for_chunk(self, mock_get_queue):
+        from nodepoint.services.vector import enqueue_vectors_for_chunk
+
+        mock_queue = MagicMock()
+        mock_get_queue.return_value = mock_queue
+        chunk_id = uuid.uuid4()
+        entity_id = uuid.uuid4()
+        relation_id = uuid.uuid4()
+
+        count = enqueue_vectors_for_chunk(
+            chunk_id,
+            entity_ids=[entity_id],
+            relation_ids=[relation_id],
+        )
+        self.assertEqual(count, 3)
+        self.assertEqual(mock_queue.enqueue.call_count, 3)
+
+    @patch("nodepoint.services.vector.enqueue_vectors_for_chunk")
+    @patch("nodepoint.services.chunk_process.ingest_knowledge_graph_for_chunk")
+    @patch("nodepoint.services.chunk_process.get_chunk_text", return_value="chunk body")
+    @patch("nodepoint.services.chunk_process.extract_knowledge_graph")
+    @patch("nodepoint.services.chunk_process.Agent")
+    def test_process_chunk_enqueues_vectors_per_chunk(
+        self,
+        mock_agent_cls,
+        mock_extract,
+        mock_get_text,
+        mock_ingest,
+        mock_enqueue_vectors,
+    ):
+        from nodepoint.services.chunk_process import process_chunk
+
+        mock_agent = MagicMock()
+        mock_agent_cls.return_value = mock_agent
+        entity = Entity(name="Alice", type="PER", attributes={})
+        mock_extract.return_value = ([entity], [])
+        entity_id = uuid.uuid4()
+        mock_ingest.return_value = (True, [entity_id], [])
+        workspace = Workspace.objects.create(name="vec-ws")
+        document = Document.objects.create(
+            workspace=workspace,
+            file_name="v.md",
+            file=SimpleUploadedFile("v.md", b"x"),
+            status=Status.QUEUED,
+            content=True,
+        )
+        chunk = DocumentChunk.objects.create(
+            document=document,
+            index=0,
+            status=Status.QUEUED,
+        )
+
+        process_chunk(chunk.id)
+
+        mock_enqueue_vectors.assert_called_once_with(chunk.id, [entity_id], [])
+        chunk.refresh_from_db()
+        self.assertEqual(chunk.status, Status.COMPLETED)
 
 
 class AgentParserModelTests(TestCase):

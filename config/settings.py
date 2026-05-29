@@ -147,9 +147,18 @@ RQ_DEFAULT_JOB_TIMEOUT = int(os.getenv("RQ_DEFAULT_JOB_TIMEOUT", "10800"))
 PREPROCESS_JOB_TIMEOUT = os.getenv("PREPROCESS_JOB_TIMEOUT", "3h")
 _rq_queue = {**_redis, "DEFAULT_TIMEOUT": RQ_DEFAULT_JOB_TIMEOUT}
 RQ_QUEUES = {
+    "orchestrator": _rq_queue,
+    "chunk": _rq_queue,
+    "vector": _rq_queue,
     "high": _rq_queue,
     "default": _rq_queue,
     "low": _rq_queue,
+}
+RQ_QUEUE_ORCHESTRATOR = "orchestrator"
+RQ_QUEUE_CHUNK = "chunk"
+RQ_QUEUE_VECTOR = "vector"
+RQ = {
+    "WORKER_CLASS": "nodepoint.workers.NodepointWorker",
 }
 
 CHANNEL_LAYERS = {

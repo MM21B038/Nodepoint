@@ -401,18 +401,16 @@ Upload triggers a **4-step global preprocess pipeline** (see [Preprocess](#prepr
 {
   "message": "File uploaded successfully",
   "pipeline": {
-    "message": "Preprocess pipeline queued: prepare document → chunk KG (parallel) → embeddings → mongo repair",
+    "message": "Preprocess pipeline queued: prepare document → chunk KG (document-scoped) → coalesced workspace embeddings/repair",
     "steps": [
       "prepare_document",
       "chunk_preprocess",
-      "vector_preprocess",
-      "chunk_mongo_repair"
+      "workspace_tail"
     ],
     "jobs": {
       "prepare_document": "rq-job-id-1",
       "chunk_preprocess": "rq-job-id-2",
-      "vector_preprocess": "rq-job-id-3",
-      "chunk_mongo_repair": "rq-job-id-4"
+      "workspace_tail": "rq-job-id-3"
     }
   },
   "id": "550e8400-e29b-41d4-a716-446655440000",
@@ -485,21 +483,25 @@ Deletes the Postgres row, related KG rows (cascade), and the file on disk when p
 
 Queues the **full workspace preprocess pipeline** for the named workspace (no single-document upload). One call runs **prepare legacy → chunk KG (parallel workers) → embeddings → mongo repair** — no separate manual preprocess needed to migrate old documents.
 
-**Pipeline steps (RQ orchestrator)**
+**Pipeline steps (RQ orchestrator queue)**
 
 | Step | Job | What it does |
 |------|-----|----------------|
 | 1 (upload only) | `run_prepare_document` | Split the new file → Postgres `DocumentChunk` rows + Mongo `chunk_content` |
 | 1 (POST only) | `run_prepare_legacy_batch` | For documents in this workspace with zero chunks or `content=false`, run `prepare_document` (chunk migration) |
-| 2 | `run_chunk_preprocess_batch` | Enqueue `process_chunk` (5 min timeout) for incomplete chunks in the workspace |
-| 3 | `run_vector_preprocess_batch` | Enqueue embeddings for entities, relations, and **chunks** (PENDING/FAILED vectors) in the workspace |
+| 2 | `run_chunk_preprocess_batch` | Enqueue `process_chunk` on the **chunk** queue for incomplete chunks (document-scoped on upload; workspace-scoped on POST). Does **not** block waiting for chunk jobs. |
+| 3 | `run_vector_preprocess_batch` / `schedule_workspace_pipeline_tail` | Catch-up sweep on the **vector** queue for any PENDING/FAILED embeddings. Uploads use a coalesced workspace tail (one per workspace at a time). |
 | 4 | `run_chunk_mongo_repair_batch` | Rebuild Mongo chunk text for `content=false` or missing chunk bodies in the workspace |
 
-**Order (sequential steps, parallel workers inside step 2):** prepare → chunk batch → **vectors after chunk batch** → mongo repair. Vectors no longer run in parallel with chunk KG.
+**Order:** prepare → chunk enqueue (non-blocking) → vector catch-up → mongo repair. Embeddings for entities/relations/chunks are also enqueued **per chunk** as soon as KG extraction completes (`process_chunk` on the **chunk** queue).
+
+**Coalescing:** Repeated uploads or POST preprocess calls for the same workspace share one workspace tail (vector sweep + mongo repair) via a Redis lock. Upload always runs prepare + document-scoped chunk enqueue immediately.
+
+**RQ queues:** `orchestrator` (pipeline steps), `chunk` (`process_chunk`), `vector` (`process_vector`). Docker Compose runs a dedicated `worker-orchestrator` service plus `worker` services on `chunk` and `vector`.
 
 **Legacy documents:** Files uploaded before chunk migration may show `document_status: COMPLETED` with **no** `DocumentChunk` rows and `chunk_id=null` on KG rows. POST preprocess backfills chunks; poll preprocess-status until `overall.ready` is true.
 
-**Per chunk:** Mongo stores chunk text; KG extraction runs in parallel RQ workers (`process_chunk`). A document is marked `COMPLETED` only when **all** its chunks reach `COMPLETED`.
+**Per chunk:** Mongo stores chunk text; KG extraction runs in parallel RQ workers (`process_chunk` on the **chunk** queue). Embeddings enqueue immediately after each chunk completes KG ingest (`process_vector` on the **vector** queue). A document is marked `COMPLETED` only when **all** its chunks reach `COMPLETED`.
 
 **Response `200`**
 

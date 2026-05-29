@@ -6,6 +6,7 @@ import time
 from uuid import UUID
 
 import django_rq
+from django.conf import settings
 from django.db.models import Count, Q
 from rq import Retry
 from rq.job import Job, JobStatus
@@ -243,7 +244,7 @@ def enqueue_chunks_for_documents(
         logger.info("enqueue_chunks: no chunks to queue")
         return 0
 
-    queue = django_rq.get_queue("default")
+    queue = django_rq.get_queue(getattr(settings, "RQ_QUEUE_CHUNK", "chunk"))
     jobs = []
     for chunk in chunks:
         DocumentChunk.objects.filter(id=chunk.id).update(status=Status.QUEUED)

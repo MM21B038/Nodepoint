@@ -7,6 +7,7 @@ from uuid import UUID
 
 import django_rq
 from django.conf import settings
+from django_rq import get_connection
 from rq import Retry
 
 from nodepoint.backend.content_extractor import read_document_content
@@ -23,6 +24,9 @@ from nodepoint.services.vector import vector_preprocess
 
 logger = logging.getLogger(__name__)
 
+_PIPELINE_LOCK_TTL = int(os.getenv("PREPROCESS_PIPELINE_LOCK_TTL", "14400"))
+
+
 def _orchestrator_timeout() -> str:
     return os.getenv(
         "PREPROCESS_JOB_TIMEOUT",
@@ -30,7 +34,30 @@ def _orchestrator_timeout() -> str:
     )
 
 
+def _orchestrator_queue():
+    return django_rq.get_queue(getattr(settings, "RQ_QUEUE_ORCHESTRATOR", "orchestrator"))
+
+
 _RETRY = Retry(max=3, interval=[10, 30, 60])
+
+
+def _pipeline_lock_key(workspace_name: str) -> str:
+    return f"nodepoint:preprocess:pipeline:{workspace_name}"
+
+
+def try_acquire_workspace_pipeline_lock(workspace_name: str | None) -> bool:
+    if not workspace_name:
+        return True
+    conn = get_connection()
+    return bool(
+        conn.set(_pipeline_lock_key(workspace_name), "1", nx=True, ex=_PIPELINE_LOCK_TTL)
+    )
+
+
+def release_workspace_pipeline_lock(workspace_name: str | None) -> None:
+    if not workspace_name:
+        return
+    get_connection().delete(_pipeline_lock_key(workspace_name))
 
 
 def run_prepare_document(doc_id: UUID) -> None:
@@ -53,19 +80,28 @@ def run_prepare_document(doc_id: UUID) -> None:
     prepare_document(doc_id, filepath)
 
 
-def run_chunk_preprocess_batch(workspace_name: str | None = None) -> int:
-    """Enqueue process_chunk jobs and wait for them before the vector step runs."""
-    count = enqueue_chunks_for_documents(workspace_name=workspace_name, wait=True)
+def run_chunk_preprocess_batch(
+    workspace_name: str | None = None,
+    document_ids: list[UUID] | None = None,
+) -> int:
+    """Enqueue process_chunk jobs without blocking the orchestrator worker."""
+    count = enqueue_chunks_for_documents(
+        document_ids=document_ids,
+        workspace_name=workspace_name,
+        wait=False,
+    )
     logger.info(
-        "run_chunk_preprocess_batch: finished %s chunk job(s) (workspace=%s)",
+        "run_chunk_preprocess_batch: enqueued %s chunk job(s) "
+        "(workspace=%s, document_ids=%s)",
         count,
         workspace_name,
+        document_ids,
     )
     return count
 
 
 def run_vector_preprocess_batch(workspace_name: str | None = None) -> None:
-    """Enqueue embeddings for entities, relations, and chunks."""
+    """Catch-up sweep: enqueue embeddings for any remaining PENDING/FAILED vectors."""
     vector_preprocess(workspace_name=workspace_name)
     logger.info(
         "run_vector_preprocess_batch: vector sweep enqueued (workspace=%s)",
@@ -75,132 +111,212 @@ def run_vector_preprocess_batch(workspace_name: str | None = None) -> None:
 
 def run_chunk_mongo_repair_batch(workspace_name: str | None = None) -> int:
     """Rebuild Mongo chunk rows for documents with content=false or missing chunk text."""
-    repaired = 0
-    doc_qs = Document.objects.filter(content=False)
-    if workspace_name:
-        doc_qs = doc_qs.filter(workspace__name=workspace_name)
-    doc_ids = set(doc_qs.values_list("id", flat=True))
+    try:
+        repaired = 0
+        doc_qs = Document.objects.filter(content=False)
+        if workspace_name:
+            doc_qs = doc_qs.filter(workspace__name=workspace_name)
+        doc_ids = set(doc_qs.values_list("id", flat=True))
 
-    content_qs = Document.objects.filter(content=True)
-    if workspace_name:
-        content_qs = content_qs.filter(workspace__name=workspace_name)
+        content_qs = Document.objects.filter(content=True)
+        if workspace_name:
+            content_qs = content_qs.filter(workspace__name=workspace_name)
 
-    for doc in content_qs.prefetch_related("chunks"):
-        for chunk in doc.chunks.all():
-            from nodepoint.mongo.manager import get_chunk_text
+        for doc in content_qs.prefetch_related("chunks"):
+            for chunk in doc.chunks.all():
+                from nodepoint.mongo.manager import get_chunk_text
 
-            if get_chunk_text(chunk.id) is None:
-                doc_ids.add(doc.id)
-                break
+                if get_chunk_text(chunk.id) is None:
+                    doc_ids.add(doc.id)
+                    break
 
-    for doc in Document.objects.filter(id__in=doc_ids).select_related("workspace"):
-        if not doc.file or not os.path.exists(doc.file.path):
-            continue
+        for doc in Document.objects.filter(id__in=doc_ids).select_related("workspace"):
+            if not doc.file or not os.path.exists(doc.file.path):
+                continue
 
-        content = read_document_content(doc.file.path)
-        if content is None or not content.strip():
-            Document.objects.filter(id=doc.id).update(content=False, status=Status.FAILED)
-            continue
+            content = read_document_content(doc.file.path)
+            if content is None or not content.strip():
+                Document.objects.filter(id=doc.id).update(content=False, status=Status.FAILED)
+                continue
 
-        text_chunks = split_doc(content)
-        if not text_chunks:
-            continue
+            text_chunks = split_doc(content)
+            if not text_chunks:
+                continue
 
-        delete_chunks_for_document(doc.id)
-        DocumentChunk.objects.filter(document_id=doc.id).delete()
+            delete_chunks_for_document(doc.id)
+            DocumentChunk.objects.filter(document_id=doc.id).delete()
 
-        ok = True
-        for index, text in enumerate(text_chunks):
-            chunk = DocumentChunk.objects.create(
-                document=doc,
-                index=index,
-                status=Status.PENDING,
-                vector=Status.PENDING,
-            )
-            if not ingest_chunk(chunk.id, doc.id, index, text):
-                ok = False
-                chunk.delete()
-                break
+            ok = True
+            for index, text in enumerate(text_chunks):
+                chunk = DocumentChunk.objects.create(
+                    document=doc,
+                    index=index,
+                    status=Status.PENDING,
+                    vector=Status.PENDING,
+                )
+                if not ingest_chunk(chunk.id, doc.id, index, text):
+                    ok = False
+                    chunk.delete()
+                    break
 
-        if ok:
-            Document.objects.filter(id=doc.id).update(content=True, status=Status.QUEUED)
-            repaired += 1
-        else:
-            Document.objects.filter(id=doc.id).update(content=False, status=Status.FAILED)
+            if ok:
+                Document.objects.filter(id=doc.id).update(content=True, status=Status.QUEUED)
+                repaired += 1
+            else:
+                Document.objects.filter(id=doc.id).update(content=False, status=Status.FAILED)
 
-    logger.info(
-        "run_chunk_mongo_repair_batch: repaired %s document(s) (workspace=%s)",
-        repaired,
-        workspace_name,
-    )
-    return repaired
+        logger.info(
+            "run_chunk_mongo_repair_batch: repaired %s document(s) (workspace=%s)",
+            repaired,
+            workspace_name,
+        )
+        return repaired
+    finally:
+        release_workspace_pipeline_lock(workspace_name)
 
 
-def enqueue_preprocess_pipeline(
-    uploaded_document_id: UUID | None = None,
-    workspace_name: str | None = None,
-) -> dict[str, Any]:
-    queue = django_rq.get_queue("default")
+def schedule_workspace_pipeline_tail(workspace_name: str | None) -> dict[str, Any]:
+    """
+    Coalesced workspace tail: vector catch-up sweep then mongo repair.
+
+    Only one tail runs per workspace at a time (Redis lock). Upload paths call this
+    after document-scoped chunk enqueue; workspace POST acquires the lock up front.
+    """
+    if not workspace_name:
+        return {"coalesced": False, "skipped": True}
+
+    if not try_acquire_workspace_pipeline_lock(workspace_name):
+        logger.info(
+            "schedule_workspace_pipeline_tail: coalesced for workspace=%s",
+            workspace_name,
+        )
+        return {"coalesced": True, "workspace_name": workspace_name}
+
+    queue = _orchestrator_queue()
     job_kwargs = {"job_timeout": _orchestrator_timeout(), "retry": _RETRY}
 
-    steps: list[str] = []
-    jobs: dict[str, str | None] = {}
-    prepare_deps: list = []
-
-    if uploaded_document_id is not None:
-        j1 = queue.enqueue(run_prepare_document, uploaded_document_id, **job_kwargs)
-        jobs["prepare_document"] = j1.id
-        steps.append("prepare_document")
-        prepare_deps.append(j1)
-    else:
-        j_legacy = queue.enqueue(
-            run_prepare_legacy_batch,
-            workspace_name,
-            **job_kwargs,
-        )
-        jobs["prepare_legacy"] = j_legacy.id
-        steps.append("prepare_legacy")
-        prepare_deps.append(j_legacy)
-
-    j2 = queue.enqueue(
-        run_chunk_preprocess_batch,
-        workspace_name,
-        depends_on=prepare_deps,
-        **job_kwargs,
-    )
-    jobs["chunk_preprocess"] = j2.id
-    steps.append("chunk_preprocess")
-
-    j3 = queue.enqueue(
-        run_vector_preprocess_batch,
-        workspace_name,
-        depends_on=j2,
-        **job_kwargs,
-    )
-    jobs["vector_preprocess"] = j3.id
-    steps.append("vector_preprocess")
-
+    j3 = queue.enqueue(run_vector_preprocess_batch, workspace_name, **job_kwargs)
     j4 = queue.enqueue(
         run_chunk_mongo_repair_batch,
         workspace_name,
         depends_on=j3,
         **job_kwargs,
     )
-    jobs["chunk_mongo_repair"] = j4.id
-    steps.append("chunk_mongo_repair")
+    logger.info(
+        "schedule_workspace_pipeline_tail: queued vector+repair for workspace=%s",
+        workspace_name,
+    )
+    return {
+        "coalesced": False,
+        "workspace_name": workspace_name,
+        "vector_preprocess": j3.id,
+        "chunk_mongo_repair": j4.id,
+    }
 
-    if uploaded_document_id is not None:
-        message = (
-            "Preprocess pipeline queued: prepare document → chunk KG (parallel) "
-            "→ embeddings → mongo repair"
-        )
-    else:
-        message = (
-            "Preprocess pipeline queued: prepare legacy → chunk KG (parallel) "
-            "→ embeddings → mongo repair"
-        )
-        if workspace_name:
-            message += f" (workspace={workspace_name})"
+
+def _enqueue_upload_preprocess(
+    uploaded_document_id: UUID,
+    workspace_name: str | None,
+) -> dict[str, Any]:
+    queue = _orchestrator_queue()
+    job_kwargs = {"job_timeout": _orchestrator_timeout(), "retry": _RETRY}
+
+    j1 = queue.enqueue(run_prepare_document, uploaded_document_id, **job_kwargs)
+    j2 = queue.enqueue(
+        run_chunk_preprocess_batch,
+        workspace_name,
+        document_ids=[uploaded_document_id],
+        depends_on=[j1],
+        **job_kwargs,
+    )
+    j3 = queue.enqueue(
+        schedule_workspace_pipeline_tail,
+        workspace_name,
+        depends_on=[j2],
+        **job_kwargs,
+    )
+
+    jobs = {
+        "prepare_document": j1.id,
+        "chunk_preprocess": j2.id,
+        "workspace_tail": j3.id,
+    }
+    message = (
+        "Preprocess pipeline queued: prepare document → chunk KG (document-scoped) "
+        "→ coalesced workspace embeddings/repair"
+    )
+    logger.info("%s: %s", message, jobs)
+    return {
+        "message": message,
+        "steps": ["prepare_document", "chunk_preprocess", "workspace_tail"],
+        "jobs": jobs,
+    }
+
+
+def _enqueue_workspace_preprocess(workspace_name: str | None) -> dict[str, Any]:
+    if workspace_name and not try_acquire_workspace_pipeline_lock(workspace_name):
+        message = f"Preprocess pipeline already queued (workspace={workspace_name})"
+        logger.info(message)
+        return {
+            "message": message,
+            "coalesced": True,
+            "steps": [],
+            "jobs": {},
+        }
+
+    queue = _orchestrator_queue()
+    job_kwargs = {"job_timeout": _orchestrator_timeout(), "retry": _RETRY}
+
+    j1 = queue.enqueue(run_prepare_legacy_batch, workspace_name, **job_kwargs)
+    j2 = queue.enqueue(
+        run_chunk_preprocess_batch,
+        workspace_name,
+        depends_on=[j1],
+        **job_kwargs,
+    )
+    j3 = queue.enqueue(
+        run_vector_preprocess_batch,
+        workspace_name,
+        depends_on=[j2],
+        **job_kwargs,
+    )
+    j4 = queue.enqueue(
+        run_chunk_mongo_repair_batch,
+        workspace_name,
+        depends_on=[j3],
+        **job_kwargs,
+    )
+
+    jobs = {
+        "prepare_legacy": j1.id,
+        "chunk_preprocess": j2.id,
+        "vector_preprocess": j3.id,
+        "chunk_mongo_repair": j4.id,
+    }
+    message = (
+        "Preprocess pipeline queued: prepare legacy → chunk KG (parallel) "
+        "→ embeddings catch-up → mongo repair"
+    )
+    if workspace_name:
+        message += f" (workspace={workspace_name})"
 
     logger.info("%s: %s", message, jobs)
-    return {"message": message, "steps": steps, "jobs": jobs}
+    return {
+        "message": message,
+        "steps": [
+            "prepare_legacy",
+            "chunk_preprocess",
+            "vector_preprocess",
+            "chunk_mongo_repair",
+        ],
+        "jobs": jobs,
+    }
+
+
+def enqueue_preprocess_pipeline(
+    uploaded_document_id: UUID | None = None,
+    workspace_name: str | None = None,
+) -> dict[str, Any]:
+    if uploaded_document_id is not None:
+        return _enqueue_upload_preprocess(uploaded_document_id, workspace_name)
+    return _enqueue_workspace_preprocess(workspace_name)
