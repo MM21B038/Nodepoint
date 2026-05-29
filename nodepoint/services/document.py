@@ -51,7 +51,7 @@ def doc_preprocess(document_ids=None, workspace_name=None):
             Document.objects.filter(id=doc.id).update(status=Status.INVALID)
             logger.error("File missing for document %s", doc.id)
             continue
-        if not doc.content:
+        if getattr(doc, "chunk_count", 0) == 0:
             prepare_document(doc.id, doc.file.path)
 
     return enqueue_chunks_for_documents(document_ids=ids, workspace_name=workspace_name)

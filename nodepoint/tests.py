@@ -488,6 +488,72 @@ class ChunkPipelineTests(TestCase):
         self.assertEqual(count, 1)
         self.assertEqual(DocumentChunk.objects.filter(document=document).count(), 1)
 
+    @patch("nodepoint.services.chunking.prepare_document")
+    @patch("nodepoint.services.chunking.ingest_chunk", return_value=True)
+    def test_prepare_legacy_skips_docs_that_already_have_chunks(
+        self, mock_ingest, mock_prepare
+    ):
+        from nodepoint.services.chunking import run_prepare_legacy_batch
+
+        workspace = Workspace.objects.create(name="legacy-skip-ws")
+        document = Document.objects.create(
+            workspace=workspace,
+            file_name="has-chunks.md",
+            status=Status.INPROGRESS,
+            content=False,
+        )
+        DocumentChunk.objects.create(
+            document=document,
+            index=0,
+            status=Status.COMPLETED,
+            vector=Status.COMPLETED,
+        )
+        count = run_prepare_legacy_batch(workspace_name=workspace.name)
+        self.assertEqual(count, 0)
+        mock_prepare.assert_not_called()
+        self.assertEqual(DocumentChunk.objects.filter(document=document).count(), 1)
+
+    @patch("nodepoint.services.chunking.django_rq.get_queue")
+    def test_enqueue_chunks_skips_completed_and_already_queued(self, mock_get_queue):
+        from nodepoint.services.chunking import enqueue_chunks_for_documents
+
+        workspace = Workspace.objects.create(name="skip-chunk-ws")
+        document = Document.objects.create(
+            workspace=workspace,
+            file_name="done.md",
+            status=Status.COMPLETED,
+            content=True,
+        )
+        DocumentChunk.objects.create(
+            document=document,
+            index=0,
+            status=Status.COMPLETED,
+            vector=Status.COMPLETED,
+        )
+        DocumentChunk.objects.create(
+            document=document,
+            index=1,
+            status=Status.QUEUED,
+            vector=Status.PENDING,
+        )
+        pending = DocumentChunk.objects.create(
+            document=document,
+            index=2,
+            status=Status.PENDING,
+            vector=Status.PENDING,
+        )
+        mock_queue = MagicMock()
+        mock_get_queue.return_value = mock_queue
+
+        count = enqueue_chunks_for_documents(workspace_name=workspace.name)
+        self.assertEqual(count, 1)
+        mock_queue.enqueue.assert_called_once()
+        self.assertEqual(mock_queue.enqueue.call_args[0][1], pending.id)
+        pending.refresh_from_db()
+        self.assertEqual(pending.status, Status.QUEUED)
+        done = DocumentChunk.objects.get(document=document, index=0)
+        self.assertEqual(done.status, Status.COMPLETED)
+
 
 class DocPreprocessTests(TestCase):
     @patch("nodepoint.services.chunking.django_rq.get_queue")

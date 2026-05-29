@@ -41,19 +41,18 @@ _TERMINAL_CHUNK_JOB_STATUSES = frozenset(
     }
 )
 
-_INCOMPLETE_CHUNK_STATUSES = (
+# Chunks eligible for a new process_chunk job (excludes QUEUED — job already submitted).
+_CHUNK_ENQUEUE_STATUSES = (
     Status.PENDING,
     Status.FAILED,
-    Status.QUEUED,
 )
 
-_INCOMPLETE_DOC_STATUSES = (
+_INCOMPLETE_CHUNK_STATUSES = (
     Status.PENDING,
     Status.FAILED,
     Status.QUEUED,
     Status.INPROGRESS,
 )
-
 
 def rollup_document_status(document_id: UUID) -> None:
     chunks = list(DocumentChunk.objects.filter(document_id=document_id).only("status"))
@@ -137,12 +136,11 @@ def prepare_document(doc_id: UUID, filepath: str) -> list[UUID]:
 
 
 def documents_needing_prepare_qs(workspace_name: str | None = None):
+    """Documents with no chunks yet (legacy migration). Skips docs that already have chunks."""
     qs = Document.objects.exclude(status__in=[Status.INVALID, Status.TERMINATED])
     if workspace_name:
         qs = qs.filter(workspace__name=workspace_name)
-    return qs.annotate(chunk_count=Count("chunks")).filter(
-        Q(chunk_count=0) | Q(content=False)
-    )
+    return qs.annotate(chunk_count=Count("chunks")).filter(chunk_count=0)
 
 
 def run_prepare_legacy_batch(workspace_name: str | None = None) -> int:
@@ -227,18 +225,21 @@ def enqueue_chunks_for_documents(
     *,
     wait: bool = False,
 ) -> int:
+    """
+    Enqueue process_chunk only for chunks that still need KG work.
+
+    Does not touch COMPLETED chunks or re-submit QUEUED/INPROGRESS jobs (avoids
+    resetting finished docs when POST preprocess is clicked again).
+    """
     from nodepoint.services.chunk_process import process_chunk
 
-    doc_qs = Document.objects.filter(status__in=_INCOMPLETE_DOC_STATUSES)
-    if document_ids:
-        doc_qs = doc_qs.filter(id__in=document_ids)
-    if workspace_name:
-        doc_qs = doc_qs.filter(workspace__name=workspace_name)
-
     chunk_qs = DocumentChunk.objects.filter(
-        document_id__in=doc_qs.values("id"),
-        status__in=_INCOMPLETE_CHUNK_STATUSES,
+        status__in=_CHUNK_ENQUEUE_STATUSES,
     ).select_related("document")
+    if document_ids:
+        chunk_qs = chunk_qs.filter(document_id__in=document_ids)
+    if workspace_name:
+        chunk_qs = chunk_qs.filter(document__workspace__name=workspace_name)
 
     chunks = list(chunk_qs)
     if not chunks:

@@ -513,7 +513,7 @@ Accepts parameters in the query string or JSON body (`priority`, `include_other_
 
 **RQ queues:** `high` / `orchestrator` / `low` (pipeline steps; POST uses **`orchestrator`** by default), `chunk` (`process_chunk`), `vector` (`process_vector`). Docker Compose runs a dedicated `worker-orchestrator` service (`high orchestrator low`) plus `worker` on `chunk` and `vector`.
 
-**Stuck / failed retry:** Chunk enqueue includes documents in `INPROGRESS` (stuck after worker loss) and chunks in `PENDING` / `FAILED` / `QUEUED`. Vector sweep includes `PENDING` and `FAILED` embeddings.
+**Stuck / failed retry:** Chunk enqueue only submits `process_chunk` for chunks in `PENDING` or `FAILED` (not `COMPLETED`, `QUEUED`, or `INPROGRESS`, so clicking preprocess again does not reset finished work). Prepare legacy only runs for documents with **zero** chunks (not merely `content=false`). Vector sweep includes `PENDING` and `FAILED` embeddings.
 
 **Legacy documents:** Files uploaded before chunk migration may show `document_status: COMPLETED` with **no** `DocumentChunk` rows and `chunk_id=null` on KG rows. POST preprocess backfills chunks; poll preprocess-status until `overall.ready` is true.
 
