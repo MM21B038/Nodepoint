@@ -143,6 +143,39 @@ def documents_needing_prepare_qs(workspace_name: str | None = None):
     return qs.annotate(chunk_count=Count("chunks")).filter(chunk_count=0)
 
 
+def run_prepare_failed_documents_batch(
+    exclude_document_ids: list[UUID] | None = None,
+) -> int:
+    """Re-split documents that failed before any chunks were created (all workspaces)."""
+    qs = (
+        Document.objects.filter(status=Status.FAILED)
+        .annotate(chunk_count=Count("chunks"))
+        .filter(chunk_count=0)
+    )
+    if exclude_document_ids:
+        qs = qs.exclude(id__in=exclude_document_ids)
+
+    prepared = 0
+    for doc in qs:
+        if not doc.file:
+            Document.objects.filter(id=doc.id).update(status=Status.INVALID)
+            continue
+        filepath = doc.file.path
+        if not os.path.exists(filepath):
+            Document.objects.filter(id=doc.id).update(status=Status.INVALID)
+            continue
+        chunk_ids = prepare_document(doc.id, filepath)
+        if chunk_ids:
+            prepared += 1
+            logger.info(
+                "run_prepare_failed_documents_batch: prepared %s chunks for document %s",
+                len(chunk_ids),
+                doc.id,
+            )
+    logger.info("run_prepare_failed_documents_batch: prepared %s document(s)", prepared)
+    return prepared
+
+
 def run_prepare_legacy_batch(workspace_name: str | None = None) -> int:
     """Create DocumentChunk + Mongo rows for documents not yet migrated."""
     prepared = 0
@@ -223,6 +256,8 @@ def enqueue_chunks_for_documents(
     document_ids: list[UUID] | None = None,
     workspace_name: str | None = None,
     *,
+    chunk_statuses: tuple[str, ...] | None = None,
+    exclude_document_ids: list[UUID] | None = None,
     wait: bool = False,
 ) -> int:
     """
@@ -233,13 +268,16 @@ def enqueue_chunks_for_documents(
     """
     from nodepoint.services.chunk_process import process_chunk
 
-    chunk_qs = DocumentChunk.objects.filter(
-        status__in=_CHUNK_ENQUEUE_STATUSES,
-    ).select_related("document")
+    statuses = chunk_statuses or _CHUNK_ENQUEUE_STATUSES
+    chunk_qs = DocumentChunk.objects.filter(status__in=statuses).select_related(
+        "document"
+    )
     if document_ids:
         chunk_qs = chunk_qs.filter(document_id__in=document_ids)
     if workspace_name:
         chunk_qs = chunk_qs.filter(document__workspace__name=workspace_name)
+    if exclude_document_ids:
+        chunk_qs = chunk_qs.exclude(document_id__in=exclude_document_ids)
 
     chunks = list(chunk_qs)
     if not chunks:
@@ -273,3 +311,18 @@ def enqueue_chunks_for_document(
         document_ids=[document_id],
         workspace_name=workspace_name,
     )
+
+
+def run_chunk_preprocess_failed_batch(
+    exclude_document_ids: list[UUID] | None = None,
+) -> int:
+    """Retry KG extraction for failed chunks across all workspaces."""
+    count = enqueue_chunks_for_documents(
+        chunk_statuses=(Status.FAILED,),
+        exclude_document_ids=exclude_document_ids,
+    )
+    logger.info(
+        "run_chunk_preprocess_failed_batch: enqueued %s failed chunk job(s)",
+        count,
+    )
+    return count

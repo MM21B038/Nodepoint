@@ -18,6 +18,8 @@ from nodepoint.mongo.manager import delete_chunks_for_document, ingest_chunk
 from nodepoint.services.chunking import (
     enqueue_chunks_for_documents,
     prepare_document,
+    run_chunk_preprocess_failed_batch,
+    run_prepare_failed_documents_batch,
     run_prepare_legacy_batch,
 )
 from nodepoint.services.preprocess_status import workspace_needs_preprocess
@@ -224,6 +226,24 @@ def schedule_workspace_pipeline_tail(workspace_name: str | None) -> dict[str, An
     }
 
 
+def run_upload_failed_catchup_batch(exclude_document_id: UUID | None = None) -> dict[str, int]:
+    """
+    Retry failed preprocess work in every workspace (used after upload).
+
+    Re-prepares documents that failed before chunking and re-enqueues failed chunks.
+    The new upload is excluded so its document-scoped chunk step owns that work.
+    """
+    exclude = [exclude_document_id] if exclude_document_id else None
+    prepared = run_prepare_failed_documents_batch(exclude_document_ids=exclude)
+    chunks = run_chunk_preprocess_failed_batch(exclude_document_ids=exclude)
+    logger.info(
+        "run_upload_failed_catchup_batch: prepared=%s chunks_enqueued=%s",
+        prepared,
+        chunks,
+    )
+    return {"prepared": prepared, "chunks_enqueued": chunks}
+
+
 def _enqueue_upload_preprocess(
     uploaded_document_id: UUID,
     workspace_name: str | None,
@@ -239,26 +259,38 @@ def _enqueue_upload_preprocess(
         depends_on=[j1],
         **job_kwargs,
     )
+    j2b = queue.enqueue(
+        run_upload_failed_catchup_batch,
+        uploaded_document_id,
+        depends_on=[j1],
+        **job_kwargs,
+    )
     j3 = queue.enqueue(
         schedule_workspace_pipeline_tail,
         workspace_name,
-        depends_on=[j2],
+        depends_on=[j2, j2b],
         **job_kwargs,
     )
 
     jobs = {
         "prepare_document": j1.id,
         "chunk_preprocess": j2.id,
+        "failed_catchup": j2b.id,
         "workspace_tail": j3.id,
     }
     message = (
         "Preprocess pipeline queued: prepare document → chunk KG (document-scoped) "
-        "→ coalesced workspace embeddings/repair"
+        "→ failed catch-up (all workspaces) → coalesced workspace embeddings/repair"
     )
     logger.info("%s: %s", message, jobs)
     return {
         "message": message,
-        "steps": ["prepare_document", "chunk_preprocess", "workspace_tail"],
+        "steps": [
+            "prepare_document",
+            "chunk_preprocess",
+            "failed_catchup",
+            "workspace_tail",
+        ],
         "jobs": jobs,
     }
 

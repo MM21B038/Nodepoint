@@ -402,16 +402,18 @@ Upload triggers a **4-step global preprocess pipeline** (see [Preprocess](#prepr
 {
   "message": "File uploaded successfully",
   "pipeline": {
-    "message": "Preprocess pipeline queued: prepare document → chunk KG (document-scoped) → coalesced workspace embeddings/repair",
+    "message": "Preprocess pipeline queued: prepare document → chunk KG (document-scoped) → failed catch-up (all workspaces) → coalesced workspace embeddings/repair",
     "steps": [
       "prepare_document",
       "chunk_preprocess",
+      "failed_catchup",
       "workspace_tail"
     ],
     "jobs": {
       "prepare_document": "rq-job-id-1",
       "chunk_preprocess": "rq-job-id-2",
-      "workspace_tail": "rq-job-id-3"
+      "failed_catchup": "rq-job-id-3",
+      "workspace_tail": "rq-job-id-4"
     }
   },
   "id": "550e8400-e29b-41d4-a716-446655440000",
@@ -504,12 +506,13 @@ Accepts parameters in the query string or JSON body (`priority`, `include_other_
 | 1 (upload only) | `run_prepare_document` | Split the new file → Postgres `DocumentChunk` rows + Mongo `chunk_content` |
 | 1 (POST only) | `run_prepare_legacy_batch` | For documents in this workspace with zero chunks or `content=false`, run `prepare_document` (chunk migration) |
 | 2 | `run_chunk_preprocess_batch` | Enqueue `process_chunk` on the **chunk** queue for incomplete chunks (document-scoped on upload; workspace-scoped on POST). Does **not** block waiting for chunk jobs. |
+| 2b (upload only) | `run_upload_failed_catchup_batch` | Re-prepare documents with `FAILED` status and zero chunks, then re-enqueue **failed** chunks in **all workspaces** (excluding the new upload). Moves those files back to **processing** in preprocess-status. |
 | 3 | `run_vector_preprocess_batch` / `schedule_workspace_pipeline_tail` | Catch-up sweep on the **vector** queue for any PENDING/FAILED embeddings. Uploads use a coalesced workspace tail (one per workspace at a time). |
 | 4 | `run_chunk_mongo_repair_batch` | Rebuild Mongo chunk text for `content=false` or missing chunk bodies in the workspace |
 
 **Order:** prepare → chunk enqueue (non-blocking) → vector catch-up → mongo repair. Embeddings for entities/relations/chunks are also enqueued **per chunk** as soon as KG extraction completes (`process_chunk` on the **chunk** queue).
 
-**Coalescing:** Repeated uploads or POST preprocess calls for the same workspace share one workspace tail (vector sweep + mongo repair) via a Redis lock. Upload always runs prepare + document-scoped chunk enqueue immediately.
+**Coalescing:** Repeated uploads or POST preprocess calls for the same workspace share one workspace tail (vector sweep + mongo repair) via a Redis lock. Upload always runs prepare + document-scoped chunk enqueue immediately, plus a global failed catch-up step so previously failed files in any workspace are retried.
 
 **RQ queues:** `high` / `orchestrator` / `low` (pipeline steps; POST uses **`orchestrator`** by default), `chunk` (`process_chunk`), `vector` (`process_vector`). Docker Compose runs a dedicated `worker-orchestrator` service (`high orchestrator low`) plus `worker` on `chunk` and `vector`.
 

@@ -71,9 +71,9 @@ class PreprocessPipelineTests(TestCase):
 
         mock_queue = MagicMock()
         mock_get_queue.return_value = mock_queue
-        j1, j2, j3 = MagicMock(), MagicMock(), MagicMock()
-        j1.id, j2.id, j3.id = "j1", "j2", "j3"
-        mock_queue.enqueue.side_effect = [j1, j2, j3]
+        j1, j2, j2b, j3 = MagicMock(), MagicMock(), MagicMock(), MagicMock()
+        j1.id, j2.id, j2b.id, j3.id = "j1", "j2", "j2b", "j3"
+        mock_queue.enqueue.side_effect = [j1, j2, j2b, j3]
 
         doc_id = uuid.uuid4()
         result = enqueue_preprocess_pipeline(
@@ -81,9 +81,10 @@ class PreprocessPipelineTests(TestCase):
             workspace_name="upload-ws",
         )
 
-        self.assertEqual(mock_queue.enqueue.call_count, 3)
-        self.assertEqual(len(result["steps"]), 3)
+        self.assertEqual(mock_queue.enqueue.call_count, 4)
+        self.assertEqual(len(result["steps"]), 4)
         self.assertIn("document-scoped", result["message"])
+        self.assertIn("failed catch-up", result["message"])
 
         calls = mock_queue.enqueue.call_args_list
         self.assertEqual(calls[0][0][0].__name__, "run_prepare_document")
@@ -92,9 +93,12 @@ class PreprocessPipelineTests(TestCase):
         self.assertEqual(calls[1][0][1], "upload-ws")
         self.assertEqual(calls[1][1]["document_ids"], [doc_id])
         self.assertEqual(calls[1][1]["depends_on"], [j1])
-        self.assertEqual(calls[2][0][0].__name__, "schedule_workspace_pipeline_tail")
-        self.assertEqual(calls[2][0][1], "upload-ws")
-        self.assertEqual(calls[2][1]["depends_on"], [j2])
+        self.assertEqual(calls[2][0][0].__name__, "run_upload_failed_catchup_batch")
+        self.assertEqual(calls[2][0][1], doc_id)
+        self.assertEqual(calls[2][1]["depends_on"], [j1])
+        self.assertEqual(calls[3][0][0].__name__, "schedule_workspace_pipeline_tail")
+        self.assertEqual(calls[3][0][1], "upload-ws")
+        self.assertEqual(calls[3][1]["depends_on"], [j2, j2b])
 
     @patch("nodepoint.services.preprocess_pipeline.try_acquire_workspace_pipeline_lock")
     @patch("nodepoint.services.preprocess_pipeline._orchestrator_queue")
@@ -553,6 +557,39 @@ class ChunkPipelineTests(TestCase):
         self.assertEqual(pending.status, Status.QUEUED)
         done = DocumentChunk.objects.get(document=document, index=0)
         self.assertEqual(done.status, Status.COMPLETED)
+
+    @patch("nodepoint.services.chunking.django_rq.get_queue")
+    def test_enqueue_failed_chunks_global_excludes_document(self, mock_get_queue):
+        from nodepoint.services.chunking import run_chunk_preprocess_failed_batch
+
+        ws_a = Workspace.objects.create(name="failed-a")
+        ws_b = Workspace.objects.create(name="failed-b")
+        doc_a = Document.objects.create(
+            workspace=ws_a, file_name="a.md", status=Status.FAILED, content=True
+        )
+        doc_b = Document.objects.create(
+            workspace=ws_b, file_name="b.md", status=Status.FAILED, content=True
+        )
+        doc_new = Document.objects.create(
+            workspace=ws_a, file_name="new.md", status=Status.PENDING, content=False
+        )
+        failed_a = DocumentChunk.objects.create(
+            document=doc_a, index=0, status=Status.FAILED, vector=Status.PENDING
+        )
+        DocumentChunk.objects.create(
+            document=doc_b, index=0, status=Status.FAILED, vector=Status.PENDING
+        )
+        DocumentChunk.objects.create(
+            document=doc_new, index=0, status=Status.PENDING, vector=Status.PENDING
+        )
+        mock_queue = MagicMock()
+        mock_get_queue.return_value = mock_queue
+
+        count = run_chunk_preprocess_failed_batch(exclude_document_ids=[doc_new.id])
+        self.assertEqual(count, 2)
+        self.assertEqual(mock_queue.enqueue.call_count, 2)
+        failed_a.refresh_from_db()
+        self.assertEqual(failed_a.status, Status.QUEUED)
 
 
 class DocPreprocessTests(TestCase):
