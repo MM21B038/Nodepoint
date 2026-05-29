@@ -9,6 +9,8 @@ from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
 
 from nodepoint.services import chat_runner, chat_turn_registry, chat_turn_runner
+from nodepoint.services.chat_turn_cancel_listener import bind_event_loop
+from nodepoint.services.chat_turn_registry import TurnAlreadyActive
 from nodepoint.services import chat_storage_async as storage_async
 from nodepoint.services.workspace import resolve_workspace_for_chat
 from nodepoint.services.workspace_group import (
@@ -33,6 +35,8 @@ class ChatConsumer(AsyncWebsocketConsumer):
         self._streaming = False
 
     async def connect(self):
+        bind_event_loop(asyncio.get_running_loop())
+
         url_kwargs = self.scope["url_route"]["kwargs"]
         group_name = url_kwargs.get("group_name")
 
@@ -89,14 +93,16 @@ class ChatConsumer(AsyncWebsocketConsumer):
             ready["workspace"] = self.workspace_name
 
         turn = await chat_turn_registry.get_status(self.conversation_id)
+        ready["agent_busy"] = turn.active
         if turn.active:
-            ready["agent_busy"] = True
             self._streaming = True
             if turn.turn_id:
                 ready["turn_id"] = str(turn.turn_id)
             if turn.started_at:
                 ready["turn_started_at"] = turn.started_at.isoformat()
             ready["reconnect_hint"] = chat_turn_runner.RECONNECT_HINT
+        else:
+            self._streaming = False
 
         await self._safe_send_json(ready)
 
@@ -243,15 +249,25 @@ class ChatConsumer(AsyncWebsocketConsumer):
         tools = await asyncio.to_thread(chat_runner.default_tools, exclude)
 
         self._streaming = True
-        turn_id = await chat_turn_runner.start_turn(
-            conversation_id=self.conversation_id,
-            branch_id=branch_id,
-            thread=thread,
-            workspace_name=self.workspace_name,
-            group_name=self.group_name,
-            tools=tools,
-            exclude_servers=exclude,
-        )
+        try:
+            turn_id = await chat_turn_runner.start_turn(
+                conversation_id=self.conversation_id,
+                branch_id=branch_id,
+                thread=thread,
+                workspace_name=self.workspace_name,
+                group_name=self.group_name,
+                tools=tools,
+                exclude_servers=exclude,
+            )
+        except TurnAlreadyActive:
+            self._streaming = False
+            await self._safe_send_json(
+                {
+                    "type": "error",
+                    "message": "Agent busy — wait for the current turn or send chat.reconnect",
+                }
+            )
+            return
         await self._safe_send_json(
             {"type": "chat.turn_started", "turn_id": str(turn_id)}
         )

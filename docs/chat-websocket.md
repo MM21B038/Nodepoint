@@ -42,7 +42,7 @@ Backend-only streaming chat over Django Channels. Requires **ASGI** (`uvicorn co
 
 ### Server → client
 
-- `chat.ready` — on connect (`conversation_id`, `active_branch_id`; `agent_busy: true` if a turn is still running — live stream auto-attaches)
+- `chat.ready` — on connect (`conversation_id`, `active_branch_id`, **`agent_busy`** always `true` or `false`; when `true`, live stream auto-attaches)
 - `chat.turn_started` — turn accepted (`turn_id`)
 - `chat.reconnected` — reply to `chat.reconnect`
 - `chat.status` — reply to `chat.status` (`agent_busy`, `turn_id`, `turn_started_at`)
@@ -71,6 +71,8 @@ After reconnect:
 3. **Once**, call `GET /api/chat/<workspace>/` or `GET /api/chat/group/<name>/` to fill text that arrived while you were offline (no token replay).
 4. Send `chat.send` only when `agent_busy` is false.
 
+**Multi-worker:** Active turn metadata is stored in **Redis** (`nodepoint:chat:turn:{conversation_id}`), so `agent_busy` is consistent across uvicorn workers (`WEB_WORKERS>1`). `chat.cancel` reaches the owning worker via Redis pub/sub.
+
 Use `ping` / `pong` for keepalive on long tool or LLM runs (`AGENT_REQUEST_TIMEOUT` defaults to 300s).
 
 Multiple tabs on the same chat each receive the same live stream.
@@ -87,7 +89,7 @@ If a group has no member workspaces, the tool returns a message that the group i
 
 ## Concurrency
 
-- Each WebSocket connection runs **one agent task** at a time (`Agent busy` if a second `chat.send` arrives during a turn).
+- Each WebSocket connection runs **one agent task** at a time (`Agent busy` if a second `chat.send` arrives during a turn). Turn active-state is in Redis, not process memory.
 - Different users/workspaces run **in parallel** on the same `web` service (async event loop + httpx LLM streaming).
 - Knowledge tools share a per-worker slot limit: `CHAT_MAX_CONCURRENT_SEARCHES` (default `8`).
 - Scale horizontally: set `WEB_WORKERS` (default `4`) on the `web` container, or `docker compose up --scale web=2`.
@@ -106,7 +108,8 @@ If a group has no member workspaces, the tool returns a message that the group i
 - `LOG_LEVEL` — Django/app log level (default `INFO`)
 - `CHAT_DEFAULT_SYSTEM` — system prompt for new chats
 - `CHAT_MAX_CONCURRENT_SEARCHES` — default `8`
-- `WEB_WORKERS` — uvicorn worker processes (default `4`)
+- `WEB_WORKERS` — uvicorn worker processes (default `4`; safe with Redis turn registry)
+- `CHAT_TURN_REDIS_TTL` — seconds to retain active-turn metadata if a worker crashes (default `3600`)
 - `DB_CONN_MAX_AGE` — Postgres connection reuse per worker (default `60`)
 - `AGENT_REQUEST_TIMEOUT` — LLM HTTP read timeout seconds (default `300`)
 - `BASE_URL`, `API_KEY` — required for `Agent`

@@ -80,6 +80,7 @@ services:
       QDRANT_HOST: qdrant
       WEB_WORKERS: ${WEB_WORKERS:-4}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CHAT_TURN_REDIS_TTL: ${CHAT_TURN_REDIS_TTL:-3600}
     volumes:
       - ./media:/app/media
       - ./settings.toml:/app/settings.toml:ro

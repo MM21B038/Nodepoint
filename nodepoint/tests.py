@@ -1,6 +1,8 @@
+import asyncio
 import sys
 import tempfile
 import uuid
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -2424,6 +2426,140 @@ class ChatCompressionTests(TestCase):
         self.assertIn("summary capped", capped)
 
 
+class ChatTurnRedisTests(TestCase):
+    def test_try_set_active_turn_nx(self):
+        from nodepoint.services import chat_turn_redis
+
+        conv_id = uuid.uuid4()
+        turn_a = uuid.uuid4()
+        turn_b = uuid.uuid4()
+        started = datetime.now(timezone.utc)
+
+        with patch("nodepoint.services.chat_turn_redis.get_connection") as mock_conn:
+            conn = MagicMock()
+            mock_conn.return_value = conn
+            conn.set.side_effect = [True, False]
+            conn.get.return_value = None
+
+            self.assertTrue(
+                chat_turn_redis.try_set_active_turn(conv_id, turn_a, started)
+            )
+            self.assertFalse(
+                chat_turn_redis.try_set_active_turn(conv_id, turn_b, started)
+            )
+
+    def test_clear_active_turn_matches_turn_id(self):
+        from nodepoint.services import chat_turn_redis
+
+        conv_id = uuid.uuid4()
+        turn_id = uuid.uuid4()
+        other = uuid.uuid4()
+        started = datetime.now(timezone.utc)
+        payload = chat_turn_redis._serialize_record(
+            turn_id=turn_id,
+            started_at=started,
+            owner_worker_id="host:1",
+        )
+
+        with patch("nodepoint.services.chat_turn_redis.get_connection") as mock_conn:
+            conn = MagicMock()
+            mock_conn.return_value = conn
+            conn.get.return_value = payload
+
+            self.assertFalse(chat_turn_redis.clear_active_turn(conv_id, other))
+            conn.delete.assert_not_called()
+
+            self.assertTrue(chat_turn_redis.clear_active_turn(conv_id, turn_id))
+            conn.delete.assert_called_once()
+
+
+class ChatTurnRegistryRedisTests(TestCase):
+    def test_get_status_reads_redis_not_local_memory(self):
+        from asgiref.sync import async_to_sync
+        from nodepoint.services import chat_turn_registry, chat_turn_redis
+
+        conv_id = uuid.uuid4()
+        turn_id = uuid.uuid4()
+        started = datetime.now(timezone.utc)
+        record = chat_turn_redis.ActiveTurnRecord(
+            turn_id=turn_id,
+            started_at=started,
+            worker_id="worker-a",
+        )
+
+        with patch(
+            "nodepoint.services.chat_turn_registry.chat_turn_redis.get_active_turn",
+            return_value=record,
+        ):
+            status = async_to_sync(chat_turn_registry.get_status)(conv_id)
+            self.assertTrue(status.active)
+            self.assertEqual(status.turn_id, turn_id)
+
+    def test_register_raises_when_redis_nx_fails(self):
+        from asgiref.sync import async_to_sync
+        from nodepoint.services import chat_turn_registry
+        from nodepoint.services.chat_turn_registry import TurnAlreadyActive
+
+        conv_id = uuid.uuid4()
+        turn_id = uuid.uuid4()
+
+        async def run():
+            task = asyncio.create_task(asyncio.sleep(10))
+            try:
+                with patch(
+                    "nodepoint.services.chat_turn_registry.chat_turn_redis.try_set_active_turn",
+                    return_value=False,
+                ):
+                    with self.assertRaises(TurnAlreadyActive):
+                        await chat_turn_registry.register(conv_id, task, turn_id)
+            finally:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        async_to_sync(run)()
+
+    def test_cancel_turn_publishes_when_no_local_task(self):
+        from asgiref.sync import async_to_sync
+        from nodepoint.services import chat_turn_registry, chat_turn_redis
+
+        conv_id = uuid.uuid4()
+        record = chat_turn_redis.ActiveTurnRecord(
+            turn_id=uuid.uuid4(),
+            started_at=datetime.now(timezone.utc),
+            worker_id="worker-b",
+        )
+
+        with patch(
+            "nodepoint.services.chat_turn_registry.chat_turn_redis.get_active_turn",
+            return_value=record,
+        ), patch(
+            "nodepoint.services.chat_turn_registry.chat_turn_redis.publish_cancel"
+        ) as mock_publish:
+            ok = async_to_sync(chat_turn_registry.cancel_turn)(conv_id)
+            self.assertTrue(ok)
+            mock_publish.assert_called_once_with(conv_id)
+
+
+class ChatTurnCancelListenerTests(TestCase):
+    def test_should_start_for_uvicorn_not_for_test(self):
+        from nodepoint.services.chat_turn_cancel_listener import (
+            should_start_chat_cancel_listener,
+        )
+
+        self.assertFalse(
+            should_start_chat_cancel_listener(["manage.py", "test", "nodepoint.tests"])
+        )
+        self.assertTrue(
+            should_start_chat_cancel_listener(["uvicorn", "config.asgi:application"])
+        )
+        self.assertFalse(
+            should_start_chat_cancel_listener(["manage.py", "migrate"])
+        )
+
+
 class WebSocketStreamReconnectTests(TransactionTestCase):
     @patch("nodepoint.services.chat_runner.chat_compression.compress_async", new_callable=AsyncMock)
     @patch.object(chat_runner.Agent, "stream_agent_events_async")
@@ -2461,6 +2597,7 @@ class WebSocketStreamReconnectTests(TransactionTestCase):
                 self.assertTrue(connected)
                 ready1 = await comm1.receive_json_from(timeout=2)
                 self.assertEqual(ready1["type"], "chat.ready")
+                self.assertFalse(ready1["agent_busy"])
 
                 await comm1.send_json_to(
                     {"type": "chat.send", "content": "hello"}
@@ -2477,7 +2614,7 @@ class WebSocketStreamReconnectTests(TransactionTestCase):
                 self.assertTrue(connected2)
                 ready2 = await comm2.receive_json_from(timeout=2)
                 self.assertEqual(ready2["type"], "chat.ready")
-                self.assertTrue(ready2.get("agent_busy"))
+                self.assertIs(ready2["agent_busy"], True)
 
                 saw_live = False
                 saw_done = False
@@ -2515,7 +2652,7 @@ class WebSocketStreamReconnectTests(TransactionTestCase):
             await comm.send_json_to({"type": "chat.reconnect"})
             reply = await comm.receive_json_from(timeout=2)
             self.assertEqual(reply["type"], "chat.reconnected")
-            self.assertFalse(reply.get("agent_busy"))
+            self.assertIs(reply["agent_busy"], False)
             await comm.disconnect()
 
         async_to_sync(run)()

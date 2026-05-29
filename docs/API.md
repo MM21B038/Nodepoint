@@ -1410,7 +1410,7 @@ One JSON object per text frame.
 { "type": "chat.reconnect" }
 ```
 
-Use after a drop **or** rely on auto-attach: `chat.ready` with `agent_busy: true` already subscribes to the in-flight turn.
+Use after a drop **or** rely on auto-attach: `chat.ready` always includes **`agent_busy`** (`true` when a turn is still running — live stream auto-attaches).
 
 **Response (turn running):**
 
@@ -1601,7 +1601,10 @@ Tools and control events are **single frames** (full payload per event):
 ```json
 {
   "type": "chat.ready",
-  "workspace": "PRAJNA"
+  "workspace": "PRAJNA",
+  "conversation_id": "...",
+  "active_branch_id": "...",
+  "agent_busy": false
 }
 ```
 
@@ -1620,6 +1623,10 @@ Tools and control events are **single frames** (full payload per event):
 | `workspace` | Per-workspace mode only |
 | `group` | Group-scope mode only |
 | `workspaces` | Workspaces included in `Knowledge.search_graph` for this connection |
+| `conversation_id` | Chat thread UUID |
+| `active_branch_id` | Current branch for compression / agent context |
+| `agent_busy` | Always present: `true` if a turn is in progress (Redis-backed; consistent across uvicorn workers) |
+| `turn_id`, `turn_started_at`, `reconnect_hint` | Present when `agent_busy` is `true` |
 
 Close codes: `4000` invalid URL; `4004` unknown workspace (per-workspace mode).
 
@@ -1740,6 +1747,7 @@ Returns matches with `score` (fuzzy mode), outgoing/incoming relations (relation
 | `CHAT_COMPRESS_TEMPERATURE` | `0.2` | Compression LLM temperature |
 | `CHAT_COMPRESS_MAX_MESSAGES` | `30` | Max thread messages sent to compression |
 | `CHAT_MAX_CONCURRENT_SEARCHES` | `8` | Max parallel Knowledge tool runs per web worker |
+| `CHAT_TURN_REDIS_TTL` | `3600` | Active chat turn metadata TTL in Redis (crash safety) |
 | `WEB_WORKERS` | `4` | Uvicorn worker processes for ASGI |
 | `DB_CONN_MAX_AGE` | `60` | Postgres connection reuse (seconds) |
 | `CHAT_DEFAULT_SYSTEM` | (see settings) | New conversation system prompt |
