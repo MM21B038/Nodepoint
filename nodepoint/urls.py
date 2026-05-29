@@ -19,6 +19,7 @@ from nodepoint.views.document import (
 from nodepoint.views.preprocess import (
     PreprocessStatusAPIView,
     PreprocessWorkspaceAPIView,
+    QueueStatusAPIView,
 )
 
 from nodepoint.views.chat import (
@@ -83,6 +84,11 @@ urlpatterns = [
     path(
         "document/delete/<str:workspace_name>/<str:file_name>/",
         DeleteDocumentAPIView.as_view(),
+    ),
+
+    path(
+        "preprocess/queue-status/",
+        QueueStatusAPIView.as_view(),
     ),
 
     path(

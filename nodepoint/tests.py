@@ -163,16 +163,126 @@ class PreprocessPipelineTests(TestCase):
             wait=False,
         )
 
-    @patch("nodepoint.views.preprocess.enqueue_preprocess_pipeline")
-    def test_post_preprocess_passes_workspace_name(self, mock_enqueue):
+    @patch("nodepoint.views.preprocess.enqueue_priority_workspace_preprocess")
+    def test_post_preprocess_defaults_priority_and_others(self, mock_enqueue):
         from rest_framework.test import APIClient
 
-        mock_enqueue.return_value = {"message": "ok", "steps": [], "jobs": {}}
+        mock_enqueue.return_value = {
+            "message": "ok",
+            "priority_workspace": "post-ws",
+            "priority_pipeline": {"steps": [], "jobs": {}},
+            "other_workspaces": [],
+        }
         client = APIClient()
         Workspace.objects.create(name="post-ws")
         resp = client.post("/api/workspace/preprocess/post-ws/")
         self.assertEqual(resp.status_code, 200)
-        mock_enqueue.assert_called_once_with(workspace_name="post-ws")
+        mock_enqueue.assert_called_once_with(
+            "post-ws",
+            priority=True,
+            include_other_workspaces=True,
+        )
+        self.assertEqual(resp.data["priority_workspace"], "post-ws")
+
+    @patch("nodepoint.views.preprocess.enqueue_priority_workspace_preprocess")
+    def test_post_preprocess_query_params(self, mock_enqueue):
+        from rest_framework.test import APIClient
+
+        mock_enqueue.return_value = {
+            "message": "ok",
+            "priority_workspace": "post-ws",
+            "priority_pipeline": {},
+            "other_workspaces": [],
+        }
+        client = APIClient()
+        Workspace.objects.create(name="post-ws")
+        resp = client.post(
+            "/api/workspace/preprocess/post-ws/"
+            "?priority=false&include_other_workspaces=false"
+        )
+        self.assertEqual(resp.status_code, 200)
+        mock_enqueue.assert_called_once_with(
+            "post-ws",
+            priority=False,
+            include_other_workspaces=False,
+        )
+
+    @patch("nodepoint.services.preprocess_pipeline._enqueue_workspace_preprocess")
+    @patch("nodepoint.services.preprocess_pipeline._other_workspaces_needing_preprocess")
+    def test_enqueue_priority_routes_queues(
+        self, mock_others, mock_enqueue
+    ):
+        from nodepoint.services.preprocess_pipeline import (
+            enqueue_priority_workspace_preprocess,
+        )
+
+        mock_enqueue.side_effect = [
+            {"coalesced": False, "jobs": {"prepare_legacy": "j1"}},
+            {"coalesced": True, "jobs": {}},
+        ]
+        mock_others.return_value = ["ws-b"]
+
+        result = enqueue_priority_workspace_preprocess(
+            "ws-a",
+            priority=True,
+            include_other_workspaces=True,
+        )
+
+        self.assertEqual(result["priority_workspace"], "ws-a")
+        self.assertEqual(len(result["other_workspaces"]), 1)
+        self.assertFalse(result["other_workspaces"][0]["queued"])
+        self.assertTrue(result["other_workspaces"][0]["coalesced"])
+        self.assertEqual(mock_enqueue.call_count, 2)
+        mock_enqueue.assert_any_call(
+            "ws-a", orchestrator_queue_name="high"
+        )
+        mock_enqueue.assert_any_call(
+            "ws-b", orchestrator_queue_name="low"
+        )
+
+    @patch("nodepoint.services.preprocess_pipeline._enqueue_workspace_preprocess")
+    def test_enqueue_priority_single_workspace_no_others(self, mock_enqueue):
+        from nodepoint.services.preprocess_pipeline import (
+            enqueue_priority_workspace_preprocess,
+        )
+
+        mock_enqueue.return_value = {"coalesced": False, "jobs": {}}
+
+        enqueue_priority_workspace_preprocess(
+            "ws-a",
+            priority=False,
+            include_other_workspaces=False,
+        )
+
+        mock_enqueue.assert_called_once_with(
+            "ws-a", orchestrator_queue_name="orchestrator"
+        )
+
+    @patch("nodepoint.services.chunking.django_rq.get_queue")
+    def test_enqueue_chunks_includes_inprogress_documents(self, mock_get_queue):
+        from nodepoint.services.chunking import enqueue_chunks_for_documents
+
+        workspace = Workspace.objects.create(name="inprogress-ws")
+        document = Document.objects.create(
+            workspace=workspace,
+            file_name="note.md",
+            status=Status.INPROGRESS,
+            content=True,
+        )
+        chunk = DocumentChunk.objects.create(
+            document=document,
+            index=0,
+            status=Status.PENDING,
+            vector=Status.PENDING,
+        )
+        mock_queue = MagicMock()
+        mock_get_queue.return_value = mock_queue
+
+        count = enqueue_chunks_for_documents(workspace_name=workspace.name)
+        self.assertEqual(count, 1)
+        mock_queue.enqueue.assert_called_once()
+        chunk.refresh_from_db()
+        self.assertEqual(chunk.status, Status.QUEUED)
 
     @patch("nodepoint.services.document.enqueue_chunks_for_document", return_value=1)
     @patch("nodepoint.services.document.prepare_document", return_value=[uuid.uuid4()])
@@ -696,6 +806,126 @@ class LegacyDerivePhaseTests(TestCase):
             content=True,
         )
         self.assertEqual(phase, "needs_prepare")
+
+
+class QueueStatusServiceTests(TestCase):
+    def test_parse_args_summary_workspace_batch(self):
+        from nodepoint.services.queue_status import _parse_args_summary
+
+        summary = _parse_args_summary(
+            "nodepoint.services.preprocess_pipeline.run_chunk_preprocess_batch",
+            ("my-ws",),
+            {"document_ids": [uuid.uuid4()]},
+        )
+        self.assertEqual(summary["workspace"], "my-ws")
+        self.assertIn("document_ids", summary)
+
+    def test_parse_args_summary_prepare_document(self):
+        from nodepoint.services.queue_status import _parse_args_summary
+
+        doc_id = uuid.uuid4()
+        summary = _parse_args_summary(
+            "nodepoint.services.preprocess_pipeline.run_prepare_document",
+            (doc_id,),
+            {},
+        )
+        self.assertEqual(summary["document_id"], str(doc_id))
+
+    @patch("nodepoint.services.queue_status.build_active_pipelines")
+    @patch("nodepoint.services.queue_status.build_rq_snapshot")
+    @patch("nodepoint.services.queue_status._scan_pipeline_locks")
+    def test_build_queue_status_structure(self, mock_locks, mock_rq, mock_active):
+        from nodepoint.services.queue_status import build_queue_status
+
+        mock_locks.return_value = [
+            {"workspace": "ws-a", "key": "nodepoint:preprocess:pipeline:ws-a", "ttl_seconds": 3600}
+        ]
+        mock_rq.return_value = {"queues": {}, "workers": []}
+        mock_active.return_value = []
+
+        data = build_queue_status()
+        self.assertIn("generated_at", data)
+        self.assertIsNone(data["workspace_filter"])
+        self.assertEqual(data["redis"]["pipeline_locks"][0]["workspace"], "ws-a")
+        self.assertIn("database", data)
+        self.assertIn("active_pipelines", data)
+
+    def test_database_backlog_counts(self):
+        from nodepoint.services.queue_status import build_database_backlog
+
+        ws = Workspace.objects.create(name="queue-ws")
+        doc = Document.objects.create(
+            workspace=ws, file_name="q.md", status=Status.INPROGRESS
+        )
+        DocumentChunk.objects.create(
+            document=doc, index=0, status=Status.QUEUED, vector=Status.PENDING
+        )
+        KnowledgeEntity.objects.create(
+            document=doc, name="E", entity_type="PER", vector=Status.PENDING
+        )
+
+        backlog = build_database_backlog(workspace="queue-ws")
+        self.assertEqual(backlog["documents"]["INPROGRESS"], 1)
+        self.assertEqual(backlog["chunks"]["QUEUED"], 1)
+        self.assertEqual(backlog["vectors"]["entities"]["pending"], 1)
+
+
+class QueueStatusAPITests(TestCase):
+    def setUp(self):
+        from rest_framework.test import APIClient
+
+        self.client = APIClient()
+
+    @patch("nodepoint.views.preprocess.build_queue_status")
+    def test_queue_status_endpoint(self, mock_build):
+        mock_build.return_value = {
+            "generated_at": "2026-05-29T00:00:00+00:00",
+            "workspace_filter": None,
+            "rq": {"queues": {}, "workers": []},
+            "redis": {"pipeline_locks": []},
+            "database": {},
+            "active_pipelines": [],
+        }
+        resp = self.client.get("/api/preprocess/queue-status/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["generated_at"], "2026-05-29T00:00:00+00:00")
+        mock_build.assert_called_once_with(workspace=None)
+
+    @patch("nodepoint.views.preprocess.build_queue_status")
+    def test_queue_status_workspace_query(self, mock_build):
+        mock_build.return_value = {"workspace_filter": "filtered-ws"}
+        resp = self.client.get("/api/preprocess/queue-status/?workspace=filtered-ws")
+        self.assertEqual(resp.status_code, 200)
+        mock_build.assert_called_once_with(workspace="filtered-ws")
+
+    @patch("nodepoint.services.queue_status.Worker")
+    @patch("nodepoint.services.queue_status.django_rq.get_queue")
+    @patch("nodepoint.services.queue_status.get_connection")
+    def test_rq_snapshot_mocked(self, mock_conn, mock_get_queue, mock_worker_cls):
+        from nodepoint.services.queue_status import build_rq_snapshot
+
+        mock_connection = MagicMock()
+        mock_conn.return_value = mock_connection
+
+        mock_queue = MagicMock()
+        mock_queue.count = 2
+        mock_queue.get_jobs.return_value = []
+        mock_get_queue.return_value = mock_queue
+
+        with patch("nodepoint.services.queue_status.StartedJobRegistry") as mock_started, patch(
+            "nodepoint.services.queue_status.FailedJobRegistry"
+        ) as mock_failed, patch(
+            "nodepoint.services.queue_status.DeferredJobRegistry"
+        ) as mock_deferred:
+            for reg in (mock_started, mock_failed, mock_deferred):
+                reg.return_value.count = 0
+                reg.return_value.get_job_ids.return_value = []
+
+            mock_worker_cls.all.return_value = []
+
+            snapshot = build_rq_snapshot()
+            self.assertIn("orchestrator", snapshot["queues"])
+            self.assertEqual(snapshot["queues"]["orchestrator"]["counts"]["queued"], 2)
 
 
 import asyncio

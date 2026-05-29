@@ -155,6 +155,8 @@ RQ_QUEUES = {
     "low": _rq_queue,
 }
 RQ_QUEUE_ORCHESTRATOR = "orchestrator"
+RQ_QUEUE_ORCHESTRATOR_HIGH = "high"
+RQ_QUEUE_ORCHESTRATOR_LOW = "low"
 RQ_QUEUE_CHUNK = "chunk"
 RQ_QUEUE_VECTOR = "vector"
 RQ = {

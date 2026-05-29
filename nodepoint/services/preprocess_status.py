@@ -294,3 +294,11 @@ def build_workspace_preprocess_status(workspace: Workspace) -> dict[str, Any]:
         "vectors": vectors,
         "files": files,
     }
+
+
+def workspace_needs_preprocess(workspace: Workspace) -> bool:
+    """True when the workspace has documents and preprocess is not fully ready."""
+    overall = build_workspace_preprocess_status(workspace)["overall"]
+    if overall["documents_total"] == 0:
+        return False
+    return not overall.get("ready", False)

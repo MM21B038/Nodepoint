@@ -51,6 +51,7 @@ _INCOMPLETE_DOC_STATUSES = (
     Status.PENDING,
     Status.FAILED,
     Status.QUEUED,
+    Status.INPROGRESS,
 )
 
 

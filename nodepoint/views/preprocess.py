@@ -3,8 +3,23 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from nodepoint.models import Workspace
-from nodepoint.services.preprocess_pipeline import enqueue_preprocess_pipeline
+from nodepoint.services.preprocess_pipeline import enqueue_priority_workspace_preprocess
 from nodepoint.services.preprocess_status import build_workspace_preprocess_status
+from nodepoint.services.queue_status import build_queue_status
+
+
+def _parse_bool_param(value, default: bool) -> bool:
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+class QueueStatusAPIView(APIView):
+    """GET /api/preprocess/queue-status/ — global RQ / Redis / DB preprocess snapshot."""
+
+    def get(self, request):
+        workspace = (request.query_params.get("workspace") or "").strip() or None
+        return Response(build_queue_status(workspace=workspace))
 
 
 class PreprocessStatusAPIView(APIView):
@@ -38,12 +53,24 @@ class PreprocessWorkspaceAPIView(APIView):
         except Workspace.DoesNotExist:
             return Response({"error": "Workspace not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        pipeline = enqueue_preprocess_pipeline(workspace_name=workspace.name)
+        params = {**request.query_params.dict(), **request.data}
+        priority = _parse_bool_param(params.get("priority"), default=True)
+        include_other_workspaces = _parse_bool_param(
+            params.get("include_other_workspaces"),
+            default=True,
+        )
+
+        result = enqueue_priority_workspace_preprocess(
+            workspace.name,
+            priority=priority,
+            include_other_workspaces=include_other_workspaces,
+        )
 
         return Response(
             {
-                "message": pipeline.get("message")
-                or f"Preprocessing queued for workspace '{workspace.name}'",
-                "pipeline": pipeline,
+                "message": result["message"],
+                "priority_workspace": result["priority_workspace"],
+                "priority_pipeline": result["priority_pipeline"],
+                "other_workspaces": result["other_workspaces"],
             }
         )

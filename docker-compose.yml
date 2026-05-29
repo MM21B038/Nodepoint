@@ -135,7 +135,9 @@ services:
         "/app/.venv/bin/python",
         "manage.py",
         "rqworker",
+        "high",
         "orchestrator",
+        "low",
       ]
 
   worker:

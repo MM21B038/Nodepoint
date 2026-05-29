@@ -13,13 +13,14 @@ from rq import Retry
 from nodepoint.backend.content_extractor import read_document_content
 from nodepoint.backend.kg_builder import split_doc
 from nodepoint.enums import Status
-from nodepoint.models import Document, DocumentChunk
+from nodepoint.models import Document, DocumentChunk, Workspace
 from nodepoint.mongo.manager import delete_chunks_for_document, ingest_chunk
 from nodepoint.services.chunking import (
     enqueue_chunks_for_documents,
     prepare_document,
     run_prepare_legacy_batch,
 )
+from nodepoint.services.preprocess_status import workspace_needs_preprocess
 from nodepoint.services.vector import vector_preprocess
 
 logger = logging.getLogger(__name__)
@@ -34,8 +35,17 @@ def _orchestrator_timeout() -> str:
     )
 
 
-def _orchestrator_queue():
-    return django_rq.get_queue(getattr(settings, "RQ_QUEUE_ORCHESTRATOR", "orchestrator"))
+def _orchestrator_queue_name(priority: bool = False, background: bool = False) -> str:
+    if priority:
+        return getattr(settings, "RQ_QUEUE_ORCHESTRATOR_HIGH", "high")
+    if background:
+        return getattr(settings, "RQ_QUEUE_ORCHESTRATOR_LOW", "low")
+    return getattr(settings, "RQ_QUEUE_ORCHESTRATOR", "orchestrator")
+
+
+def _orchestrator_queue(queue_name: str | None = None):
+    name = queue_name or getattr(settings, "RQ_QUEUE_ORCHESTRATOR", "orchestrator")
+    return django_rq.get_queue(name)
 
 
 _RETRY = Retry(max=3, interval=[10, 30, 60])
@@ -253,7 +263,11 @@ def _enqueue_upload_preprocess(
     }
 
 
-def _enqueue_workspace_preprocess(workspace_name: str | None) -> dict[str, Any]:
+def _enqueue_workspace_preprocess(
+    workspace_name: str | None,
+    *,
+    orchestrator_queue_name: str | None = None,
+) -> dict[str, Any]:
     if workspace_name and not try_acquire_workspace_pipeline_lock(workspace_name):
         message = f"Preprocess pipeline already queued (workspace={workspace_name})"
         logger.info(message)
@@ -264,7 +278,7 @@ def _enqueue_workspace_preprocess(workspace_name: str | None) -> dict[str, Any]:
             "jobs": {},
         }
 
-    queue = _orchestrator_queue()
+    queue = _orchestrator_queue(orchestrator_queue_name)
     job_kwargs = {"job_timeout": _orchestrator_timeout(), "retry": _RETRY}
 
     j1 = queue.enqueue(run_prepare_legacy_batch, workspace_name, **job_kwargs)
@@ -316,7 +330,76 @@ def _enqueue_workspace_preprocess(workspace_name: str | None) -> dict[str, Any]:
 def enqueue_preprocess_pipeline(
     uploaded_document_id: UUID | None = None,
     workspace_name: str | None = None,
+    *,
+    orchestrator_queue_name: str | None = None,
 ) -> dict[str, Any]:
     if uploaded_document_id is not None:
         return _enqueue_upload_preprocess(uploaded_document_id, workspace_name)
-    return _enqueue_workspace_preprocess(workspace_name)
+    return _enqueue_workspace_preprocess(
+        workspace_name,
+        orchestrator_queue_name=orchestrator_queue_name,
+    )
+
+
+def _other_workspaces_needing_preprocess(exclude: str) -> list[str]:
+    names: list[str] = []
+    for ws in Workspace.objects.order_by("name"):
+        if ws.name == exclude:
+            continue
+        if workspace_needs_preprocess(ws):
+            names.append(ws.name)
+    return names
+
+
+def enqueue_priority_workspace_preprocess(
+    workspace_name: str,
+    *,
+    priority: bool = True,
+    include_other_workspaces: bool = True,
+) -> dict[str, Any]:
+    """
+    POST preprocess: prioritize one workspace and optionally queue the rest.
+
+    Priority workspace uses the high orchestrator queue when priority=True;
+    other incomplete workspaces use the low queue (or orchestrator when priority=False).
+    """
+    priority_queue = _orchestrator_queue_name(priority=priority)
+    background_queue = _orchestrator_queue_name(background=priority)
+
+    priority_pipeline = _enqueue_workspace_preprocess(
+        workspace_name,
+        orchestrator_queue_name=priority_queue,
+    )
+
+    other_workspaces: list[dict[str, Any]] = []
+    if include_other_workspaces:
+        for other_name in _other_workspaces_needing_preprocess(workspace_name):
+            result = _enqueue_workspace_preprocess(
+                other_name,
+                orchestrator_queue_name=background_queue,
+            )
+            entry: dict[str, Any] = {
+                "workspace": other_name,
+                "queued": not result.get("coalesced"),
+                "coalesced": bool(result.get("coalesced")),
+                "skipped_reason": None,
+            }
+            if result.get("coalesced"):
+                entry["skipped_reason"] = "pipeline_already_queued"
+            other_workspaces.append(entry)
+
+    message = priority_pipeline.get("message") or (
+        f"Preprocessing queued for workspace '{workspace_name}'"
+    )
+    if include_other_workspaces and other_workspaces:
+        queued_count = sum(1 for o in other_workspaces if o["queued"])
+        message += (
+            f"; {queued_count} other workspace(s) queued for background preprocess"
+        )
+
+    return {
+        "message": message,
+        "priority_workspace": workspace_name,
+        "priority_pipeline": priority_pipeline,
+        "other_workspaces": other_workspaces,
+    }

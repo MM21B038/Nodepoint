@@ -148,6 +148,7 @@ Base path: `/api/`. All paths below are relative to that prefix.
 | POST | `document/upload/` | Upload `.txt`/`.md`; queue preprocess pipeline |
 | GET | `document/<workspace_name>/` | List documents in workspace |
 | DELETE | `document/delete/<workspace_name>/<file_name>/` | Delete one document |
+| GET | `preprocess/queue-status/` | Global RQ queues, workers, locks, DB backlog |
 | GET | `workspace/<workspace_name>/preprocess-status/` | Pipeline / vector / chunk status |
 | POST | `workspace/preprocess/<workspace_name>/` | Queue full workspace preprocess |
 | GET | `knowledge-graph/entity-types/` | Distinct entity types + counts |
@@ -483,6 +484,19 @@ Deletes the Postgres row, related KG rows (cascade), and the file on disk when p
 
 Queues the **full workspace preprocess pipeline** for the named workspace (no single-document upload). One call runs **prepare legacy → chunk KG (parallel workers) → embeddings → mongo repair** — no separate manual preprocess needed to migrate old documents.
 
+By default the clicked workspace is **prioritized** on the RQ **`high`** orchestrator queue, and **other workspaces** that still have incomplete preprocess work are queued on the **`low`** orchestrator queue in the background. Per-workspace Redis coalescing locks are unchanged (a workspace already running or queued is skipped, not double-started).
+
+**Query / body parameters**
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `priority` | `true` | When `true`, enqueue the named workspace on the **`high`** queue; when `false`, use the standard **`orchestrator`** queue (legacy single-workspace behavior). |
+| `include_other_workspaces` | `true` | When `true`, also enqueue pipelines for every other workspace that is not `overall.ready` (on **`low`** when `priority=true`, else **`orchestrator`**). When `false`, only the named workspace is queued. |
+
+Accepts parameters in the query string or JSON body (`priority`, `include_other_workspaces`).
+
+**RQ worker (orchestrator):** `worker-orchestrator` should listen to **`high orchestrator low`** (in that order) so priority jobs run before background and default orchestrator work. Chunk/vector workers stay on **`chunk`** and **`vector`**; scaling those pools increases throughput for all workspaces.
+
 **Pipeline steps (RQ orchestrator queue)**
 
 | Step | Job | What it does |
@@ -497,7 +511,9 @@ Queues the **full workspace preprocess pipeline** for the named workspace (no si
 
 **Coalescing:** Repeated uploads or POST preprocess calls for the same workspace share one workspace tail (vector sweep + mongo repair) via a Redis lock. Upload always runs prepare + document-scoped chunk enqueue immediately.
 
-**RQ queues:** `orchestrator` (pipeline steps), `chunk` (`process_chunk`), `vector` (`process_vector`). Docker Compose runs a dedicated `worker-orchestrator` service plus `worker` services on `chunk` and `vector`.
+**RQ queues:** `high` / `orchestrator` / `low` (pipeline steps; POST uses `high` + `low` by default), `chunk` (`process_chunk`), `vector` (`process_vector`). Docker Compose runs a dedicated `worker-orchestrator` service (`high orchestrator low`) plus `worker` on `chunk` and `vector`.
+
+**Stuck / failed retry:** Chunk enqueue includes documents in `INPROGRESS` (stuck after worker loss) and chunks in `PENDING` / `FAILED` / `QUEUED`. Vector sweep includes `PENDING` and `FAILED` embeddings.
 
 **Legacy documents:** Files uploaded before chunk migration may show `document_status: COMPLETED` with **no** `DocumentChunk` rows and `chunk_id=null` on KG rows. POST preprocess backfills chunks; poll preprocess-status until `overall.ready` is true.
 
@@ -507,8 +523,9 @@ Queues the **full workspace preprocess pipeline** for the named workspace (no si
 
 ```json
 {
-  "message": "Preprocess pipeline queued: prepare legacy → chunk KG (parallel) → embeddings → mongo repair (workspace=PRAJNA)",
-  "pipeline": {
+  "message": "Preprocess pipeline queued: prepare legacy → chunk KG (parallel) → embeddings → mongo repair (workspace=PRAJNA); 2 other workspace(s) queued for background preprocess",
+  "priority_workspace": "PRAJNA",
+  "priority_pipeline": {
     "message": "Preprocess pipeline queued: prepare legacy → chunk KG (parallel) → embeddings → mongo repair (workspace=PRAJNA)",
     "steps": [
       "prepare_legacy",
@@ -522,9 +539,131 @@ Queues the **full workspace preprocess pipeline** for the named workspace (no si
       "vector_preprocess": "rq-job-id-3",
       "chunk_mongo_repair": "rq-job-id-4"
     }
-  }
+  },
+  "other_workspaces": [
+    {
+      "workspace": "OTHER",
+      "queued": true,
+      "coalesced": false,
+      "skipped_reason": null
+    },
+    {
+      "workspace": "BUSY",
+      "queued": false,
+      "coalesced": true,
+      "skipped_reason": "pipeline_already_queued"
+    }
+  ]
 }
 ```
+
+Set `?priority=false&include_other_workspaces=false` for the previous single-workspace-only response shape (only `priority_pipeline` is populated; `other_workspaces` is `[]`).
+
+---
+
+### `GET /api/preprocess/queue-status/`
+
+Read-only **operations snapshot** for preprocess workers: RQ queue depths and job samples, registered workers, Redis pipeline locks, Postgres/Mongo backlog, and workspaces with an active orchestrator pipeline.
+
+Use this to debug idle workers, stuck `nodepoint:preprocess:pipeline:{workspace}` locks, jobs on the wrong queue, or DB work waiting behind empty queues.
+
+**Query**
+
+| Param | Meaning |
+|-------|---------|
+| `workspace` | Optional. Filters RQ job lists and database counts to one workspace; `active_pipelines` only includes that workspace when it has a lock and/or orchestrator jobs. Pipeline lock scan is also limited to that workspace. |
+
+**Response `200`**
+
+```json
+{
+  "generated_at": "2026-05-29T12:00:00.123456+00:00",
+  "workspace_filter": null,
+  "rq": {
+    "queues": {
+      "orchestrator": {
+        "counts": { "queued": 1, "started": 0, "failed": 0, "deferred": 0 },
+        "jobs": [
+          {
+            "id": "abc123",
+            "function": "run_chunk_preprocess_batch",
+            "status": "queued",
+            "created_at": "2026-05-29T11:59:00+00:00",
+            "started_at": null,
+            "ended_at": null,
+            "origin_queue": "orchestrator",
+            "args_summary": { "workspace": "PRAJNA" }
+          }
+        ],
+        "failed_sample": []
+      },
+      "chunk": { "counts": { "queued": 12, "started": 2, "failed": 0, "deferred": 0 }, "jobs": [], "failed_sample": [] },
+      "vector": { "counts": { "queued": 50, "started": 1, "failed": 1, "deferred": 0 }, "jobs": [], "failed_sample": [] },
+      "default": { "counts": { "queued": 0, "started": 0, "failed": 0, "deferred": 0 }, "jobs": [], "failed_sample": [] }
+    },
+    "workers": [
+      {
+        "name": "orchestrator-worker-1",
+        "state": "busy",
+        "queues": ["orchestrator"],
+        "current_job_id": "abc123",
+        "birth_date": "2026-05-29T08:00:00+00:00",
+        "last_heartbeat": "2026-05-29T12:00:01+00:00"
+      }
+    ]
+  },
+  "redis": {
+    "pipeline_locks": [
+      {
+        "workspace": "PRAJNA",
+        "key": "nodepoint:preprocess:pipeline:PRAJNA",
+        "ttl_seconds": 14300
+      }
+    ]
+  },
+  "database": {
+    "documents": { "PENDING": 0, "QUEUED": 1, "INPROGRESS": 0, "COMPLETED": 5, "FAILED": 0, "total": 6 },
+    "chunks": { "PENDING": 0, "QUEUED": 3, "INPROGRESS": 1, "COMPLETED": 20, "FAILED": 0, "total": 24 },
+    "vectors": {
+      "entities": { "pending": 4, "failed": 0, "completed": 0, "total": 4 },
+      "relations": { "pending": 2, "failed": 0, "completed": 0, "total": 2 },
+      "chunks": { "pending": 10, "failed": 1, "completed": 0, "total": 11 }
+    },
+    "workspaces_incomplete": [
+      {
+        "workspace": "PRAJNA",
+        "phase": "embedding",
+        "documents_total": 6,
+        "documents_failed": 0
+      }
+    ]
+  },
+  "active_pipelines": [
+    {
+      "workspace": "PRAJNA",
+      "lock_held": true,
+      "lock_ttl_seconds": 14300,
+      "orchestrator_jobs": []
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `generated_at` | UTC timestamp when the snapshot was built |
+| `workspace_filter` | Echo of `?workspace=` or `null` for global view |
+| `rq.queues.*.counts` | RQ registry sizes: waiting (`queued`), in-flight (`started`), `failed`, `deferred` |
+| `rq.queues.*.jobs` | Sample of queued, started, and deferred jobs (up to 40 per queue), with parsed `args_summary` |
+| `rq.queues.*.failed_sample` | Last failed jobs with truncated `error` |
+| `rq.workers` | `Worker.all()` — which queue names each worker listens on and optional `current_job_id` |
+| `redis.pipeline_locks` | Keys `nodepoint:preprocess:pipeline:{workspace}` and TTL seconds (`-1` / missing → `null`) |
+| `database.documents` / `chunks` | Row counts by `status` (global or filtered workspace) |
+| `database.vectors.*` | Rows with vector status `PENDING` or `FAILED` only (embedding backlog) |
+| `database.workspaces_incomplete` | Omitted when `?workspace=` is set; otherwise workspaces where per-workspace preprocess is not `ready` |
+| `active_pipelines` | Workspaces with a pipeline lock and/or matching orchestrator queue jobs |
+
+Monitored queues: `orchestrator`, `chunk`, `vector`, `default` (from `RQ_QUEUES`).
 
 ---
 
@@ -1644,6 +1783,7 @@ Alphabetical by path segment. See sections above for full request/response bodie
 | GET | `/api/workspace/list/` | [Workspace](#get-apiworkspacelist) |
 | GET | `/api/workspace/page/` | [Workspace](#get-apiworkspacepage) |
 | GET | `/api/workspace/stats/` | [Workspace](#get-apiworkspacestats) |
+| GET | `/api/preprocess/queue-status/` | [Preprocess](#get-apipreprocessqueue-status) |
 | GET | `/api/workspace/<workspace_name>/preprocess-status/` | [Preprocess](#get-apiworkspaceworkspace_namepreprocess-status) |
 | POST | `/api/workspace/preprocess/<workspace_name>/` | [Preprocess](#post-apiworkspacepreprocessworkspace_name) |
 
