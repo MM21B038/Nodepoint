@@ -6,10 +6,12 @@ from uuid import UUID
 
 from rapidfuzz import fuzz
 
-from nodepoint.models import KnowledgeEntity, Workspace
+from nodepoint.models import Document, KnowledgeEntity, KnowledgeRelation, Workspace
 from nodepoint.services import kg_graph
+from nodepoint.services.group_scope import resolve_group_search_scope
 from nodepoint.services.kg_graph import GraphFilters, parse_graph_filters
 from nodepoint.services.workspace_group import get_group_workspaces_qs
+from nodepoint.enums import GroupTag
 
 DEFAULT_MATCH_LIMIT = 20
 MAX_MATCH_LIMIT = 100
@@ -61,6 +63,7 @@ def _base_entity_qs(
     workspace_names: list[str],
     entity_types: list[str] | None,
     file_names: list[str] | None = None,
+    document_ids: list[UUID] | None = None,
 ):
     qs = KnowledgeEntity.objects.filter(
         document__workspace__name__in=workspace_names,
@@ -69,6 +72,8 @@ def _base_entity_qs(
         qs = qs.filter(entity_type__in=entity_types)
     if file_names is not None:
         qs = qs.filter(document__file_name__in=file_names)
+    if document_ids is not None:
+        qs = qs.filter(document_id__in=document_ids)
     return qs
 
 
@@ -118,6 +123,7 @@ def gather_entity_candidates(
     entity_types: list[str] | None,
     file_names: list[str] | None = None,
     *,
+    document_ids: list[UUID] | None = None,
     include_broad_sample: bool = True,
 ) -> list[KnowledgeEntity]:
     """
@@ -133,7 +139,9 @@ def gather_entity_candidates(
     if not q:
         return []
 
-    base = _base_entity_qs(workspace_names, entity_types, file_names)
+    base = _base_entity_qs(
+        workspace_names, entity_types, file_names, document_ids=document_ids
+    )
     merged: dict[UUID, KnowledgeEntity] = {}
 
     if len(q) >= 2:
@@ -183,14 +191,24 @@ def fuzzy_match_entities(
     match_limit: int = DEFAULT_MATCH_LIMIT,
     entity_types: list[str] | None = None,
     file_names: list[str] | None = None,
+    document_ids: list[UUID] | None = None,
+    entity_ids: list[UUID] | None = None,
 ) -> list[dict[str, Any]]:
     q = query.strip()
     if not q or not workspace_names:
         return []
 
     candidates = gather_entity_candidates(
-        workspace_names, q, entity_types, file_names, include_broad_sample=True
+        workspace_names,
+        q,
+        entity_types,
+        file_names,
+        document_ids=document_ids,
+        include_broad_sample=True,
     )
+    if entity_ids is not None:
+        allowed = {str(entity_id) for entity_id in entity_ids}
+        candidates = [entity for entity in candidates if str(entity.id) in allowed]
     scored = _rank_entities(q, candidates, threshold=threshold)
     top = scored[:match_limit]
 
@@ -242,6 +260,7 @@ def search_workspace_by_name(
         limit=graph_filters.limit,
         entity_types=graph_filters.entity_types,
         file_names=graph_filters.file_names,
+        filters=graph_filters,
     )
     graph_filters_dict = graph_filters.as_response_dict()
     graph_filters_dict["threshold"] = threshold
@@ -255,6 +274,44 @@ def search_workspace_by_name(
     }
 
 
+def _group_search_result_row(
+    workspace: Workspace,
+    query: str,
+    graph_filters: GraphFilters,
+    *,
+    threshold: float,
+    match_limit: int,
+    file_names: list[str] | None = None,
+    document_ids: list[UUID] | None = None,
+    entity_ids: list[UUID] | None = None,
+) -> dict[str, Any]:
+    matches = fuzzy_match_entities(
+        query,
+        [workspace.name],
+        threshold=threshold,
+        match_limit=match_limit,
+        entity_types=graph_filters.entity_types,
+        file_names=file_names if file_names is not None else graph_filters.file_names,
+        document_ids=document_ids,
+        entity_ids=entity_ids,
+    )
+    seed_ids = [UUID(m["id"]) for m in matches]
+    graph = kg_graph.build_graph_from_seed_ids(
+        workspace,
+        seed_ids,
+        depth=graph_filters.depth,
+        limit=graph_filters.limit,
+        entity_types=graph_filters.entity_types,
+        file_names=file_names if file_names is not None else graph_filters.file_names,
+        filters=graph_filters,
+    )
+    return {
+        "workspace": workspace.name,
+        "matches": matches,
+        "graph": graph,
+    }
+
+
 def search_group_workspaces_by_name(
     group_name: str,
     query: str,
@@ -263,41 +320,106 @@ def search_group_workspaces_by_name(
     threshold: float,
     match_limit: int,
 ) -> dict[str, Any]:
-    workspaces = list(get_group_workspaces_qs(group_name).order_by("name"))
+    scope = resolve_group_search_scope(group_name)
     graph_filters_dict = graph_filters.as_response_dict()
     graph_filters_dict["threshold"] = threshold
     graph_filters_dict["match_limit"] = match_limit
 
-    results = []
-    for ws in workspaces:
-        matches = fuzzy_match_entities(
-            query,
-            [ws.name],
-            threshold=threshold,
-            match_limit=match_limit,
-            entity_types=graph_filters.entity_types,
-            file_names=graph_filters.file_names,
-        )
-        seed_ids = [UUID(m["id"]) for m in matches]
-        graph = kg_graph.build_graph_from_seed_ids(
-            ws,
-            seed_ids,
-            depth=graph_filters.depth,
-            limit=graph_filters.limit,
-            entity_types=graph_filters.entity_types,
-            file_names=graph_filters.file_names,
-        )
-        results.append(
-            {
-                "workspace": ws.name,
-                "matches": matches,
-                "graph": graph,
-            }
-        )
+    results: list[dict[str, Any]] = []
+
+    if scope.tag == GroupTag.WORKSPACE:
+        workspaces = list(get_group_workspaces_qs(group_name).order_by("name"))
+        for ws in workspaces:
+            results.append(
+                _group_search_result_row(
+                    ws,
+                    query,
+                    graph_filters,
+                    threshold=threshold,
+                    match_limit=match_limit,
+                )
+            )
+
+    elif scope.tag == GroupTag.FILES:
+        doc_ids_by_ws: dict[str, list[UUID]] = {}
+        for doc in Document.objects.filter(id__in=scope.document_ids).select_related(
+            "workspace"
+        ):
+            doc_ids_by_ws.setdefault(doc.workspace.name, []).append(doc.id)
+        for ws_name, doc_ids in sorted(doc_ids_by_ws.items()):
+            workspace = Workspace.objects.get(name=ws_name)
+            member_file_names = list(
+                Document.objects.filter(id__in=doc_ids).values_list(
+                    "file_name", flat=True
+                )
+            )
+            file_names = member_file_names
+            if graph_filters.file_names is not None:
+                file_names = [
+                    name for name in member_file_names if name in graph_filters.file_names
+                ]
+            results.append(
+                _group_search_result_row(
+                    workspace,
+                    query,
+                    graph_filters,
+                    threshold=threshold,
+                    match_limit=match_limit,
+                    file_names=file_names or None,
+                    document_ids=doc_ids,
+                )
+            )
+
+    elif scope.tag == GroupTag.ENTITY:
+        entity_ids_by_ws: dict[str, list[UUID]] = {}
+        for entity in KnowledgeEntity.objects.filter(
+            id__in=scope.entity_ids
+        ).select_related("document__workspace"):
+            entity_ids_by_ws.setdefault(entity.document.workspace.name, []).append(
+                entity.id
+            )
+        for ws_name, ws_entity_ids in sorted(entity_ids_by_ws.items()):
+            workspace = Workspace.objects.get(name=ws_name)
+            results.append(
+                _group_search_result_row(
+                    workspace,
+                    query,
+                    graph_filters,
+                    threshold=threshold,
+                    match_limit=match_limit,
+                    entity_ids=ws_entity_ids,
+                )
+            )
+
+    else:
+        relation_ids_by_ws: dict[str, list[UUID]] = {}
+        endpoint_ids_by_ws: dict[str, list[UUID]] = {}
+        for relation in KnowledgeRelation.objects.filter(
+            id__in=scope.relation_ids
+        ).select_related("document__workspace"):
+            ws_name = relation.document.workspace.name
+            relation_ids_by_ws.setdefault(ws_name, []).append(relation.id)
+            endpoint_ids_by_ws.setdefault(ws_name, []).extend(
+                [relation.source_id, relation.target_id]
+            )
+        for ws_name, relation_ids in sorted(relation_ids_by_ws.items()):
+            workspace = Workspace.objects.get(name=ws_name)
+            endpoint_ids = list(set(endpoint_ids_by_ws.get(ws_name, [])))
+            results.append(
+                _group_search_result_row(
+                    workspace,
+                    query,
+                    graph_filters,
+                    threshold=threshold,
+                    match_limit=match_limit,
+                    entity_ids=endpoint_ids,
+                )
+            )
 
     return {
         "query": query.strip(),
         "group": group_name,
+        "tag": scope.tag,
         "filters": graph_filters_dict,
         "workspaces": results,
     }

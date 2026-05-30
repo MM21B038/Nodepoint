@@ -4,7 +4,6 @@ from contextvars import ContextVar, Token
 
 from nodepoint.services.workspace_group import (
     GROUP_CHAT_PREFIX,
-    list_group_workspace_names,
 )
 
 _chat_workspace: ContextVar[str | None] = ContextVar("chat_workspace", default=None)
@@ -71,14 +70,22 @@ def resolve_search_workspace_names() -> list[str]:
     """
     Workspaces included in Knowledge.search_graph.
 
-    Group-scope chat: all workspaces in the active group.
+    Group-scope chat: workspaces derived from the active group's members.
     Per-workspace chat: the active workspace only.
     """
-    group_name = get_group_scope_chat()
-    if group_name:
-        return list_group_workspace_names(group_name)
+    from nodepoint.services.group_scope import resolve_active_group_search_scope
+
+    scope = resolve_active_group_search_scope()
+    if scope is not None:
+        return scope.workspace_names
 
     chat_ws = get_chat_workspace()
     if chat_ws and not _is_internal_chat_workspace_name(chat_ws):
         return [chat_ws]
     return []
+
+
+def resolve_active_group_scope():
+    from nodepoint.services.group_scope import resolve_active_group_search_scope
+
+    return resolve_active_group_search_scope()

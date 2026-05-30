@@ -1508,9 +1508,70 @@ class KnowledgeGraphAPITests(TestCase):
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
         self.assertEqual(data["group"], "pair")
+        self.assertEqual(data["tag"], "workspace")
         workspaces = [g["workspace"] for g in data["graphs"]]
         self.assertIn("api-kg-ws", workspaces)
         self.assertIn("api-kg-ws-2", workspaces)
+
+    def test_get_by_files_group(self):
+        from nodepoint.services import workspace_group as group_svc
+
+        group_svc.create_group("kg-files", tag="files")
+        group_svc.add_document_to_group("kg-files", self.doc)
+        resp = self.client.get(
+            "/api/knowledge-graph/", {"group": "kg-files", "depth": "0"}
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["tag"], "files")
+        self.assertEqual(len(data["graphs"]), 1)
+        graph = data["graphs"][0]
+        self.assertEqual(graph["workspace"], "api-kg-ws")
+        self.assertIn("filters", graph)
+        names = {n["name"] for n in graph["nodes"]}
+        self.assertEqual(names, {"Alice", "Acme"})
+        self.assertNotIn("Carol", names)
+
+    def test_get_by_entity_group(self):
+        from nodepoint.models import KnowledgeEntity
+        from nodepoint.services import workspace_group as group_svc
+
+        alice = KnowledgeEntity.objects.get(name="Alice", document=self.doc)
+        group_svc.create_group("kg-entity", tag="entity")
+        group_svc.add_entity_to_group("kg-entity", alice)
+        resp = self.client.get(
+            "/api/knowledge-graph/", {"group": "kg-entity", "depth": "0"}
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["tag"], "entity")
+        graph = data["graphs"][0]
+        names = {n["name"] for n in graph["nodes"]}
+        self.assertEqual(names, {"Alice"})
+
+    def test_get_by_relation_group(self):
+        from nodepoint.models import KnowledgeRelation
+        from nodepoint.services import workspace_group as group_svc
+
+        rel = KnowledgeRelation.objects.get(
+            source__name="Alice", target__name="Acme", document=self.doc
+        )
+        group_svc.create_group("kg-relation", tag="relation")
+        group_svc.add_relation_to_group("kg-relation", rel)
+        resp = self.client.get(
+            "/api/knowledge-graph/", {"group": "kg-relation", "depth": "0"}
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["tag"], "relation")
+        graph = data["graphs"][0]
+        names = {n["name"] for n in graph["nodes"]}
+        self.assertEqual(names, {"Alice", "Acme"})
+        self.assertEqual(len(graph["edges"]), 1)
+
+    def test_get_by_unknown_group_404(self):
+        resp = self.client.get("/api/knowledge-graph/", {"group": "missing-group"})
+        self.assertEqual(resp.status_code, 404)
 
     def test_get_by_group_name(self):
         from nodepoint.services import workspace_group as group_svc
@@ -1619,13 +1680,32 @@ class KnowledgeGraphEntityTypesAPITests(TestCase):
     def test_entity_types_by_group(self):
         from nodepoint.services import workspace_group as group_svc
 
-        group_svc.add_workspace_to_group("flagged", self.ws)
+        group_svc.create_group("types-group")
+        group_svc.add_workspace_to_group("types-group", self.ws)
         resp = self.client.get(
-            "/api/knowledge-graph/entity-types/", {"group": "flagged"}
+            "/api/knowledge-graph/entity-types/", {"group": "types-group"}
         )
         self.assertEqual(resp.status_code, 200)
-        names = [w["workspace"] for w in resp.json()["workspaces"]]
+        data = resp.json()
+        self.assertEqual(data["tag"], "workspace")
+        names = [w["workspace"] for w in data["workspaces"]]
         self.assertIn("types-ws", names)
+
+    def test_entity_types_by_files_group(self):
+        from nodepoint.services import workspace_group as group_svc
+
+        group_svc.create_group("types-files", tag="files")
+        group_svc.add_document_to_group("types-files", self.doc)
+        resp = self.client.get(
+            "/api/knowledge-graph/entity-types/", {"group": "types-files"}
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["tag"], "files")
+        ws_row = data["workspaces"][0]
+        types = {row["type"]: row["count"] for row in ws_row["entity_types"]}
+        self.assertEqual(types["PER"], 2)
+        self.assertEqual(types["ORG"], 1)
 
     def test_entity_types_missing_scope_400(self):
         resp = self.client.get("/api/knowledge-graph/entity-types/")
@@ -1751,14 +1831,38 @@ class KnowledgeEntitySearchAPITests(TestCase):
     def test_group_scope(self):
         from nodepoint.services import workspace_group as group_svc
 
-        group_svc.add_workspace_to_group("flagged", self.ws)
+        group_svc.create_group("search-ws-group")
+        group_svc.add_workspace_to_group("search-ws-group", self.ws)
         resp = self.client.get(
             "/api/knowledge/entities/search/",
-            {"q": "Alice", "group": "flagged"},
+            {"q": "Alice", "group": "search-ws-group"},
         )
         self.assertEqual(resp.status_code, 200)
-        names = [w["workspace"] for w in resp.json()["workspaces"]]
+        data = resp.json()
+        self.assertEqual(data["tag"], "workspace")
+        names = [w["workspace"] for w in data["workspaces"]]
         self.assertIn("entity-search-ws", names)
+
+    def test_files_group_entity_search(self):
+        from nodepoint.services import workspace_group as group_svc
+
+        group_svc.create_group("search-files", tag="files")
+        group_svc.add_document_to_group("search-files", self.doc)
+        resp = self.client.get(
+            "/api/knowledge/entities/search/",
+            {"q": "Alice", "group": "search-files", "threshold": "0.9"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["tag"], "files")
+        self.assertEqual(len(data["workspaces"]), 1)
+        matches = data["workspaces"][0]["matches"]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["name"], "Alice")
+        self.assertNotIn(
+            "Acme Corp",
+            {m["name"] for m in matches},
+        )
 
 
 class KgEntitySearchServiceTests(TestCase):
@@ -2073,34 +2177,135 @@ class WorkspaceGroupAPITests(TestCase):
             "/api/group/create/",
             {
                 "name": "research",
-                "tag": "papers",
+                "tag": "entity",
                 "description": "Research workspace collection",
             },
             format="json",
         )
         self.assertEqual(resp.status_code, 201)
-        self.assertEqual(resp.json()["group"]["tag"], "papers")
+        self.assertEqual(resp.json()["group"]["tag"], "entity")
         self.assertEqual(
             resp.json()["group"]["description"], "Research workspace collection"
         )
-        resp = self.client.get("/api/group/list/")
+        resp = self.client.get("/api/group/list/", {"tag": "entity"})
         self.assertEqual(resp.status_code, 200)
-        groups = resp.json()["groups"]
+        body = resp.json()
+        self.assertIn("pagination", body)
+        groups = body["groups"]
         names = [g["name"] for g in groups]
         self.assertIn("research", names)
         research = next(g for g in groups if g["name"] == "research")
-        self.assertEqual(research["tag"], "papers")
+        self.assertEqual(research["tag"], "entity")
         self.assertEqual(research["description"], "Research workspace collection")
 
-    def test_create_group_without_tag(self):
+    def test_list_groups_pagination(self):
+        from nodepoint.services import workspace_group as group_svc
+
+        for i in range(5):
+            group_svc.create_group(f"pag-group-{i}", tag="relation")
+        resp = self.client.get(
+            "/api/group/list/",
+            {"page": "1", "page_size": "2", "tag": "relation"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(len(body["groups"]), 2)
+        self.assertEqual(body["pagination"]["total_items"], 5)
+        self.assertTrue(body["pagination"]["has_next"])
+
+    def test_group_members_pagination_workspace_tag(self):
+        from nodepoint.services import workspace_group as group_svc
+
+        group_svc.create_group("pag-ws-group")
+        for i in range(5):
+            ws = Workspace.objects.create(name=f"pag-ws-{i}")
+            group_svc.add_workspace_to_group("pag-ws-group", ws)
+        resp = self.client.get(
+            "/api/group/pag-ws-group/members/",
+            {"page": "1", "page_size": "2"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["tag"], "workspace")
+        self.assertEqual(body["member_count"], 5)
+        self.assertEqual(len(body["members"]), 2)
+        self.assertEqual(body["pagination"]["total_pages"], 3)
+        page2 = self.client.get(
+            "/api/group/pag-ws-group/members/",
+            {"page": "2", "page_size": "2"},
+        )
+        self.assertEqual(len(page2.json()["members"]), 2)
+
+    def test_group_members_pagination_files_tag(self):
+        from nodepoint.models import Document
+        from nodepoint.services import workspace_group as group_svc
+
+        ws = Workspace.objects.create(name="pag-files-ws")
+        group_svc.create_group("pag-files-group", tag="files")
+        for i in range(3):
+            doc = Document.objects.create(
+                workspace=ws,
+                file_name=f"file-{i}.md",
+                file=SimpleUploadedFile(f"file-{i}.md", b"content"),
+            )
+            group_svc.add_document_to_group("pag-files-group", doc)
+        resp = self.client.get(
+            "/api/group/pag-files-group/members/",
+            {"page": "1", "page_size": "2"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["tag"], "files")
+        self.assertEqual(body["member_count"], 3)
+        self.assertEqual(len(body["members"]), 2)
+        self.assertTrue(body["members"][0]["document_id"])
+
+    def test_group_members_pagination_entity_tag(self):
+        from nodepoint.models import Document, KnowledgeEntity
+        from nodepoint.services import workspace_group as group_svc
+
+        ws = Workspace.objects.create(name="pag-entity-ws")
+        doc = Document.objects.create(
+            workspace=ws,
+            file_name="entities.md",
+            file=SimpleUploadedFile("entities.md", b"content"),
+        )
+        group_svc.create_group("pag-entity-group", tag="entity")
+        for i in range(3):
+            entity = KnowledgeEntity.objects.create(
+                document=doc,
+                name=f"Entity-{i}",
+                entity_type="PER",
+            )
+            group_svc.add_entity_to_group("pag-entity-group", entity)
+        resp = self.client.get(
+            "/api/group/pag-entity-group/members/",
+            {"page": "2", "page_size": "2"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["tag"], "entity")
+        self.assertEqual(body["member_count"], 3)
+        self.assertEqual(len(body["members"]), 1)
+        self.assertIn("entity_id", body["members"][0])
+
+    def test_create_group_without_tag_defaults_workspace(self):
         resp = self.client.post(
             "/api/group/create/",
             {"name": "untagged"},
             format="json",
         )
         self.assertEqual(resp.status_code, 201)
-        self.assertIsNone(resp.json()["group"]["tag"])
+        self.assertEqual(resp.json()["group"]["tag"], "workspace")
         self.assertIsNone(resp.json()["group"]["description"])
+
+    def test_create_group_invalid_tag(self):
+        resp = self.client.post(
+            "/api/group/create/",
+            {"name": "bad-tag", "tag": "papers"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
 
     def test_add_remove_workspace_and_detail(self):
         from nodepoint.services import workspace_group as group_svc
@@ -2116,16 +2321,16 @@ class WorkspaceGroupAPITests(TestCase):
         detail = self.client.get("/api/group/team-a/")
         self.assertEqual(detail.status_code, 200)
         body = detail.json()
-        self.assertEqual(body["workspace_count"], 1)
-        self.assertIn("tag", body)
+        self.assertEqual(body["member_count"], 1)
+        self.assertEqual(body["tag"], "workspace")
         self.assertIn("description", body)
-        self.assertEqual(body["workspaces"][0]["name"], "member-ws")
+        self.assertEqual(body["members"][0]["name"], "member-ws")
         self.assertIn("pagination", body)
 
         rm_resp = self.client.delete("/api/group/team-a/workspaces/member-ws/")
         self.assertEqual(rm_resp.status_code, 200)
         detail2 = self.client.get("/api/group/team-a/")
-        self.assertEqual(detail2.json()["workspace_count"], 0)
+        self.assertEqual(detail2.json()["member_count"], 0)
 
     def test_delete_group(self):
         from nodepoint.services import workspace_group as group_svc
@@ -2141,6 +2346,97 @@ class WorkspaceGroupAPITests(TestCase):
         resp = self.client.get("/api/chat/group/chat-group/")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["group"], "chat-group")
+
+    def test_update_group_metadata(self):
+        self.client.post(
+            "/api/group/create/",
+            {"name": "old-group", "tag": "workspace", "description": "Old desc"},
+            format="json",
+        )
+        resp = self.client.patch(
+            "/api/group/old-group/",
+            {"description": "New desc"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["group"]["name"], "old-group")
+        self.assertEqual(body["group"]["tag"], "workspace")
+        self.assertEqual(body["group"]["description"], "New desc")
+        self.assertNotIn("previous_name", body)
+
+    def test_update_group_tag_rejected(self):
+        self.client.post(
+            "/api/group/create/",
+            {"name": "fixed-tag", "tag": "workspace"},
+            format="json",
+        )
+        resp = self.client.patch(
+            "/api/group/fixed-tag/",
+            {"tag": "entity"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_update_group_rename(self):
+        from nodepoint.models import Workspace
+
+        self.client.post("/api/group/create/", {"name": "rename-me"}, format="json")
+        self.client.get("/api/chat/group/rename-me/")
+        resp = self.client.patch(
+            "/api/group/rename-me/",
+            {"name": "renamed-group"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["group"]["name"], "renamed-group")
+        self.assertEqual(body["previous_name"], "rename-me")
+        self.assertFalse(
+            Workspace.objects.filter(name="__group_chat__rename-me").exists()
+        )
+        self.assertTrue(
+            Workspace.objects.filter(name="__group_chat__renamed-group").exists()
+        )
+        detail = self.client.get("/api/group/renamed-group/")
+        self.assertEqual(detail.status_code, 200)
+
+    def test_update_group_empty_body_400(self):
+        self.client.post("/api/group/create/", {"name": "no-op"}, format="json")
+        resp = self.client.patch("/api/group/no-op/", {}, format="json")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_files_group_membership(self):
+        from nodepoint.models import Document
+
+        ws = Workspace.objects.create(name="file-group-ws")
+        doc = Document.objects.create(
+            workspace=ws,
+            file_name="note.md",
+            file=SimpleUploadedFile("note.md", b"content"),
+        )
+        self.client.post(
+            "/api/group/create/",
+            {"name": "file-group", "tag": "files"},
+            format="json",
+        )
+        add = self.client.post(
+            "/api/group/file-group/files/",
+            {"document_id": str(doc.id)},
+            format="json",
+        )
+        self.assertEqual(add.status_code, 200)
+        wrong = self.client.post(
+            "/api/group/file-group/workspaces/",
+            {"workspace_name": "file-group-ws"},
+            format="json",
+        )
+        self.assertEqual(wrong.status_code, 400)
+        detail = self.client.get("/api/group/file-group/")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["tag"], "files")
+        self.assertEqual(detail.json()["member_count"], 1)
+        self.assertEqual(detail.json()["members"][0]["file_name"], "note.md")
 
 
 class UploadDefaultWorkspaceTests(TestCase):
@@ -2296,6 +2592,48 @@ class WorkspaceAPITests(TestCase):
         body = resp.json()["workspace"]
         self.assertIsNone(body["tag"])
         self.assertIsNone(body["description"])
+
+    def test_update_workspace_metadata(self):
+        self.client.post(
+            "/api/workspace/create/",
+            {"name": "edit-ws", "tag": "old"},
+            format="json",
+        )
+        resp = self.client.patch(
+            "/api/workspace/update/edit-ws/",
+            {"tag": "new-tag", "description": "Updated"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["workspace"]["name"], "edit-ws")
+        self.assertEqual(body["workspace"]["tag"], "new-tag")
+        self.assertEqual(body["workspace"]["description"], "Updated")
+
+    def test_update_workspace_rename(self):
+        self.client.post(
+            "/api/workspace/create/",
+            {"name": "before-rename"},
+            format="json",
+        )
+        resp = self.client.patch(
+            "/api/workspace/update/before-rename/",
+            {"name": "after-rename"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["workspace"]["name"], "after-rename")
+        self.assertEqual(body["previous_name"], "before-rename")
+        from nodepoint.models import Workspace
+
+        self.assertFalse(Workspace.objects.filter(name="before-rename").exists())
+        self.assertTrue(Workspace.objects.filter(name="after-rename").exists())
+
+    def test_update_workspace_empty_body_400(self):
+        self.client.post("/api/workspace/create/", {"name": "noop-ws"}, format="json")
+        resp = self.client.patch("/api/workspace/update/noop-ws/", {}, format="json")
+        self.assertEqual(resp.status_code, 400)
 
 
 class KnowledgeToolGroupScopeTests(TestCase):

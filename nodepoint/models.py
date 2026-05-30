@@ -1,7 +1,7 @@
 import os
 import uuid
 from django.db import models
-from .enums import Status
+from .enums import GroupTag, Status
 
 
 # =========================
@@ -24,7 +24,11 @@ class Workspace(models.Model):
 
 class WorkspaceGroup(models.Model):
     name = models.CharField(max_length=255, unique=True)
-    tag = models.CharField(max_length=255, blank=True, default="")
+    tag = models.CharField(
+        max_length=16,
+        choices=GroupTag.choices,
+        default=GroupTag.WORKSPACE,
+    )
     description = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -55,6 +59,81 @@ class WorkspaceGroupMembership(models.Model):
 
     def __str__(self):
         return f"{self.workspace.name} in {self.group.name}"
+
+
+class GroupDocumentMembership(models.Model):
+    group = models.ForeignKey(
+        WorkspaceGroup,
+        on_delete=models.CASCADE,
+        related_name="document_memberships",
+    )
+    document = models.ForeignKey(
+        "Document",
+        on_delete=models.CASCADE,
+        related_name="group_memberships",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["group", "document"],
+                name="unique_document_per_group",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.document.file_name} in {self.group.name}"
+
+
+class GroupEntityMembership(models.Model):
+    group = models.ForeignKey(
+        WorkspaceGroup,
+        on_delete=models.CASCADE,
+        related_name="entity_memberships",
+    )
+    entity = models.ForeignKey(
+        "KnowledgeEntity",
+        on_delete=models.CASCADE,
+        related_name="group_memberships",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["group", "entity"],
+                name="unique_entity_per_group",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.entity.name} in {self.group.name}"
+
+
+class GroupRelationMembership(models.Model):
+    group = models.ForeignKey(
+        WorkspaceGroup,
+        on_delete=models.CASCADE,
+        related_name="relation_memberships",
+    )
+    relation = models.ForeignKey(
+        "KnowledgeRelation",
+        on_delete=models.CASCADE,
+        related_name="group_memberships",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["group", "relation"],
+                name="unique_relation_per_group",
+            )
+        ]
+
+    def __str__(self):
+        return f"relation {self.relation_id} in {self.group.name}"
 
 
 # =========================

@@ -6,6 +6,7 @@ from nodepoint.registry import Tool
 from nodepoint.services import kg_search
 from nodepoint.services.chat_context import (
     get_group_scope_chat,
+    resolve_active_group_scope,
     resolve_search_workspace_names,
 )
 from nodepoint.services.kg_hybrid_search import hybrid_search
@@ -22,32 +23,51 @@ from nodepoint.services.kg_records import (
 )
 
 
-def _no_workspace_message(query: str) -> str:
+def _empty_scope_message(query: str = "") -> str:
     group_name = get_group_scope_chat()
-    if group_name:
+    scope = resolve_active_group_scope()
+    if group_name and scope is not None:
+        prefix = f'# Knowledge search: "{query}"\n\n' if query else ""
+        if scope.tag == "files":
+            return (
+                f"{prefix}No files are in group \"{group_name}\". "
+                "Add files to the group to include them in knowledge search."
+            )
+        if scope.tag == "entity":
+            return (
+                f"{prefix}No entities are in group \"{group_name}\". "
+                "Add entities to the group to include them in knowledge search."
+            )
+        if scope.tag == "relation":
+            return (
+                f"{prefix}No relations are in group \"{group_name}\". "
+                "Add relations to the group to include them in knowledge search."
+            )
+        return (
+            f"{prefix}No workspaces are in group \"{group_name}\". "
+            "Add workspaces to the group to include them in knowledge search."
+        )
+    if query:
         return (
             f'# Knowledge search: "{query}"\n\n'
-            f'No workspaces are in group "{group_name}". Add workspaces to the '
-            "group to include them in knowledge search."
+            "No workspace is available for knowledge search in this chat session."
         )
-    return (
-        f'# Knowledge search: "{query}"\n\n'
-        "No workspace is available for knowledge search in this chat session."
-    )
-
-
-def _no_access_message() -> str:
-    group_name = get_group_scope_chat()
-    if group_name:
-        return f"No workspaces are in group \"{group_name}\" for knowledge access."
     return "No workspace is available for knowledge access in this chat session."
 
 
-def _workspace_scope():
+def _no_workspace_message(query: str) -> str:
+    return _empty_scope_message(query)
+
+
+def _no_access_message() -> str:
+    return _empty_scope_message()
+
+
+def _search_scope():
     workspaces = resolve_search_workspace_names()
     if not workspaces:
-        return None
-    return workspaces
+        return None, None
+    return workspaces, resolve_active_group_scope()
 
 
 @Tool.tool(
@@ -67,7 +87,7 @@ def search_graph(
     lexical_weight: float = 0.4,
     bm25_weight: float = 0.5,
 ) -> str:
-    workspaces = _workspace_scope()
+    workspaces, scope = _search_scope()
     if not workspaces:
         return _no_workspace_message(query)
 
@@ -88,6 +108,7 @@ def search_graph(
         semantic_weight=semantic_weight,
         lexical_weight=lexical_weight,
         bm25_weight=bm25_weight,
+        scope=scope,
     )
     return kg_search.build_search_document_from_records(query, records)
 
@@ -97,11 +118,11 @@ def search_graph(
     description="Load a knowledge graph entity by UUID with full content and chunk_id.",
 )
 def get_entity_record(entity_id: str) -> str:
-    workspaces = _workspace_scope()
+    workspaces, scope = _search_scope()
     if not workspaces:
         return _no_access_message()
     try:
-        rec = get_entity(entity_id, allowed_workspaces=workspaces)
+        rec = get_entity(entity_id, allowed_workspaces=workspaces, scope=scope)
     except RecordNotFoundError as exc:
         return f"# Entity not found\n\n{exc}\n"
     except RecordAccessError as exc:
@@ -114,11 +135,11 @@ def get_entity_record(entity_id: str) -> str:
     description="Load a knowledge graph relation by UUID with full content and chunk_id.",
 )
 def get_relation_record(relation_id: str) -> str:
-    workspaces = _workspace_scope()
+    workspaces, scope = _search_scope()
     if not workspaces:
         return _no_access_message()
     try:
-        rec = get_relation(relation_id, allowed_workspaces=workspaces)
+        rec = get_relation(relation_id, allowed_workspaces=workspaces, scope=scope)
     except RecordNotFoundError as exc:
         return f"# Relation not found\n\n{exc}\n"
     except RecordAccessError as exc:
@@ -131,11 +152,11 @@ def get_relation_record(relation_id: str) -> str:
     description="Load a document chunk by UUID with full text content.",
 )
 def get_chunk_record(chunk_id: str) -> str:
-    workspaces = _workspace_scope()
+    workspaces, scope = _search_scope()
     if not workspaces:
         return _no_access_message()
     try:
-        rec = get_chunk(chunk_id, allowed_workspaces=workspaces)
+        rec = get_chunk(chunk_id, allowed_workspaces=workspaces, scope=scope)
     except RecordNotFoundError as exc:
         return f"# Chunk not found\n\n{exc}\n"
     except RecordAccessError as exc:
@@ -175,7 +196,7 @@ def search_entity_by_name(
     limit: int = 20,
     threshold: float = 0.6,
 ) -> str:
-    workspaces = _workspace_scope()
+    workspaces, scope = _search_scope()
     if not workspaces:
         return (
             f'# Entity name search: "{name}"\n\n'
@@ -192,5 +213,6 @@ def search_entity_by_name(
         exact=exact,
         limit=limit,
         threshold=threshold,
+        scope=scope,
     )
     return format_name_search_markdown(name, matches)

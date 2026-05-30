@@ -15,3 +15,10 @@ class ChatMessageRole(models.TextChoices):
     USER = "user", "User"
     ASSISTANT = "assistant", "Assistant"
     TOOL = "tool", "Tool"
+
+
+class GroupTag(models.TextChoices):
+    WORKSPACE = "workspace", "Workspace"
+    FILES = "files", "Files"
+    ENTITY = "entity", "Entity"
+    RELATION = "relation", "Relation"

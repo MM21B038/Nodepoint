@@ -38,6 +38,18 @@ def resolve_kg_scope(request: Request) -> tuple[KgScope | None, str | None]:
     return KgScope(workspace_name=workspace_name, group_name=group_name), None
 
 
+def validate_kg_group_exists(scope: KgScope) -> str | None:
+    if not scope.is_group_scope:
+        return None
+    from nodepoint.services.workspace_group import GroupNotFoundError, get_group_by_name
+
+    try:
+        get_group_by_name(scope.group_name)
+    except GroupNotFoundError:
+        return f"Group not found: {scope.group_name}"
+    return None
+
+
 def parse_graph_filters_from_request(
     request: Request,
 ) -> tuple[kg_graph.GraphFilters | None, str | None]:

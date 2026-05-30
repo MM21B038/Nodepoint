@@ -17,8 +17,9 @@ from nodepoint.services.workspace_group import (
     GroupNotFoundError,
     get_group_by_name,
     get_or_create_group_chat_workspace,
-    list_group_workspace_names,
+    list_group_members_summary,
 )
+from nodepoint.services import workspace_group as group_svc
 
 logger = logging.getLogger(__name__)
 
@@ -85,10 +86,19 @@ class ChatConsumer(AsyncWebsocketConsumer):
             "active_branch_id": str(self.active_branch_id),
         }
         if self.group_name:
+            group = await database_sync_to_async(get_group_by_name)(self.group_name)
             ready["group"] = self.group_name
-            ready["workspaces"] = await database_sync_to_async(
-                list_group_workspace_names
+            ready["tag"] = group.tag
+            ready["member_count"] = await database_sync_to_async(
+                group_svc.get_group_member_count
+            )(group)
+            ready["members"] = await database_sync_to_async(
+                list_group_members_summary
             )(self.group_name)
+            if group.tag == "workspace":
+                ready["workspaces"] = [
+                    member["name"] for member in ready["members"]
+                ]
         else:
             ready["workspace"] = self.workspace_name
 

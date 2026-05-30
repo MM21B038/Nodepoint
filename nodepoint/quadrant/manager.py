@@ -104,3 +104,45 @@ def search_by_workspaces(
     if results is None:
         return []
     return _normalize_search_hits(results)
+
+
+def set_payload_for_points(point_ids: list, payload: dict) -> None:
+    if not point_ids:
+        return
+    _ensure_collection()
+    try:
+        client.set_payload(
+            collection_name=COLLECTION_NAME,
+            payload=payload,
+            points=[str(point_id) for point_id in point_ids],
+        )
+    except Exception:
+        logger.exception("Failed to set payload for %s point(s)", len(point_ids))
+
+
+def rename_workspace_vectors(workspace_id: int, new_name: str) -> None:
+    from nodepoint.models import Document, DocumentChunk, KnowledgeEntity, KnowledgeRelation
+
+    doc_ids = Document.objects.filter(workspace_id=workspace_id).values_list(
+        "id", flat=True
+    )
+    if not doc_ids:
+        return
+
+    point_ids = []
+    point_ids.extend(
+        KnowledgeEntity.objects.filter(document_id__in=doc_ids).values_list(
+            "id", flat=True
+        )
+    )
+    point_ids.extend(
+        KnowledgeRelation.objects.filter(document_id__in=doc_ids).values_list(
+            "id", flat=True
+        )
+    )
+    point_ids.extend(
+        DocumentChunk.objects.filter(document_id__in=doc_ids).values_list(
+            "id", flat=True
+        )
+    )
+    set_payload_for_points(point_ids, {"workspace": new_name})

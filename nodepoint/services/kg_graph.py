@@ -6,7 +6,9 @@ from uuid import UUID
 
 from django.db.models import Count, Q
 
-from nodepoint.models import KnowledgeEntity, KnowledgeRelation, Workspace
+from nodepoint.enums import GroupTag
+from nodepoint.models import Document, KnowledgeEntity, KnowledgeRelation, Workspace
+from nodepoint.services.group_scope import GroupSearchScope, resolve_group_search_scope
 from nodepoint.services.workspace_group import get_group_workspaces_qs
 
 DEFAULT_GRAPH_LIMIT = 500
@@ -127,19 +129,44 @@ def list_entity_types_for_workspace_name(name: str) -> dict:
 
 
 def list_entity_types_for_group(group_name: str) -> dict:
-    workspaces = get_group_workspaces_qs(group_name).order_by("name")
+    scope = resolve_group_search_scope(group_name)
+    workspaces = (
+        get_group_workspaces_qs(group_name).order_by("name")
+        if scope.workspace_names
+        else Workspace.objects.none()
+    )
     return {
         "group": group_name,
+        "tag": scope.tag,
         "workspaces": [
             {
                 "workspace": ws.name,
                 "entity_types": _entity_types_rows(
-                    KnowledgeEntity.objects.filter(document__workspace=ws)
+                    _scoped_entity_qs(ws, scope)
                 ),
             }
             for ws in workspaces
         ],
     }
+
+
+def _scoped_entity_qs(workspace: Workspace, scope: GroupSearchScope):
+    qs = KnowledgeEntity.objects.filter(document__workspace=workspace)
+    if scope.tag == GroupTag.FILES and scope.document_ids:
+        qs = qs.filter(document_id__in=scope.document_ids)
+    elif scope.tag == GroupTag.ENTITY and scope.entity_ids:
+        qs = qs.filter(id__in=scope.entity_ids)
+    elif scope.tag == GroupTag.RELATION and scope.relation_ids:
+        relation_qs = KnowledgeRelation.objects.filter(
+            id__in=scope.relation_ids,
+            document__workspace=workspace,
+        )
+        endpoint_ids = set()
+        for rel in relation_qs.only("source_id", "target_id"):
+            endpoint_ids.add(rel.source_id)
+            endpoint_ids.add(rel.target_id)
+        qs = qs.filter(id__in=endpoint_ids) if endpoint_ids else qs.none()
+    return qs
 
 
 def _seed_entities_qs(
@@ -181,11 +208,20 @@ def build_graph_from_seed_ids(
     limit: int,
     entity_types: list[str] | None = None,
     file_names: list[str] | None = None,
+    filters: GraphFilters | None = None,
 ) -> dict:
     """BFS subgraph from explicit seed entity ids (empty seeds → empty graph)."""
+    if filters is None:
+        filters = GraphFilters(
+            entity_types=entity_types,
+            file_names=file_names,
+            depth=depth,
+            limit=limit,
+        )
     if not seed_ids:
         return {
             "workspace": workspace.name,
+            "filters": filters.as_response_dict(),
             "truncated": False,
             "nodes": [],
             "edges": [],
@@ -262,6 +298,7 @@ def build_graph_from_seed_ids(
     )
     return {
         "workspace": workspace.name,
+        "filters": filters.as_response_dict(),
         "truncated": truncated,
         "nodes": [serialize_graph_node(e) for e in ordered_nodes],
         "edges": edges,
@@ -353,8 +390,127 @@ def build_filtered_graphs_for_group(
     group_name: str,
     filters: GraphFilters,
 ) -> list[dict]:
-    workspaces = get_group_workspaces_qs(group_name).order_by("name")
-    return [build_filtered_workspace_graph(ws, filters) for ws in workspaces]
+    scope = resolve_group_search_scope(group_name)
+    if scope.is_empty:
+        return []
+
+    if scope.tag == GroupTag.WORKSPACE:
+        workspaces = get_group_workspaces_qs(group_name).order_by("name")
+        return [build_filtered_workspace_graph(ws, filters) for ws in workspaces]
+
+    if scope.tag == GroupTag.FILES:
+        graphs = []
+        doc_ids_by_ws: dict[str, list[UUID]] = {}
+        for doc in Document.objects.filter(id__in=scope.document_ids).select_related(
+            "workspace"
+        ):
+            doc_ids_by_ws.setdefault(doc.workspace.name, []).append(doc.id)
+        for ws_name, doc_ids in sorted(doc_ids_by_ws.items()):
+            workspace = Workspace.objects.get(name=ws_name)
+            file_names = list(
+                Document.objects.filter(id__in=doc_ids).values_list("file_name", flat=True)
+            )
+            scoped_filters = GraphFilters(
+                entity_types=filters.entity_types,
+                file_names=file_names,
+                depth=filters.depth,
+                limit=filters.limit,
+            )
+            graphs.append(build_filtered_workspace_graph(workspace, scoped_filters))
+        return graphs
+
+    if scope.tag == GroupTag.ENTITY:
+        graphs = []
+        entity_ids_by_ws: dict[str, list[UUID]] = {}
+        for entity in KnowledgeEntity.objects.filter(id__in=scope.entity_ids).select_related(
+            "document__workspace"
+        ):
+            entity_ids_by_ws.setdefault(entity.document.workspace.name, []).append(
+                entity.id
+            )
+        for ws_name, entity_ids in sorted(entity_ids_by_ws.items()):
+            workspace = Workspace.objects.get(name=ws_name)
+            graphs.append(
+                build_graph_from_seed_ids(
+                    workspace,
+                    entity_ids,
+                    depth=filters.depth,
+                    limit=filters.limit,
+                    entity_types=filters.entity_types,
+                    file_names=filters.file_names,
+                    filters=filters,
+                )
+            )
+        return graphs
+
+    graphs = []
+    relation_ids_by_ws: dict[str, list[UUID]] = {}
+    for relation in KnowledgeRelation.objects.filter(
+        id__in=scope.relation_ids
+    ).select_related("document__workspace"):
+        relation_ids_by_ws.setdefault(relation.document.workspace.name, []).append(
+            relation.id
+        )
+    for ws_name, relation_ids in sorted(relation_ids_by_ws.items()):
+        workspace = Workspace.objects.get(name=ws_name)
+        graphs.append(
+            build_graph_from_relation_ids(
+                workspace,
+                relation_ids,
+                depth=filters.depth,
+                limit=filters.limit,
+                filters=filters,
+            )
+        )
+    return graphs
+
+
+def build_graph_from_relation_ids(
+    workspace: Workspace,
+    relation_ids: list[UUID],
+    *,
+    depth: int,
+    limit: int,
+    filters: GraphFilters | None = None,
+) -> dict:
+    if filters is None:
+        filters = GraphFilters(
+            entity_types=None,
+            file_names=None,
+            depth=depth,
+            limit=limit,
+        )
+    if not relation_ids:
+        return {
+            "workspace": workspace.name,
+            "filters": filters.as_response_dict(),
+            "truncated": False,
+            "nodes": [],
+            "edges": [],
+        }
+
+    relations = list(
+        KnowledgeRelation.objects.filter(
+            id__in=relation_ids,
+            document__workspace=workspace,
+        ).select_related("source", "target")
+    )
+    seed_ids = list(
+        {rel.source_id for rel in relations} | {rel.target_id for rel in relations}
+    )
+    graph = build_graph_from_seed_ids(
+        workspace,
+        seed_ids,
+        depth=depth,
+        limit=limit,
+        filters=filters,
+    )
+    member_edges = [serialize_edge(rel) for rel in relations]
+    seen = {edge["id"] for edge in member_edges}
+    graph["edges"] = member_edges + [
+        edge for edge in graph["edges"] if edge["id"] not in seen
+    ]
+    return graph
 
 
 # Legacy helpers (delegate to filtered builder with defaults)

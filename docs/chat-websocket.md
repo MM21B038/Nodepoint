@@ -4,7 +4,7 @@ Backend-only streaming chat over Django Channels. Requires **ASGI** (`uvicorn co
 
 ## Quick start (group-scoped chat)
 
-1. Create a group: `POST /api/group/create/` with `{ "name": "research", "tag": "papers", "description": "..." }` (`tag`, `description` optional)
+1. Create a group: `POST /api/group/create/` with `{ "name": "research", "tag": "workspace", "description": "..." }` (`tag` optional, default `workspace`)
 2. Add workspaces: `POST /api/group/research/workspaces/` with `{ "workspace_name": "..." }`
 3. `GET /api/chat/group/research/` — lazy-create group chat thread
 4. Connect: `ws://localhost:8000/ws/chat/group/research/`
@@ -27,7 +27,7 @@ Backend-only streaming chat over Django Channels. Requires **ASGI** (`uvicorn co
 
 | URL | Scope |
 |-----|--------|
-| `/ws/chat/group/<name>/` | Group chat (`chat.ready` includes `group`, `workspaces`) |
+| `/ws/chat/group/<name>/` | Group chat (`chat.ready` includes `group`, `tag`, `members`, `member_count`; `workspaces` when tag is `workspace`) |
 | `/ws/chat/<workspace_name>/` | Single workspace (`chat.ready` includes `workspace`) |
 
 ### Client → server
@@ -81,11 +81,10 @@ Multiple tabs on the same chat each receive the same live stream.
 
 | Chat mode | `Knowledge.search_graph` searches |
 |-----------|----------------------------------|
-| Group (`/ws/chat/group/<name>/`) | All workspaces in that group |
-| Flagged (`/ws/chat/flagged/`) | Workspaces in group `flagged` |
+| Group (`/ws/chat/group/<name>/`) | Scoped by group `tag`: workspaces, files, entities, or relations in that group |
 | Per-workspace | That workspace only |
 
-If a group has no member workspaces, the tool returns a message that the group is empty.
+If a group has no members, the tool returns a message that the group is empty.
 
 ## Concurrency
 

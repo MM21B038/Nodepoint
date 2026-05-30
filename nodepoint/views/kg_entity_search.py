@@ -4,7 +4,7 @@ from rest_framework.views import APIView
 
 from nodepoint.models import Workspace
 from nodepoint.services import kg_entity_search
-from nodepoint.views.kg_scope import resolve_kg_scope
+from nodepoint.views.kg_scope import resolve_kg_scope, validate_kg_group_exists
 
 
 class KnowledgeEntitySearchAPIView(APIView):
@@ -25,6 +25,10 @@ class KnowledgeEntitySearchAPIView(APIView):
         scope, error = resolve_kg_scope(request)
         if error:
             return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
+
+        group_error = validate_kg_group_exists(scope)
+        if group_error:
+            return Response({"error": group_error}, status=status.HTTP_404_NOT_FOUND)
 
         try:
             graph_filters, threshold, match_limit = (

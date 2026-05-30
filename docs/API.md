@@ -50,10 +50,15 @@ Create named groups and assign workspaces (many-to-many). Use **`group=<name>`**
 
 | Use | API |
 |-----|-----|
-| Create group | `POST /api/group/create/` body `{ "name": "research", "tag": "papers", "description": "..." }` (`tag`, `description` optional) |
-| List groups | `GET /api/group/list/` |
-| Group detail | `GET /api/group/<name>/` |
-| Add / remove workspace | `POST` / `DELETE` `/api/group/<name>/workspaces/` |
+| Create group | `POST /api/group/create/` body `{ "name": "research", "tag": "workspace", "description": "..." }` (`tag` optional, default `workspace`) |
+| List groups | `GET /api/group/list/` (`?tag=`, `?page=`, `?page_size=`) |
+| Group detail | `GET /api/group/<name>/` (`?page=`, `?page_size=` — paginated members) |
+| List group members | `GET /api/group/<name>/members/` (`?page=`, `?page_size=`) — all tag types |
+| Update group | `PATCH /api/group/<name>/` body `{ "name", "description" }` only (`tag` immutable) |
+| Add / remove workspace | `POST` / `DELETE` `/api/group/<name>/workspaces/` (tag must be `workspace`) |
+| Add / remove file | `POST` / `DELETE` `/api/group/<name>/files/` (tag must be `files`) |
+| Add / remove entity | `POST` / `DELETE` `/api/group/<name>/entities/` (tag must be `entity`) |
+| Add / remove relation | `POST` / `DELETE` `/api/group/<name>/relations/` (tag must be `relation`) |
 | Delete group | `DELETE /api/group/<name>/` |
 | KG / search across group | `?group=<name>` |
 | Group chat | `GET/DELETE /api/chat/group/<name>/`, `ws://.../ws/chat/group/<name>/` |
@@ -132,16 +137,24 @@ Base path: `/api/`. All paths below are relative to that prefix.
 | Method | Path | Summary |
 |--------|------|---------|
 | POST | `workspace/create/` | Create workspace + media folder |
+| PATCH | `workspace/update/<name>/` | Update workspace name, tag, description |
 | GET | `workspace/list/` | List user workspaces (`groups`, excludes `__flagged_chat__`) |
 | GET | `workspace/stats/` | Totals: all, in_group, ungrouped workspace counts |
 | GET | `workspace/page/` | Paginated workspaces with file/chunk/entity/relation counts |
-| GET | `group/<name>/` | Count and names of group member workspaces |
 | DELETE | `workspace/delete/<name>/` | Delete workspace and files |
-| POST | `group/create/` | Create workspace group |
-| GET | `group/list/` | List groups |
-| GET | `group/<name>/` | Group detail |
-| POST | `group/<name>/workspaces/` | Add workspace to group |
-| DELETE | `group/<name>/workspaces/<workspace_name>/` | Remove from group |
+| POST | `group/create/` | Create workspace group (`tag`: `workspace` \| `files` \| `entity` \| `relation`) |
+| GET | `group/list/` | Paginated groups (`?tag=` filter optional) |
+| GET | `group/<name>/members/` | Paginated typed members (all tags) |
+| GET | `group/<name>/` | Group detail + paginated members |
+| PATCH | `group/<name>/` | Update group name/description |
+| POST | `group/<name>/workspaces/` | Add workspace (workspace tag only) |
+| DELETE | `group/<name>/workspaces/<workspace_name>/` | Remove workspace |
+| POST | `group/<name>/files/` | Add file/document (files tag only) |
+| DELETE | `group/<name>/files/<document_id>/` | Remove file |
+| POST | `group/<name>/entities/` | Add entity (entity tag only) |
+| DELETE | `group/<name>/entities/<entity_id>/` | Remove entity |
+| POST | `group/<name>/relations/` | Add relation (relation tag only) |
+| DELETE | `group/<name>/relations/<relation_id>/` | Remove relation |
 | DELETE | `group/<name>/` | Delete group |
 | GET | `chat/group/<name>/` | Group-scoped chat history |
 | DELETE | `chat/group/<name>/` | Clear group-scoped chat |
@@ -238,6 +251,46 @@ Create a workspace and its media directory.
 | Status | Condition |
 |--------|-----------|
 | `400` | `name` missing or reserved |
+
+---
+
+### `PATCH /api/workspace/update/<name>/`
+
+Update workspace metadata. Include **one or more** of `name`, `tag`, `description`. Omitted fields are unchanged; `null` clears `tag` or `description`.
+
+Renaming updates the media folder and Qdrant vector payloads for that workspace.
+
+**Body**
+
+```json
+{
+  "name": "PRAJNA-v2",
+  "tag": "notes",
+  "description": "Updated description"
+}
+```
+
+**Response `200`**
+
+```json
+{
+  "message": "Workspace updated successfully",
+  "workspace": {
+    "name": "PRAJNA-v2",
+    "tag": "notes",
+    "description": "Updated description",
+    "created_at": "2026-05-15T12:00:00.123456Z"
+  },
+  "previous_name": "PRAJNA"
+}
+```
+
+`previous_name` is present only when `name` changed (use it to update client routes).
+
+| Status | Condition |
+|--------|-----------|
+| `400` | No fields to update, reserved name, duplicate name, or invalid tag/description |
+| `404` | Unknown workspace |
 
 ---
 
@@ -359,24 +412,174 @@ Sorted by `created_at` descending, then `name` ascending.
 
 ---
 
-### `GET /api/group/<name>/`
+### `GET /api/group/list/`
 
-Group detail with **paginated** member list (`page`, `page_size`; default page size 20, max 100). `workspace_count` is the full membership total; `workspaces` is only the current page.
+Paginated list of workspace groups. Each row includes `tag`, `member_count`, and `description`.
+
+**Query parameters**
+
+| Param | Default | Max | Description |
+|-------|---------|-----|-------------|
+| `page` | `1` | — | Page number (1-based) |
+| `page_size` | `20` | `100` | Groups per page |
+| `tag` | — | — | Optional filter: `workspace`, `files`, `entity`, or `relation` |
 
 **Response `200`**
 
 ```json
 {
-  "name": "research",
-  "tag": "papers",
-  "description": "Research workspace collection",
-  "workspace_count": 522,
-  "pagination": { "page": 1, "page_size": 20, "total_items": 522, "total_pages": 27, "has_next": true, "has_previous": false },
-  "workspaces": [{ "name": "main", "created_at": "..." }]
+  "groups": [
+    {
+      "name": "research",
+      "tag": "workspace",
+      "description": null,
+      "member_count": 12,
+      "created_at": "2026-05-15T12:00:00.123456Z"
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "page_size": 20,
+    "total_items": 1,
+    "total_pages": 1,
+    "has_next": false,
+    "has_previous": false
+  }
 }
 ```
 
-`tag` and `description` are `null` when not set.
+---
+
+### `GET /api/group/<name>/members/`
+
+Paginated typed member list for any group tag. Use this when browsing large memberships without reloading group metadata on each page.
+
+**Query parameters:** same as group detail — `page` (default `1`), `page_size` (default `20`, max `100`).
+
+**Response `200` (tag=files)**
+
+```json
+{
+  "group": "papers",
+  "tag": "files",
+  "member_count": 150,
+  "members": [
+    { "document_id": "...", "workspace": "main", "file_name": "notes.md", "created_at": "..." }
+  ],
+  "pagination": {
+    "page": 1,
+    "page_size": 20,
+    "total_items": 150,
+    "total_pages": 8,
+    "has_next": true,
+    "has_previous": false
+  }
+}
+```
+
+Member object shape depends on `tag` (same as group detail). `member_count` is the full total; `members` is the current page only.
+
+| Status | Condition |
+|--------|-----------|
+| `400` | Invalid `page` or `page_size` |
+| `404` | Group not found |
+
+---
+
+### `GET /api/group/<name>/`
+
+Group detail with **paginated** typed member list (`page`, `page_size`; default page size 20, max 100). `member_count` is the full membership total; `members` is only the current page.
+
+**Group `tag` values:** `workspace` (default) | `files` | `entity` | `relation`
+
+**Response `200` (tag=workspace)**
+
+```json
+{
+  "name": "research",
+  "tag": "workspace",
+  "description": "Research workspace collection",
+  "member_count": 2,
+  "pagination": { "page": 1, "page_size": 20, "total_items": 2, "total_pages": 1, "has_next": false, "has_previous": false },
+  "members": [{ "name": "main", "created_at": "..." }]
+}
+```
+
+**Response `200` (tag=files)**
+
+```json
+{
+  "name": "papers",
+  "tag": "files",
+  "member_count": 150,
+  "pagination": { "page": 1, "page_size": 20, "total_items": 150, "total_pages": 8, "has_next": true, "has_previous": false },
+  "members": [{ "document_id": "...", "workspace": "main", "file_name": "notes.md" }]
+}
+```
+
+**Response `200` (tag=entity)**
+
+```json
+{
+  "name": "people",
+  "tag": "entity",
+  "member_count": 80,
+  "pagination": { "page": 1, "page_size": 20, "total_items": 80, "total_pages": 4, "has_next": true, "has_previous": false },
+  "members": [{ "entity_id": "...", "name": "Alice", "entity_type": "PER", "workspace": "main" }]
+}
+```
+
+**Response `200` (tag=relation)**
+
+```json
+{
+  "name": "links",
+  "tag": "relation",
+  "member_count": 40,
+  "pagination": { "page": 1, "page_size": 20, "total_items": 40, "total_pages": 2, "has_next": true, "has_previous": false },
+  "members": [{ "relation_id": "...", "source": "Alice", "target": "Acme", "workspace": "main" }]
+}
+```
+
+`description` is `null` when not set.
+
+---
+
+### `PATCH /api/group/<name>/`
+
+Update group metadata. Include **one or more** of `name`, `description`. **`tag` cannot be changed** after create.
+
+Renaming also renames the internal group chat workspace (`__group_chat__<name>`).
+
+**Body**
+
+```json
+{
+  "name": "research-v2",
+  "description": "Updated group description"
+}
+```
+
+**Response `200`**
+
+```json
+{
+  "message": "Group updated successfully",
+  "group": {
+    "name": "research-v2",
+    "tag": "workspace",
+    "description": "Updated group description",
+    "member_count": 2,
+    "created_at": "..."
+  },
+  "previous_name": "research"
+}
+```
+
+| Status | Condition |
+|--------|-----------|
+| `400` | No fields to update, attempt to change `tag`, invalid name, duplicate name, or invalid description |
+| `404` | Unknown group |
 
 ---
 
@@ -890,14 +1093,25 @@ curl "http://localhost:8000/api/knowledge-graph/?workspace_name=PRAJNA&entity_ty
 }
 ```
 
-**Flagged `200`**
+**Group `200`**
 
 ```bash
 curl "http://localhost:8000/api/knowledge-graph/?group=<name>&entity_type=PER&limit=100"
 ```
 
+Response includes `group`, `tag` (`workspace` | `files` | `entity` | `relation`), and `graphs` (one subgraph per workspace that has scoped members):
+
+| Group `tag` | Seeds |
+|-------------|-------|
+| `workspace` | All entities in member workspaces |
+| `files` | Entities from member documents only |
+| `entity` | Member entity IDs + BFS expansion |
+| `relation` | Relation endpoints + member edges + BFS |
+
 ```json
 {
+  "group": "research",
+  "tag": "workspace",
   "graphs": [
     {
       "workspace": "main",
@@ -919,7 +1133,7 @@ curl "http://localhost:8000/api/knowledge-graph/?group=<name>&entity_type=PER&li
 **Client notes**
 
 - No merged global `nodes` array; use one panel per `graphs[i]`.
-- Empty `graphs: []` — no group member workspaces (internal `__flagged_chat__` excluded).
+- Empty `graphs: []` — no scoped members (or group not found → `404`).
 - Request higher `limit` / `depth` explicitly for larger subgraphs (defaults cap at 500 nodes).
 
 **Relation to chat**
@@ -932,7 +1146,7 @@ curl "http://localhost:8000/api/knowledge-graph/?group=<name>&entity_type=PER&li
 | Status | Condition |
 |--------|-----------|
 | `400` | Both or neither scope; invalid `depth`/`limit`; empty `entity_type` after parse |
-| `404` | Unknown `workspace_name` |
+| `404` | Unknown `workspace_name` or unknown `group` |
 
 ---
 
@@ -1796,8 +2010,12 @@ Alphabetical by path segment. See sections above for full request/response bodie
 | GET | `/api/knowledge/entity/<uuid>/` | [Knowledge records](#get-apiknowledgeentityuuid) |
 | GET | `/api/knowledge/relation/<uuid>/` | [Knowledge records](#get-apiknowledgerelationuuid) |
 | POST | `/api/workspace/create/` | [Workspace](#post-apiworkspacecreate) |
+| PATCH | `/api/workspace/update/<name>/` | [Workspace](#patch-apiworkspaceupdatename) |
 | DELETE | `/api/workspace/delete/<name>/` | [Workspace](#delete-apiworkspacedeletename) |
+| GET | `/api/group/list/` | [Groups](#get-apigrouplist) |
+| GET | `/api/group/<name>/members/` | [Groups](#get-apigroupnamemembers) |
 | GET | `/api/group/<name>/` | [Groups](#get-apigroupname) |
+| PATCH | `/api/group/<name>/` | [Groups](#patch-apigroupname) |
 | GET | `/api/workspace/list/` | [Workspace](#get-apiworkspacelist) |
 | GET | `/api/workspace/page/` | [Workspace](#get-apiworkspacepage) |
 | GET | `/api/workspace/stats/` | [Workspace](#get-apiworkspacestats) |

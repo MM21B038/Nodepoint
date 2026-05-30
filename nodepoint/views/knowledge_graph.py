@@ -4,7 +4,11 @@ from rest_framework.views import APIView
 
 from nodepoint.models import Workspace
 from nodepoint.services import kg_graph
-from nodepoint.views.kg_scope import parse_graph_filters_from_request, resolve_kg_scope
+from nodepoint.views.kg_scope import (
+    parse_graph_filters_from_request,
+    resolve_kg_scope,
+    validate_kg_group_exists,
+)
 
 
 class KnowledgeGraphAPIView(APIView):
@@ -13,16 +17,29 @@ class KnowledgeGraphAPIView(APIView):
         if error:
             return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
 
+        group_error = validate_kg_group_exists(scope)
+        if group_error:
+            return Response({"error": group_error}, status=status.HTTP_404_NOT_FOUND)
+
         filters, filter_error = parse_graph_filters_from_request(request)
         if filter_error:
             return Response({"error": filter_error}, status=status.HTTP_400_BAD_REQUEST)
 
         if scope.is_group_scope:
+            from nodepoint.services.group_scope import resolve_group_search_scope
+
+            group_scope = resolve_group_search_scope(scope.group_name)
             graphs = kg_graph.build_filtered_graphs_for_group(
                 scope.group_name,
                 filters,
             )
-            return Response({"group": scope.group_name, "graphs": graphs})
+            return Response(
+                {
+                    "group": scope.group_name,
+                    "tag": group_scope.tag,
+                    "graphs": graphs,
+                }
+            )
 
         try:
             graph = kg_graph.build_filtered_graph_for_workspace_name(

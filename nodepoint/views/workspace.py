@@ -73,7 +73,32 @@ class ListWorkspaceAPIView(APIView):
             include_counts=False,
         )
         return Response(payload)
-    
+
+
+class UpdateWorkspaceAPIView(APIView):
+
+    def patch(self, request, name):
+        allowed = {"name", "tag", "description"}
+        updates = {key: request.data[key] for key in allowed if key in request.data}
+        if not updates:
+            return Response(
+                {"error": "No fields to update"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            workspace = workspace_svc.update_workspace(name, updates)
+        except workspace_svc.WorkspaceNotFoundError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_404_NOT_FOUND)
+        except workspace_svc.WorkspaceValidationError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        body = {
+            "message": "Workspace updated successfully",
+            "workspace": workspace_svc.serialize_workspace_for_api(workspace),
+        }
+        if workspace.name != name:
+            body["previous_name"] = name
+        return Response(body)
+
 class DeleteWorkspaceAPIView(APIView):
 
     def delete(self, request, name):
