@@ -50,7 +50,7 @@ Create named groups and assign workspaces (many-to-many). Use **`group=<name>`**
 
 | Use | API |
 |-----|-----|
-| Create group | `POST /api/group/create/` body `{ "name": "research" }` |
+| Create group | `POST /api/group/create/` body `{ "name": "research", "tag": "papers", "description": "..." }` (`tag`, `description` optional) |
 | List groups | `GET /api/group/list/` |
 | Group detail | `GET /api/group/<name>/` |
 | Add / remove workspace | `POST` / `DELETE` `/api/group/<name>/workspaces/` |
@@ -212,8 +212,14 @@ Create a workspace and its media directory.
 **Body**
 
 ```json
-{ "name": "PRAJNA" }
+{
+  "name": "PRAJNA",
+  "tag": "notes",
+  "description": "Primary knowledge base"
+}
 ```
+
+`tag` and `description` are optional.
 
 **Response `200`**
 
@@ -222,6 +228,8 @@ Create a workspace and its media directory.
   "message": "Workspace created successfully",
   "workspace": {
     "name": "PRAJNA",
+    "tag": "notes",
+    "description": "Primary knowledge base",
     "created_at": "2026-05-15T12:00:00.123456Z"
   }
 }
@@ -235,7 +243,7 @@ Create a workspace and its media directory.
 
 ### `GET /api/workspace/list/`
 
-Lightweight paginated list (name, groups, `created_at` only — **no** file/entity counts). Same pagination query params as `GET /api/workspace/page/`. For counts use `/api/workspace/page/`.
+Lightweight paginated list (name, tag, description, groups, `created_at` only — **no** file/entity counts). Same pagination query params as `GET /api/workspace/page/`. For counts use `/api/workspace/page/`.
 
 **Response `200`** — object with `workspaces`, `pagination`, `include_counts` (always `false`). Internal chat workspaces omitted.
 
@@ -244,10 +252,12 @@ Lightweight paginated list (name, groups, `created_at` only — **no** file/enti
   "include_counts": false,
   "pagination": { "page": 1, "page_size": 20, "total_items": 522, "total_pages": 27, "has_next": true, "has_previous": false },
   "workspaces": [
-    { "name": "PRAJNA", "groups": ["research"], "created_at": "2026-05-15T12:00:00.123456Z" }
+    { "name": "PRAJNA", "tag": "notes", "description": "Primary knowledge base", "groups": ["research"], "created_at": "2026-05-15T12:00:00.123456Z" }
   ]
 }
 ```
+
+`tag` and `description` are `null` when not set.
 
 ---
 
@@ -319,7 +329,9 @@ curl "http://localhost:8000/api/workspace/page/?page=1&page_size=10&group=resear
   "workspaces": [
     {
       "name": "PRAJNA",
-      
+      "tag": "notes",
+      "description": "Primary knowledge base",
+      "groups": ["research"],
       "created_at": "2026-05-15T12:00:00.123456Z",
       "counts": {
         "files": 3,
@@ -356,11 +368,15 @@ Group detail with **paginated** member list (`page`, `page_size`; default page s
 ```json
 {
   "name": "research",
+  "tag": "papers",
+  "description": "Research workspace collection",
   "workspace_count": 522,
   "pagination": { "page": 1, "page_size": 20, "total_items": 522, "total_pages": 27, "has_next": true, "has_previous": false },
   "workspaces": [{ "name": "main", "created_at": "..." }]
 }
 ```
+
+`tag` and `description` are `null` when not set.
 
 ---
 

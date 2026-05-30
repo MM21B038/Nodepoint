@@ -10,6 +10,8 @@ from .enums import Status
 
 class Workspace(models.Model):
     name = models.CharField(max_length=255, unique=True)
+    tag = models.CharField(max_length=255, blank=True, default="")
+    description = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -22,6 +24,8 @@ class Workspace(models.Model):
 
 class WorkspaceGroup(models.Model):
     name = models.CharField(max_length=255, unique=True)
+    tag = models.CharField(max_length=255, blank=True, default="")
+    description = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):

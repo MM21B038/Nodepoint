@@ -7,6 +7,7 @@ from django.conf import settings
 from django.db.models import Count, QuerySet
 
 from nodepoint.models import Workspace, WorkspaceGroup, WorkspaceGroupMembership
+from nodepoint.services import optional_fields as opt
 
 GROUP_CHAT_PREFIX = "__group_chat__"
 LEGACY_FLAGGED_CHAT_WORKSPACE_NAME = "__flagged_chat__"
@@ -28,6 +29,28 @@ def group_chat_workspace_name(group_name: str) -> str:
 
 def is_internal_chat_workspace_name(name: str) -> bool:
     return name.startswith(GROUP_CHAT_PREFIX) or name == LEGACY_FLAGGED_CHAT_WORKSPACE_NAME
+
+
+def normalize_tag(tag: str | None) -> str:
+    try:
+        return opt.normalize_tag(tag)
+    except ValueError as exc:
+        raise GroupError(str(exc)) from exc
+
+
+def normalize_description(description: str | None) -> str:
+    try:
+        return opt.normalize_description(description)
+    except ValueError as exc:
+        raise GroupError(str(exc)) from exc
+
+
+def optional_field_for_api(value: str) -> str | None:
+    return opt.optional_field_for_api(value)
+
+
+def group_tag_for_api(tag: str) -> str | None:
+    return optional_field_for_api(tag)
 
 
 def validate_group_name(name: str) -> str:
@@ -54,22 +77,33 @@ def get_or_create_group(name: str) -> tuple[WorkspaceGroup, bool]:
     return WorkspaceGroup.objects.get_or_create(name=cleaned)
 
 
-def create_group(name: str) -> WorkspaceGroup:
+def create_group(
+    name: str,
+    *,
+    tag: str | None = None,
+    description: str | None = None,
+) -> WorkspaceGroup:
     cleaned = validate_group_name(name)
     if WorkspaceGroup.objects.filter(name=cleaned).exists():
         raise GroupError(f"Group already exists: {cleaned}")
-    return WorkspaceGroup.objects.create(name=cleaned)
+    return WorkspaceGroup.objects.create(
+        name=cleaned,
+        tag=normalize_tag(tag),
+        description=normalize_description(description),
+    )
 
 
 def list_groups() -> list[dict]:
     rows = (
         WorkspaceGroup.objects.annotate(workspace_count=Count("memberships"))
         .order_by("name")
-        .values("name", "created_at", "workspace_count")
+        .values("name", "tag", "description", "created_at", "workspace_count")
     )
     return [
         {
             "name": row["name"],
+            "tag": optional_field_for_api(row["tag"]),
+            "description": optional_field_for_api(row["description"]),
             "workspace_count": row["workspace_count"],
             "created_at": row["created_at"],
         }
@@ -104,6 +138,8 @@ def get_group_detail(
     ]
     return {
         "name": group.name,
+        "tag": optional_field_for_api(group.tag),
+        "description": optional_field_for_api(group.description),
         "created_at": group.created_at,
         "workspace_count": total_count,
         "workspaces": workspaces,

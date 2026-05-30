@@ -5,7 +5,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from nodepoint.models import Workspace
-from nodepoint.services.workspace import is_reserved_workspace_name
+from nodepoint.services import optional_fields as opt
+from nodepoint.services import workspace as workspace_svc
 
 
 class CreateWorkspaceAPIView(APIView):
@@ -13,22 +14,18 @@ class CreateWorkspaceAPIView(APIView):
     def post(self, request):
 
         name = request.data.get("name")
+        tag = request.data.get("tag")
+        description = request.data.get("description")
 
-        if not name:
-            return Response(
-                {"error": "Workspace name required"},
-                status=status.HTTP_400_BAD_REQUEST
+        try:
+            workspace = workspace_svc.create_workspace(
+                name, tag=tag, description=description
             )
-
-        if is_reserved_workspace_name(name):
+        except workspace_svc.WorkspaceValidationError as exc:
             return Response(
-                {"error": f"Workspace name '{name.strip()}' is reserved"},
+                {"error": str(exc)},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
-        workspace = Workspace.objects.create(
-            name=name
-        )
 
         workspace_path = os.path.join(
             settings.MEDIA_ROOT,
@@ -45,6 +42,8 @@ class CreateWorkspaceAPIView(APIView):
             "message": "Workspace created successfully",
             "workspace": {
                 "name": workspace.name,
+                "tag": opt.optional_field_for_api(workspace.tag),
+                "description": opt.optional_field_for_api(workspace.description),
                 "created_at": workspace.created_at
             }
         })

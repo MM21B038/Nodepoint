@@ -4,7 +4,7 @@ Backend-only streaming chat over Django Channels. Requires **ASGI** (`uvicorn co
 
 ## Quick start (group-scoped chat)
 
-1. Create a group: `POST /api/group/create/` with `{ "name": "research" }`
+1. Create a group: `POST /api/group/create/` with `{ "name": "research", "tag": "papers", "description": "..." }` (`tag`, `description` optional)
 2. Add workspaces: `POST /api/group/research/workspaces/` with `{ "workspace_name": "..." }`
 3. `GET /api/chat/group/research/` — lazy-create group chat thread
 4. Connect: `ws://localhost:8000/ws/chat/group/research/`

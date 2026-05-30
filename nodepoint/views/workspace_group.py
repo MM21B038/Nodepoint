@@ -9,8 +9,10 @@ from nodepoint.services import workspace_group as group_svc
 class CreateGroupAPIView(APIView):
     def post(self, request):
         name = request.data.get("name")
+        tag = request.data.get("tag")
+        description = request.data.get("description")
         try:
-            group = group_svc.create_group(name)
+            group = group_svc.create_group(name, tag=tag, description=description)
         except group_svc.GroupError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(
@@ -18,6 +20,8 @@ class CreateGroupAPIView(APIView):
                 "message": "Group created successfully",
                 "group": {
                     "name": group.name,
+                    "tag": group_svc.optional_field_for_api(group.tag),
+                    "description": group_svc.optional_field_for_api(group.description),
                     "workspace_count": 0,
                     "created_at": group.created_at,
                 },

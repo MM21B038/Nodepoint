@@ -28,7 +28,7 @@ docker compose up -d --build
 | Redis | 6379 |
 | Qdrant | 6333 |
 
-Migrations run on web container start (`RUN_MIGRATIONS=1`).
+Migrations run automatically on `docker compose up` (one-shot `migrate` service before web and workers start). Set `RUN_MIGRATIONS=1` on any container using `docker/entrypoint.sh` to migrate on start (local non-compose runs).
 
 ## Features
 

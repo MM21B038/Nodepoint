@@ -2071,14 +2071,36 @@ class WorkspaceGroupAPITests(TestCase):
     def test_create_and_list_groups(self):
         resp = self.client.post(
             "/api/group/create/",
-            {"name": "research"},
+            {
+                "name": "research",
+                "tag": "papers",
+                "description": "Research workspace collection",
+            },
             format="json",
         )
         self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.json()["group"]["tag"], "papers")
+        self.assertEqual(
+            resp.json()["group"]["description"], "Research workspace collection"
+        )
         resp = self.client.get("/api/group/list/")
         self.assertEqual(resp.status_code, 200)
-        names = [g["name"] for g in resp.json()["groups"]]
+        groups = resp.json()["groups"]
+        names = [g["name"] for g in groups]
         self.assertIn("research", names)
+        research = next(g for g in groups if g["name"] == "research")
+        self.assertEqual(research["tag"], "papers")
+        self.assertEqual(research["description"], "Research workspace collection")
+
+    def test_create_group_without_tag(self):
+        resp = self.client.post(
+            "/api/group/create/",
+            {"name": "untagged"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201)
+        self.assertIsNone(resp.json()["group"]["tag"])
+        self.assertIsNone(resp.json()["group"]["description"])
 
     def test_add_remove_workspace_and_detail(self):
         from nodepoint.services import workspace_group as group_svc
@@ -2095,6 +2117,8 @@ class WorkspaceGroupAPITests(TestCase):
         self.assertEqual(detail.status_code, 200)
         body = detail.json()
         self.assertEqual(body["workspace_count"], 1)
+        self.assertIn("tag", body)
+        self.assertIn("description", body)
         self.assertEqual(body["workspaces"][0]["name"], "member-ws")
         self.assertIn("pagination", body)
 
@@ -2151,7 +2175,11 @@ class UploadDefaultWorkspaceTests(TestCase):
 class WorkspaceCatalogAPITests(TestCase):
     def setUp(self):
         self.client = APIClient()
-        self.ws_a = Workspace.objects.create(name="cat-ws-a")
+        self.ws_a = Workspace.objects.create(
+            name="cat-ws-a",
+            tag="alpha",
+            description="Workspace A",
+        )
         self.ws_b = Workspace.objects.create(name="cat-ws-b")
         doc = Document.objects.create(
             workspace=self.ws_a,
@@ -2196,6 +2224,8 @@ class WorkspaceCatalogAPITests(TestCase):
         names = [w["name"] for w in data["workspaces"]]
         self.assertIn("cat-ws-a", names)
         row = next(w for w in data["workspaces"] if w["name"] == "cat-ws-a")
+        self.assertEqual(row["tag"], "alpha")
+        self.assertEqual(row["description"], "Workspace A")
         self.assertEqual(row["counts"]["files"], 1)
         self.assertEqual(row["counts"]["entities"], 2)
         self.assertEqual(row["counts"]["relations"], 1)
@@ -2231,6 +2261,41 @@ class WorkspaceCatalogAPITests(TestCase):
         self.assertIn("pagination", data)
         self.assertIn("workspaces", data)
         self.assertFalse(data["include_counts"])
+        row = next(w for w in data["workspaces"] if w["name"] == "cat-ws-a")
+        self.assertEqual(row["tag"], "alpha")
+        self.assertEqual(row["description"], "Workspace A")
+
+
+class WorkspaceAPITests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+    def test_create_workspace_with_tag_and_description(self):
+        resp = self.client.post(
+            "/api/workspace/create/",
+            {
+                "name": "tagged-ws",
+                "tag": "notes",
+                "description": "Personal notes workspace",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()["workspace"]
+        self.assertEqual(body["name"], "tagged-ws")
+        self.assertEqual(body["tag"], "notes")
+        self.assertEqual(body["description"], "Personal notes workspace")
+
+    def test_create_workspace_without_optional_fields(self):
+        resp = self.client.post(
+            "/api/workspace/create/",
+            {"name": "plain-ws"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()["workspace"]
+        self.assertIsNone(body["tag"])
+        self.assertIsNone(body["description"])
 
 
 class KnowledgeToolGroupScopeTests(TestCase):

@@ -10,7 +10,7 @@ Scope: provide **exactly one** of `workspace_name=<name>` or `group=<name>`. Mis
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/group/create/` | Create group `{ "name": "..." }` |
+| POST | `/api/group/create/` | Create group `{ "name": "...", "tag": "...", "description": "..." }` (`tag`, `description` optional) |
 | GET | `/api/group/list/` | All groups with `workspace_count` |
 | GET | `/api/group/<name>/` | Members and metadata |
 | POST | `/api/group/<name>/workspaces/` | Add `{ "workspace_name": "..." }` |
