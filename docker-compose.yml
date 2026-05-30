@@ -60,24 +60,6 @@ services:
       timeout: 5s
       retries: 5
 
-  migrate:
-    build: .
-    env_file:
-      - .env
-    environment:
-      RUN_MIGRATIONS: "1"
-      NODEPOINT_SETTINGS: /app/settings.toml
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: "5432"
-      POSTGRES_NAME: nodepoint
-      POSTGRES_USER: nodepoint
-      POSTGRES_PASSWORD: nodepoint
-    depends_on:
-      postgres:
-        condition: service_healthy
-    command: ["true"]
-    restart: "no"
-
   web:
     build: .
     ports:
@@ -85,6 +67,7 @@ services:
     env_file:
       - .env
     environment:
+      RUN_MIGRATIONS: "1"
       NODEPOINT_SETTINGS: /app/settings.toml
       DEBUG: "False"
       POSTGRES_HOST: postgres
@@ -102,8 +85,6 @@ services:
       - ./media:/app/media
       - ./settings.toml:/app/settings.toml:ro
     depends_on:
-      migrate:
-        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       mongo:
@@ -144,8 +125,6 @@ services:
       - ./media:/app/media
       - ./settings.toml:/app/settings.toml:ro
     depends_on:
-      migrate:
-        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       mongo:
@@ -187,8 +166,6 @@ services:
       - ./media:/app/media
       - ./settings.toml:/app/settings.toml:ro
     depends_on:
-      migrate:
-        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       mongo:
