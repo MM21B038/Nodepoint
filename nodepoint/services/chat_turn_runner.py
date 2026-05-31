@@ -10,6 +10,7 @@ from channels.layers import get_channel_layer
 from nodepoint.agent.agent import Agent
 from nodepoint.registry import Thread
 from nodepoint.services import chat_runner, chat_stream_format, chat_turn_registry
+from nodepoint.services.chat_turn_registry import TurnAlreadyActive
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,15 @@ async def start_turn(
         ),
         name=f"chat-turn-{conversation_id}",
     )
-    await chat_turn_registry.register(conversation_id, task, turn_id)
+    try:
+        await chat_turn_registry.register(conversation_id, task, turn_id)
+    except TurnAlreadyActive:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        raise
     return turn_id
 
 
@@ -98,11 +107,7 @@ async def _run_turn(
             on_event=on_event,
         )
         await publish_frames(conversation_id, formatter.close_sections())
-        done_frame: dict[str, Any] = {
-            "type": "chat.done",
-            "turn_id": str(turn_id),
-            **formatter.turn_metadata(),
-        }
+        done_frame: dict[str, Any] = {"type": "chat.done", "turn_id": str(turn_id)}
         if new_branch_id:
             done_frame["active_branch_id"] = str(new_branch_id)
         await publish_frame(conversation_id, done_frame)
@@ -123,5 +128,5 @@ async def _run_turn(
             {"type": "error", "message": str(exc), "turn_id": str(turn_id)},
         )
     finally:
-        await chat_turn_registry.unregister(conversation_id)
+        await chat_turn_registry.unregister(conversation_id, turn_id)
         await agent.aclose()

@@ -50,10 +50,15 @@ Create named groups and assign workspaces (many-to-many). Use **`group=<name>`**
 
 | Use | API |
 |-----|-----|
-| Create group | `POST /api/group/create/` body `{ "name": "research" }` |
-| List groups | `GET /api/group/list/` |
-| Group detail | `GET /api/group/<name>/` |
-| Add / remove workspace | `POST` / `DELETE` `/api/group/<name>/workspaces/` |
+| Create group | `POST /api/group/create/` body `{ "name": "research", "tag": "workspace", "description": "..." }` (`tag` optional, default `workspace`) |
+| List groups | `GET /api/group/list/` (`?tag=`, `?page=`, `?page_size=`) |
+| Group detail | `GET /api/group/<name>/` (`?page=`, `?page_size=` — paginated members) |
+| List group members | `GET /api/group/<name>/members/` (`?page=`, `?page_size=`) — all tag types |
+| Update group | `PATCH /api/group/<name>/` body `{ "name", "description" }` only (`tag` immutable) |
+| Add / remove workspace | `POST` / `DELETE` `/api/group/<name>/workspaces/` (tag must be `workspace`) |
+| Add / remove file | `POST` / `DELETE` `/api/group/<name>/files/` (tag must be `files`) |
+| Add / remove entity | `POST` / `DELETE` `/api/group/<name>/entities/` (tag must be `entity`) |
+| Add / remove relation | `POST` / `DELETE` `/api/group/<name>/relations/` (tag must be `relation`) |
 | Delete group | `DELETE /api/group/<name>/` |
 | KG / search across group | `?group=<name>` |
 | Group chat | `GET/DELETE /api/chat/group/<name>/`, `ws://.../ws/chat/group/<name>/` |
@@ -132,22 +137,31 @@ Base path: `/api/`. All paths below are relative to that prefix.
 | Method | Path | Summary |
 |--------|------|---------|
 | POST | `workspace/create/` | Create workspace + media folder |
+| PATCH | `workspace/update/<name>/` | Update workspace name, tag, description |
 | GET | `workspace/list/` | List user workspaces (`groups`, excludes `__flagged_chat__`) |
 | GET | `workspace/stats/` | Totals: all, in_group, ungrouped workspace counts |
 | GET | `workspace/page/` | Paginated workspaces with file/chunk/entity/relation counts |
-| GET | `group/<name>/` | Count and names of group member workspaces |
 | DELETE | `workspace/delete/<name>/` | Delete workspace and files |
-| POST | `group/create/` | Create workspace group |
-| GET | `group/list/` | List groups |
-| GET | `group/<name>/` | Group detail |
-| POST | `group/<name>/workspaces/` | Add workspace to group |
-| DELETE | `group/<name>/workspaces/<workspace_name>/` | Remove from group |
+| POST | `group/create/` | Create workspace group (`tag`: `workspace` \| `files` \| `entity` \| `relation`) |
+| GET | `group/list/` | Paginated groups (`?tag=` filter optional) |
+| GET | `group/<name>/members/` | Paginated typed members (all tags) |
+| GET | `group/<name>/` | Group detail + paginated members |
+| PATCH | `group/<name>/` | Update group name/description |
+| POST | `group/<name>/workspaces/` | Add workspace (workspace tag only) |
+| DELETE | `group/<name>/workspaces/<workspace_name>/` | Remove workspace |
+| POST | `group/<name>/files/` | Add file/document (files tag only) |
+| DELETE | `group/<name>/files/<document_id>/` | Remove file |
+| POST | `group/<name>/entities/` | Add entity (entity tag only) |
+| DELETE | `group/<name>/entities/<entity_id>/` | Remove entity |
+| POST | `group/<name>/relations/` | Add relation (relation tag only) |
+| DELETE | `group/<name>/relations/<relation_id>/` | Remove relation |
 | DELETE | `group/<name>/` | Delete group |
 | GET | `chat/group/<name>/` | Group-scoped chat history |
 | DELETE | `chat/group/<name>/` | Clear group-scoped chat |
 | POST | `document/upload/` | Upload `.txt`/`.md`; queue preprocess pipeline |
 | GET | `document/<workspace_name>/` | List documents in workspace |
 | DELETE | `document/delete/<workspace_name>/<file_name>/` | Delete one document |
+| GET | `preprocess/queue-status/` | Global RQ queues, workers, locks, DB backlog |
 | GET | `workspace/<workspace_name>/preprocess-status/` | Pipeline / vector / chunk status |
 | POST | `workspace/preprocess/<workspace_name>/` | Queue full workspace preprocess |
 | GET | `knowledge-graph/entity-types/` | Distinct entity types + counts |
@@ -211,8 +225,14 @@ Create a workspace and its media directory.
 **Body**
 
 ```json
-{ "name": "PRAJNA" }
+{
+  "name": "PRAJNA",
+  "tag": "notes",
+  "description": "Primary knowledge base"
+}
 ```
+
+`tag` and `description` are optional.
 
 **Response `200`**
 
@@ -221,6 +241,8 @@ Create a workspace and its media directory.
   "message": "Workspace created successfully",
   "workspace": {
     "name": "PRAJNA",
+    "tag": "notes",
+    "description": "Primary knowledge base",
     "created_at": "2026-05-15T12:00:00.123456Z"
   }
 }
@@ -232,9 +254,49 @@ Create a workspace and its media directory.
 
 ---
 
+### `PATCH /api/workspace/update/<name>/`
+
+Update workspace metadata. Include **one or more** of `name`, `tag`, `description`. Omitted fields are unchanged; `null` clears `tag` or `description`.
+
+Renaming updates the media folder and Qdrant vector payloads for that workspace.
+
+**Body**
+
+```json
+{
+  "name": "PRAJNA-v2",
+  "tag": "notes",
+  "description": "Updated description"
+}
+```
+
+**Response `200`**
+
+```json
+{
+  "message": "Workspace updated successfully",
+  "workspace": {
+    "name": "PRAJNA-v2",
+    "tag": "notes",
+    "description": "Updated description",
+    "created_at": "2026-05-15T12:00:00.123456Z"
+  },
+  "previous_name": "PRAJNA"
+}
+```
+
+`previous_name` is present only when `name` changed (use it to update client routes).
+
+| Status | Condition |
+|--------|-----------|
+| `400` | No fields to update, reserved name, duplicate name, or invalid tag/description |
+| `404` | Unknown workspace |
+
+---
+
 ### `GET /api/workspace/list/`
 
-Lightweight paginated list (name, groups, `created_at` only — **no** file/entity counts). Same pagination query params as `GET /api/workspace/page/`. For counts use `/api/workspace/page/`.
+Lightweight paginated list (name, tag, description, groups, `created_at` only — **no** file/entity counts). Same pagination query params as `GET /api/workspace/page/`. For counts use `/api/workspace/page/`.
 
 **Response `200`** — object with `workspaces`, `pagination`, `include_counts` (always `false`). Internal chat workspaces omitted.
 
@@ -243,10 +305,12 @@ Lightweight paginated list (name, groups, `created_at` only — **no** file/enti
   "include_counts": false,
   "pagination": { "page": 1, "page_size": 20, "total_items": 522, "total_pages": 27, "has_next": true, "has_previous": false },
   "workspaces": [
-    { "name": "PRAJNA", "groups": ["research"], "created_at": "2026-05-15T12:00:00.123456Z" }
+    { "name": "PRAJNA", "tag": "notes", "description": "Primary knowledge base", "groups": ["research"], "created_at": "2026-05-15T12:00:00.123456Z" }
   ]
 }
 ```
+
+`tag` and `description` are `null` when not set.
 
 ---
 
@@ -318,7 +382,9 @@ curl "http://localhost:8000/api/workspace/page/?page=1&page_size=10&group=resear
   "workspaces": [
     {
       "name": "PRAJNA",
-      
+      "tag": "notes",
+      "description": "Primary knowledge base",
+      "groups": ["research"],
       "created_at": "2026-05-15T12:00:00.123456Z",
       "counts": {
         "files": 3,
@@ -346,20 +412,174 @@ Sorted by `created_at` descending, then `name` ascending.
 
 ---
 
-### `GET /api/group/<name>/`
+### `GET /api/group/list/`
 
-Group detail with **paginated** member list (`page`, `page_size`; default page size 20, max 100). `workspace_count` is the full membership total; `workspaces` is only the current page.
+Paginated list of workspace groups. Each row includes `tag`, `member_count`, and `description`.
+
+**Query parameters**
+
+| Param | Default | Max | Description |
+|-------|---------|-----|-------------|
+| `page` | `1` | — | Page number (1-based) |
+| `page_size` | `20` | `100` | Groups per page |
+| `tag` | — | — | Optional filter: `workspace`, `files`, `entity`, or `relation` |
 
 **Response `200`**
 
 ```json
 {
-  "name": "research",
-  "workspace_count": 522,
-  "pagination": { "page": 1, "page_size": 20, "total_items": 522, "total_pages": 27, "has_next": true, "has_previous": false },
-  "workspaces": [{ "name": "main", "created_at": "..." }]
+  "groups": [
+    {
+      "name": "research",
+      "tag": "workspace",
+      "description": null,
+      "member_count": 12,
+      "created_at": "2026-05-15T12:00:00.123456Z"
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "page_size": 20,
+    "total_items": 1,
+    "total_pages": 1,
+    "has_next": false,
+    "has_previous": false
+  }
 }
 ```
+
+---
+
+### `GET /api/group/<name>/members/`
+
+Paginated typed member list for any group tag. Use this when browsing large memberships without reloading group metadata on each page.
+
+**Query parameters:** same as group detail — `page` (default `1`), `page_size` (default `20`, max `100`).
+
+**Response `200` (tag=files)**
+
+```json
+{
+  "group": "papers",
+  "tag": "files",
+  "member_count": 150,
+  "members": [
+    { "document_id": "...", "workspace": "main", "file_name": "notes.md", "created_at": "..." }
+  ],
+  "pagination": {
+    "page": 1,
+    "page_size": 20,
+    "total_items": 150,
+    "total_pages": 8,
+    "has_next": true,
+    "has_previous": false
+  }
+}
+```
+
+Member object shape depends on `tag` (same as group detail). `member_count` is the full total; `members` is the current page only.
+
+| Status | Condition |
+|--------|-----------|
+| `400` | Invalid `page` or `page_size` |
+| `404` | Group not found |
+
+---
+
+### `GET /api/group/<name>/`
+
+Group detail with **paginated** typed member list (`page`, `page_size`; default page size 20, max 100). `member_count` is the full membership total; `members` is only the current page.
+
+**Group `tag` values:** `workspace` (default) | `files` | `entity` | `relation`
+
+**Response `200` (tag=workspace)**
+
+```json
+{
+  "name": "research",
+  "tag": "workspace",
+  "description": "Research workspace collection",
+  "member_count": 2,
+  "pagination": { "page": 1, "page_size": 20, "total_items": 2, "total_pages": 1, "has_next": false, "has_previous": false },
+  "members": [{ "name": "main", "created_at": "..." }]
+}
+```
+
+**Response `200` (tag=files)**
+
+```json
+{
+  "name": "papers",
+  "tag": "files",
+  "member_count": 150,
+  "pagination": { "page": 1, "page_size": 20, "total_items": 150, "total_pages": 8, "has_next": true, "has_previous": false },
+  "members": [{ "document_id": "...", "workspace": "main", "file_name": "notes.md" }]
+}
+```
+
+**Response `200` (tag=entity)**
+
+```json
+{
+  "name": "people",
+  "tag": "entity",
+  "member_count": 80,
+  "pagination": { "page": 1, "page_size": 20, "total_items": 80, "total_pages": 4, "has_next": true, "has_previous": false },
+  "members": [{ "entity_id": "...", "name": "Alice", "entity_type": "PER", "workspace": "main" }]
+}
+```
+
+**Response `200` (tag=relation)**
+
+```json
+{
+  "name": "links",
+  "tag": "relation",
+  "member_count": 40,
+  "pagination": { "page": 1, "page_size": 20, "total_items": 40, "total_pages": 2, "has_next": true, "has_previous": false },
+  "members": [{ "relation_id": "...", "source": "Alice", "target": "Acme", "workspace": "main" }]
+}
+```
+
+`description` is `null` when not set.
+
+---
+
+### `PATCH /api/group/<name>/`
+
+Update group metadata. Include **one or more** of `name`, `description`. **`tag` cannot be changed** after create.
+
+Renaming also renames the internal group chat workspace (`__group_chat__<name>`).
+
+**Body**
+
+```json
+{
+  "name": "research-v2",
+  "description": "Updated group description"
+}
+```
+
+**Response `200`**
+
+```json
+{
+  "message": "Group updated successfully",
+  "group": {
+    "name": "research-v2",
+    "tag": "workspace",
+    "description": "Updated group description",
+    "member_count": 2,
+    "created_at": "..."
+  },
+  "previous_name": "research"
+}
+```
+
+| Status | Condition |
+|--------|-----------|
+| `400` | No fields to update, attempt to change `tag`, invalid name, duplicate name, or invalid description |
+| `404` | Unknown group |
 
 ---
 
@@ -401,18 +621,18 @@ Upload triggers a **4-step global preprocess pipeline** (see [Preprocess](#prepr
 {
   "message": "File uploaded successfully",
   "pipeline": {
-    "message": "Preprocess pipeline queued: prepare document → chunk KG (parallel) → embeddings → mongo repair",
+    "message": "Preprocess pipeline queued: prepare document → chunk KG (document-scoped) → failed catch-up (all workspaces) → coalesced workspace embeddings/repair",
     "steps": [
       "prepare_document",
       "chunk_preprocess",
-      "vector_preprocess",
-      "chunk_mongo_repair"
+      "failed_catchup",
+      "workspace_tail"
     ],
     "jobs": {
       "prepare_document": "rq-job-id-1",
       "chunk_preprocess": "rq-job-id-2",
-      "vector_preprocess": "rq-job-id-3",
-      "chunk_mongo_repair": "rq-job-id-4"
+      "failed_catchup": "rq-job-id-3",
+      "workspace_tail": "rq-job-id-4"
     }
   },
   "id": "550e8400-e29b-41d4-a716-446655440000",
@@ -485,28 +705,51 @@ Deletes the Postgres row, related KG rows (cascade), and the file on disk when p
 
 Queues the **full workspace preprocess pipeline** for the named workspace (no single-document upload). One call runs **prepare legacy → chunk KG (parallel workers) → embeddings → mongo repair** — no separate manual preprocess needed to migrate old documents.
 
-**Pipeline steps (RQ orchestrator)**
+By default only the **named workspace** is queued on the standard RQ **`orchestrator`** queue (no `high` / `low` routing). Per-workspace Redis coalescing locks are unchanged (a workspace already running or queued is skipped, not double-started).
+
+**Query / body parameters**
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `priority` | `false` | When `true`, enqueue the named workspace on the **`high`** queue; when `false`, use the standard **`orchestrator`** queue. |
+| `include_other_workspaces` | `false` | When `true`, also enqueue pipelines for every other workspace that is not `overall.ready` (on **`low`** when `priority=true`, else **`orchestrator`**). When `false`, only the named workspace is queued. |
+
+Accepts parameters in the query string or JSON body (`priority`, `include_other_workspaces`). Set `?priority=true&include_other_workspaces=true` to prioritize the named workspace on **`high`** and queue other incomplete workspaces on **`low`**.
+
+**RQ worker (orchestrator):** `worker-orchestrator` should listen to **`high orchestrator low`** (in that order) when using priority/background opt-in. Chunk/vector workers stay on **`chunk`** and **`vector`**; scaling those pools increases throughput for all workspaces.
+
+**Pipeline steps (RQ orchestrator queue)**
 
 | Step | Job | What it does |
 |------|-----|----------------|
 | 1 (upload only) | `run_prepare_document` | Split the new file → Postgres `DocumentChunk` rows + Mongo `chunk_content` |
 | 1 (POST only) | `run_prepare_legacy_batch` | For documents in this workspace with zero chunks or `content=false`, run `prepare_document` (chunk migration) |
-| 2 | `run_chunk_preprocess_batch` | Enqueue `process_chunk` (5 min timeout) for incomplete chunks in the workspace |
-| 3 | `run_vector_preprocess_batch` | Enqueue embeddings for entities, relations, and **chunks** (PENDING/FAILED vectors) in the workspace |
+| 2 | `run_chunk_preprocess_batch` | Enqueue `process_chunk` on the **chunk** queue for incomplete chunks (document-scoped on upload; workspace-scoped on POST). Does **not** block waiting for chunk jobs. |
+| 2b (upload only) | `run_upload_failed_catchup_batch` | Re-prepare documents with `FAILED` status and zero chunks, then re-enqueue **failed** chunks in **all workspaces** (excluding the new upload). Moves those files back to **processing** in preprocess-status. |
+| 3 | `run_vector_preprocess_batch` / `schedule_workspace_pipeline_tail` | Catch-up sweep on the **vector** queue for any PENDING/FAILED embeddings. Uploads use a coalesced workspace tail (one per workspace at a time). |
 | 4 | `run_chunk_mongo_repair_batch` | Rebuild Mongo chunk text for `content=false` or missing chunk bodies in the workspace |
 
-**Order (sequential steps, parallel workers inside step 2):** prepare → chunk batch → **vectors after chunk batch** → mongo repair. Vectors no longer run in parallel with chunk KG.
+**Order:** prepare → chunk enqueue (non-blocking) → vector catch-up → mongo repair. Embeddings for entities/relations/chunks are also enqueued **per chunk** as soon as KG extraction completes (`process_chunk` on the **chunk** queue).
+
+**Coalescing:** Repeated uploads or POST preprocess calls for the same workspace share one workspace tail (vector sweep + mongo repair) via a Redis lock. Upload always runs prepare + document-scoped chunk enqueue immediately, plus a global failed catch-up step so previously failed files in any workspace are retried.
+
+**RQ queues:** `high` / `orchestrator` / `low` (pipeline steps; POST uses **`orchestrator`** by default), `chunk` (`process_chunk`), `vector` (`process_vector`). Docker Compose runs a dedicated `worker-orchestrator` service (`high orchestrator low`) plus `worker` on `chunk` and `vector`.
+
+**Stuck / failed retry:** Chunk enqueue only submits `process_chunk` for chunks in `PENDING` or `FAILED` (not `COMPLETED`, `QUEUED`, or `INPROGRESS`, so clicking preprocess again does not reset finished work). Prepare legacy only runs for documents with **zero** chunks (not merely `content=false`). Vector sweep includes `PENDING` and `FAILED` embeddings.
+
+**Startup recovery (after `docker compose` restart):** When `worker-orchestrator` starts, it runs a one-shot recovery (Redis lock `nodepoint:preprocess:recovery:startup`) that resets orphaned `QUEUED`/`INPROGRESS` chunks to `PENDING`, then re-enqueues global chunk and vector backlog. Disable with `PREPROCESS_RECOVERY_ON_STARTUP=0`. Manual run: `python manage.py recover_preprocess` (`--force` skips the lock). Poll `database.chunks_orphaned` on queue-status; it should drop to `0` after recovery.
 
 **Legacy documents:** Files uploaded before chunk migration may show `document_status: COMPLETED` with **no** `DocumentChunk` rows and `chunk_id=null` on KG rows. POST preprocess backfills chunks; poll preprocess-status until `overall.ready` is true.
 
-**Per chunk:** Mongo stores chunk text; KG extraction runs in parallel RQ workers (`process_chunk`). A document is marked `COMPLETED` only when **all** its chunks reach `COMPLETED`.
+**Per chunk:** Mongo stores chunk text; KG extraction runs in parallel RQ workers (`process_chunk` on the **chunk** queue). Embeddings enqueue immediately after each chunk completes KG ingest (`process_vector` on the **vector** queue). A document is marked `COMPLETED` only when **all** its chunks reach `COMPLETED`.
 
 **Response `200`**
 
 ```json
 {
   "message": "Preprocess pipeline queued: prepare legacy → chunk KG (parallel) → embeddings → mongo repair (workspace=PRAJNA)",
-  "pipeline": {
+  "priority_workspace": "PRAJNA",
+  "priority_pipeline": {
     "message": "Preprocess pipeline queued: prepare legacy → chunk KG (parallel) → embeddings → mongo repair (workspace=PRAJNA)",
     "steps": [
       "prepare_legacy",
@@ -520,9 +763,120 @@ Queues the **full workspace preprocess pipeline** for the named workspace (no si
       "vector_preprocess": "rq-job-id-3",
       "chunk_mongo_repair": "rq-job-id-4"
     }
-  }
+  },
+  "other_workspaces": []
 }
 ```
+
+With `?priority=true&include_other_workspaces=true`, `other_workspaces` lists background pipelines and the `message` may append a count of other workspaces queued on **`low`**.
+
+---
+
+### `GET /api/preprocess/queue-status/`
+
+Read-only **operations snapshot** for preprocess workers: RQ queue depths and job samples, registered workers, Redis pipeline locks, Postgres/Mongo backlog, and workspaces with an active orchestrator pipeline.
+
+Use this to debug idle workers, stuck `nodepoint:preprocess:pipeline:{workspace}` locks, jobs on the wrong queue, or DB work waiting behind empty queues.
+
+**Query**
+
+| Param | Meaning |
+|-------|---------|
+| `workspace` | Optional. Filters RQ job lists and database counts to one workspace; `active_pipelines` only includes that workspace when it has a lock and/or orchestrator jobs. Pipeline lock scan is also limited to that workspace. |
+
+**Response `200`**
+
+```json
+{
+  "generated_at": "2026-05-29T12:00:00.123456+00:00",
+  "workspace_filter": null,
+  "rq": {
+    "queues": {
+      "orchestrator": {
+        "counts": { "queued": 1, "started": 0, "failed": 0, "deferred": 0 },
+        "jobs": [
+          {
+            "id": "abc123",
+            "function": "run_chunk_preprocess_batch",
+            "status": "queued",
+            "created_at": "2026-05-29T11:59:00+00:00",
+            "started_at": null,
+            "ended_at": null,
+            "origin_queue": "orchestrator",
+            "args_summary": { "workspace": "PRAJNA" }
+          }
+        ],
+        "failed_sample": []
+      },
+      "chunk": { "counts": { "queued": 12, "started": 2, "failed": 0, "deferred": 0 }, "jobs": [], "failed_sample": [] },
+      "vector": { "counts": { "queued": 50, "started": 1, "failed": 1, "deferred": 0 }, "jobs": [], "failed_sample": [] },
+      "default": { "counts": { "queued": 0, "started": 0, "failed": 0, "deferred": 0 }, "jobs": [], "failed_sample": [] }
+    },
+    "workers": [
+      {
+        "name": "orchestrator-worker-1",
+        "state": "busy",
+        "queues": ["orchestrator"],
+        "current_job_id": "abc123",
+        "birth_date": "2026-05-29T08:00:00+00:00",
+        "last_heartbeat": "2026-05-29T12:00:01+00:00"
+      }
+    ]
+  },
+  "redis": {
+    "pipeline_locks": [
+      {
+        "workspace": "PRAJNA",
+        "key": "nodepoint:preprocess:pipeline:PRAJNA",
+        "ttl_seconds": 14300
+      }
+    ]
+  },
+  "database": {
+    "documents": { "PENDING": 0, "QUEUED": 1, "INPROGRESS": 0, "COMPLETED": 5, "FAILED": 0, "total": 6 },
+    "chunks": { "PENDING": 0, "QUEUED": 3, "INPROGRESS": 1, "COMPLETED": 20, "FAILED": 0, "total": 24 },
+    "chunks_orphaned": 4,
+    "vectors": {
+      "entities": { "pending": 4, "failed": 0, "completed": 0, "total": 4 },
+      "relations": { "pending": 2, "failed": 0, "completed": 0, "total": 2 },
+      "chunks": { "pending": 10, "failed": 1, "completed": 0, "total": 11 }
+    },
+    "workspaces_incomplete": [
+      {
+        "workspace": "PRAJNA",
+        "phase": "embedding",
+        "documents_total": 6,
+        "documents_failed": 0
+      }
+    ]
+  },
+  "active_pipelines": [
+    {
+      "workspace": "PRAJNA",
+      "lock_held": true,
+      "lock_ttl_seconds": 14300,
+      "orchestrator_jobs": []
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `generated_at` | UTC timestamp when the snapshot was built |
+| `workspace_filter` | Echo of `?workspace=` or `null` for global view |
+| `rq.queues.*.counts` | RQ registry sizes: waiting (`queued`), in-flight (`started`), `failed`, `deferred` |
+| `rq.queues.*.jobs` | Sample of queued, started, and deferred jobs (up to 40 per queue), with parsed `args_summary` |
+| `rq.queues.*.failed_sample` | Last failed jobs with truncated `error` |
+| `rq.workers` | `Worker.all()` — which queue names each worker listens on and optional `current_job_id` |
+| `redis.pipeline_locks` | Keys `nodepoint:preprocess:pipeline:{workspace}` and TTL seconds (`-1` / missing → `null`) |
+| `database.documents` / `chunks` | Row counts by `status` (global or filtered workspace) |
+| `database.chunks_orphaned` | Chunks in `QUEUED` or `INPROGRESS` while the **chunk** RQ queue has no `queued` or `started` jobs (stale after restart; `worker-orchestrator` startup recovery resets and re-enqueues these) |
+| `database.vectors.*` | Rows with vector status `PENDING` or `FAILED` only (embedding backlog) |
+| `database.workspaces_incomplete` | Omitted when `?workspace=` is set; otherwise workspaces where per-workspace preprocess is not `ready` |
+| `active_pipelines` | Workspaces with a pipeline lock and/or matching orchestrator queue jobs |
+
+Monitored queues: `orchestrator`, `chunk`, `vector`, `default` (from `RQ_QUEUES`).
 
 ---
 
@@ -739,14 +1093,25 @@ curl "http://localhost:8000/api/knowledge-graph/?workspace_name=PRAJNA&entity_ty
 }
 ```
 
-**Flagged `200`**
+**Group `200`**
 
 ```bash
 curl "http://localhost:8000/api/knowledge-graph/?group=<name>&entity_type=PER&limit=100"
 ```
 
+Response includes `group`, `tag` (`workspace` | `files` | `entity` | `relation`), and `graphs` (one subgraph per workspace that has scoped members):
+
+| Group `tag` | Seeds |
+|-------------|-------|
+| `workspace` | All entities in member workspaces |
+| `files` | Entities from member documents only |
+| `entity` | Member entity IDs + BFS expansion |
+| `relation` | Relation endpoints + member edges + BFS |
+
 ```json
 {
+  "group": "research",
+  "tag": "workspace",
   "graphs": [
     {
       "workspace": "main",
@@ -768,7 +1133,7 @@ curl "http://localhost:8000/api/knowledge-graph/?group=<name>&entity_type=PER&li
 **Client notes**
 
 - No merged global `nodes` array; use one panel per `graphs[i]`.
-- Empty `graphs: []` — no group member workspaces (internal `__flagged_chat__` excluded).
+- Empty `graphs: []` — no scoped members (or group not found → `404`).
 - Request higher `limit` / `depth` explicitly for larger subgraphs (defaults cap at 500 nodes).
 
 **Relation to chat**
@@ -781,7 +1146,7 @@ curl "http://localhost:8000/api/knowledge-graph/?group=<name>&entity_type=PER&li
 | Status | Condition |
 |--------|-----------|
 | `400` | Both or neither scope; invalid `depth`/`limit`; empty `entity_type` after parse |
-| `404` | Unknown `workspace_name` |
+| `404` | Unknown `workspace_name` or unknown `group` |
 
 ---
 
@@ -1275,7 +1640,7 @@ One JSON object per text frame.
 { "type": "chat.reconnect" }
 ```
 
-Use after a drop **or** rely on auto-attach: `chat.ready` with `agent_busy: true` already subscribes to the in-flight turn.
+Use after a drop **or** rely on auto-attach: `chat.ready` always includes **`agent_busy`** (`true` when a turn is still running — live stream auto-attaches).
 
 **Response (turn running):**
 
@@ -1401,16 +1766,6 @@ Before/after token blocks, the server may send **section** frames so the client 
 | `tool_calls` | `open` / `close` | Tool invocation phase |
 | `tool_completed` | `open` / `close` | Single tool finished |
 
-Each section frame includes **`segment_index`** (monotonic per turn). Append tokens to `segments[segment_index]` — do not reuse a single buffer per section name.
-
-| Field | Where | Meaning |
-|-------|--------|---------|
-| `segment_index` | `section`, tokens, tool events | Ordered block id within the turn |
-| `turn_index` | Optional on frames | Model round (0-based) from `agent_turn_start` |
-| `is_intermediate` | `response` section close | `true` when text is pre-tool, not the final answer |
-| `latest_response_segment_index` | `chat.done` | Attach citation / interactive UI **only** to this segment |
-| `response_segment_indices` | `chat.done` | All response blocks in order |
-
 Sections are **hints** for layout. Token categorization still comes from `thinking_token` vs `assistant_response_token`.
 
 #### Example transcript (one turn)
@@ -1476,7 +1831,10 @@ Tools and control events are **single frames** (full payload per event):
 ```json
 {
   "type": "chat.ready",
-  "workspace": "PRAJNA"
+  "workspace": "PRAJNA",
+  "conversation_id": "...",
+  "active_branch_id": "...",
+  "agent_busy": false
 }
 ```
 
@@ -1495,6 +1853,10 @@ Tools and control events are **single frames** (full payload per event):
 | `workspace` | Per-workspace mode only |
 | `group` | Group-scope mode only |
 | `workspaces` | Workspaces included in `Knowledge.search_graph` for this connection |
+| `conversation_id` | Chat thread UUID |
+| `active_branch_id` | Current branch for compression / agent context |
+| `agent_busy` | Always present: `true` if a turn is in progress (Redis-backed; consistent across uvicorn workers) |
+| `turn_id`, `turn_started_at`, `reconnect_hint` | Present when `agent_busy` is `true` |
 
 Close codes: `4000` invalid URL; `4004` unknown workspace (per-workspace mode).
 
@@ -1615,6 +1977,7 @@ Returns matches with `score` (fuzzy mode), outgoing/incoming relations (relation
 | `CHAT_COMPRESS_TEMPERATURE` | `0.2` | Compression LLM temperature |
 | `CHAT_COMPRESS_MAX_MESSAGES` | `30` | Max thread messages sent to compression |
 | `CHAT_MAX_CONCURRENT_SEARCHES` | `8` | Max parallel Knowledge tool runs per web worker |
+| `CHAT_TURN_REDIS_TTL` | `3600` | Active chat turn metadata TTL in Redis (crash safety) |
 | `WEB_WORKERS` | `4` | Uvicorn worker processes for ASGI |
 | `DB_CONN_MAX_AGE` | `60` | Postgres connection reuse (seconds) |
 | `CHAT_DEFAULT_SYSTEM` | (see settings) | New conversation system prompt |
@@ -1647,11 +2010,16 @@ Alphabetical by path segment. See sections above for full request/response bodie
 | GET | `/api/knowledge/entity/<uuid>/` | [Knowledge records](#get-apiknowledgeentityuuid) |
 | GET | `/api/knowledge/relation/<uuid>/` | [Knowledge records](#get-apiknowledgerelationuuid) |
 | POST | `/api/workspace/create/` | [Workspace](#post-apiworkspacecreate) |
+| PATCH | `/api/workspace/update/<name>/` | [Workspace](#patch-apiworkspaceupdatename) |
 | DELETE | `/api/workspace/delete/<name>/` | [Workspace](#delete-apiworkspacedeletename) |
+| GET | `/api/group/list/` | [Groups](#get-apigrouplist) |
+| GET | `/api/group/<name>/members/` | [Groups](#get-apigroupnamemembers) |
 | GET | `/api/group/<name>/` | [Groups](#get-apigroupname) |
+| PATCH | `/api/group/<name>/` | [Groups](#patch-apigroupname) |
 | GET | `/api/workspace/list/` | [Workspace](#get-apiworkspacelist) |
 | GET | `/api/workspace/page/` | [Workspace](#get-apiworkspacepage) |
 | GET | `/api/workspace/stats/` | [Workspace](#get-apiworkspacestats) |
+| GET | `/api/preprocess/queue-status/` | [Preprocess](#get-apipreprocessqueue-status) |
 | GET | `/api/workspace/<workspace_name>/preprocess-status/` | [Preprocess](#get-apiworkspaceworkspace_namepreprocess-status) |
 | POST | `/api/workspace/preprocess/<workspace_name>/` | [Preprocess](#post-apiworkspacepreprocessworkspace_name) |
 

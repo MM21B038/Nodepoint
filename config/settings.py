@@ -142,10 +142,25 @@ MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
 _redis = redis_config()
+# RQ worker default was 1800s; orchestrator batch-waits for chunk jobs need longer.
+RQ_DEFAULT_JOB_TIMEOUT = int(os.getenv("RQ_DEFAULT_JOB_TIMEOUT", "10800"))
+PREPROCESS_JOB_TIMEOUT = os.getenv("PREPROCESS_JOB_TIMEOUT", "3h")
+_rq_queue = {**_redis, "DEFAULT_TIMEOUT": RQ_DEFAULT_JOB_TIMEOUT}
 RQ_QUEUES = {
-    "high": _redis,
-    "default": _redis,
-    "low": _redis,
+    "orchestrator": _rq_queue,
+    "chunk": _rq_queue,
+    "vector": _rq_queue,
+    "high": _rq_queue,
+    "default": _rq_queue,
+    "low": _rq_queue,
+}
+RQ_QUEUE_ORCHESTRATOR = "orchestrator"
+RQ_QUEUE_ORCHESTRATOR_HIGH = "high"
+RQ_QUEUE_ORCHESTRATOR_LOW = "low"
+RQ_QUEUE_CHUNK = "chunk"
+RQ_QUEUE_VECTOR = "vector"
+RQ = {
+    "WORKER_CLASS": "nodepoint.workers.NodepointWorker",
 }
 
 CHANNEL_LAYERS = {
@@ -180,6 +195,7 @@ CHAT_COMPRESS_OMIT_REASONING = os.getenv("CHAT_COMPRESS_OMIT_REASONING", "true")
 )
 CHAT_DEFAULT_SYSTEM = os.getenv("CHAT_DEFAULT_SYSTEM", Prompt["chat_system"])
 CHAT_MAX_CONCURRENT_SEARCHES = int(os.getenv("CHAT_MAX_CONCURRENT_SEARCHES", "8"))
+CHAT_TURN_REDIS_TTL = int(os.getenv("CHAT_TURN_REDIS_TTL", "3600"))
 WEB_WORKERS = int(os.getenv("WEB_WORKERS", "4"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 

@@ -3,6 +3,7 @@ from django.urls import path
 from nodepoint.views.workspace import (
     CreateWorkspaceAPIView,
     ListWorkspaceAPIView,
+    UpdateWorkspaceAPIView,
     DeleteWorkspaceAPIView,
 )
 from nodepoint.views.workspace_catalog import (
@@ -19,6 +20,7 @@ from nodepoint.views.document import (
 from nodepoint.views.preprocess import (
     PreprocessStatusAPIView,
     PreprocessWorkspaceAPIView,
+    QueueStatusAPIView,
 )
 
 from nodepoint.views.chat import (
@@ -26,10 +28,17 @@ from nodepoint.views.chat import (
     WorkspaceChatAPIView,
 )
 from nodepoint.views.workspace_group import (
+    AddEntityToGroupAPIView,
+    AddFileToGroupAPIView,
+    AddRelationToGroupAPIView,
     AddWorkspaceToGroupAPIView,
     CreateGroupAPIView,
     GroupDetailAPIView,
+    GroupMembersAPIView,
     ListGroupsAPIView,
+    RemoveEntityFromGroupAPIView,
+    RemoveFileFromGroupAPIView,
+    RemoveRelationFromGroupAPIView,
     RemoveWorkspaceFromGroupAPIView,
 )
 
@@ -66,6 +75,11 @@ urlpatterns = [
     ),
 
     path(
+        "workspace/update/<str:name>/",
+        UpdateWorkspaceAPIView.as_view(),
+    ),
+
+    path(
         "workspace/delete/<str:name>/",
         DeleteWorkspaceAPIView.as_view()
     ),
@@ -83,6 +97,11 @@ urlpatterns = [
     path(
         "document/delete/<str:workspace_name>/<str:file_name>/",
         DeleteDocumentAPIView.as_view(),
+    ),
+
+    path(
+        "preprocess/queue-status/",
+        QueueStatusAPIView.as_view(),
     ),
 
     path(
@@ -109,6 +128,10 @@ urlpatterns = [
         ListGroupsAPIView.as_view(),
     ),
     path(
+        "group/<str:name>/members/",
+        GroupMembersAPIView.as_view(),
+    ),
+    path(
         "group/<str:name>/",
         GroupDetailAPIView.as_view(),
     ),
@@ -119,6 +142,30 @@ urlpatterns = [
     path(
         "group/<str:name>/workspaces/<str:workspace_name>/",
         RemoveWorkspaceFromGroupAPIView.as_view(),
+    ),
+    path(
+        "group/<str:name>/files/",
+        AddFileToGroupAPIView.as_view(),
+    ),
+    path(
+        "group/<str:name>/files/<uuid:document_id>/",
+        RemoveFileFromGroupAPIView.as_view(),
+    ),
+    path(
+        "group/<str:name>/entities/",
+        AddEntityToGroupAPIView.as_view(),
+    ),
+    path(
+        "group/<str:name>/entities/<uuid:entity_id>/",
+        RemoveEntityFromGroupAPIView.as_view(),
+    ),
+    path(
+        "group/<str:name>/relations/",
+        AddRelationToGroupAPIView.as_view(),
+    ),
+    path(
+        "group/<str:name>/relations/<uuid:relation_id>/",
+        RemoveRelationFromGroupAPIView.as_view(),
     ),
 
     path(

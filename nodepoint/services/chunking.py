@@ -6,6 +6,7 @@ import time
 from uuid import UUID
 
 import django_rq
+from django.conf import settings
 from django.db.models import Count, Q
 from rq import Retry
 from rq.job import Job, JobStatus
@@ -18,8 +19,16 @@ from nodepoint.mongo.manager import delete_chunks_for_document, ingest_chunk
 
 logger = logging.getLogger(__name__)
 
-CHUNK_JOB_TIMEOUT = "5m"
-CHUNK_JOB_WAIT_SECONDS = 5 * 60
+# KG extraction (LLM) per chunk can be slow; keep job timeout >= batch wait budget per chunk.
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    return int(str(raw).strip())
+
+
+CHUNK_JOB_TIMEOUT = os.getenv("CHUNK_JOB_TIMEOUT", "30m")
+CHUNK_BATCH_WAIT_SECONDS = _env_int("CHUNK_BATCH_WAIT_SECONDS", 2 * 60 * 60)
 _CHUNK_JOB_POLL_INTERVAL_SECONDS = 0.5
 _CHUNK_RETRY = Retry(max=3, interval=[10, 30, 60])
 
@@ -32,18 +41,18 @@ _TERMINAL_CHUNK_JOB_STATUSES = frozenset(
     }
 )
 
+# Chunks eligible for a new process_chunk job (excludes QUEUED — job already submitted).
+_CHUNK_ENQUEUE_STATUSES = (
+    Status.PENDING,
+    Status.FAILED,
+)
+
 _INCOMPLETE_CHUNK_STATUSES = (
     Status.PENDING,
     Status.FAILED,
     Status.QUEUED,
+    Status.INPROGRESS,
 )
-
-_INCOMPLETE_DOC_STATUSES = (
-    Status.PENDING,
-    Status.FAILED,
-    Status.QUEUED,
-)
-
 
 def rollup_document_status(document_id: UUID) -> None:
     chunks = list(DocumentChunk.objects.filter(document_id=document_id).only("status"))
@@ -127,12 +136,44 @@ def prepare_document(doc_id: UUID, filepath: str) -> list[UUID]:
 
 
 def documents_needing_prepare_qs(workspace_name: str | None = None):
+    """Documents with no chunks yet (legacy migration). Skips docs that already have chunks."""
     qs = Document.objects.exclude(status__in=[Status.INVALID, Status.TERMINATED])
     if workspace_name:
         qs = qs.filter(workspace__name=workspace_name)
-    return qs.annotate(chunk_count=Count("chunks")).filter(
-        Q(chunk_count=0) | Q(content=False)
+    return qs.annotate(chunk_count=Count("chunks")).filter(chunk_count=0)
+
+
+def run_prepare_failed_documents_batch(
+    exclude_document_ids: list[UUID] | None = None,
+) -> int:
+    """Re-split documents that failed before any chunks were created (all workspaces)."""
+    qs = (
+        Document.objects.filter(status=Status.FAILED)
+        .annotate(chunk_count=Count("chunks"))
+        .filter(chunk_count=0)
     )
+    if exclude_document_ids:
+        qs = qs.exclude(id__in=exclude_document_ids)
+
+    prepared = 0
+    for doc in qs:
+        if not doc.file:
+            Document.objects.filter(id=doc.id).update(status=Status.INVALID)
+            continue
+        filepath = doc.file.path
+        if not os.path.exists(filepath):
+            Document.objects.filter(id=doc.id).update(status=Status.INVALID)
+            continue
+        chunk_ids = prepare_document(doc.id, filepath)
+        if chunk_ids:
+            prepared += 1
+            logger.info(
+                "run_prepare_failed_documents_batch: prepared %s chunks for document %s",
+                len(chunk_ids),
+                doc.id,
+            )
+    logger.info("run_prepare_failed_documents_batch: prepared %s document(s)", prepared)
+    return prepared
 
 
 def run_prepare_legacy_batch(workspace_name: str | None = None) -> int:
@@ -175,45 +216,75 @@ def _wait_for_chunk_job(job: Job, timeout_seconds: int) -> None:
 
 
 def wait_for_chunk_jobs(jobs: list[Job]) -> None:
-    """Block until each enqueued process_chunk RQ job finishes (or times out)."""
-    for job in jobs:
-        try:
-            _wait_for_chunk_job(job, CHUNK_JOB_WAIT_SECONDS)
-        except TimeoutError:
-            logger.error(
-                "chunk job %s did not finish within %ss",
-                job.id,
-                CHUNK_JOB_WAIT_SECONDS,
-            )
-        except Exception:
-            logger.exception("chunk job %s: error while waiting", job.id)
+    """
+    Block until all enqueued process_chunk jobs finish or the batch deadline elapses.
+
+    Uses one shared deadline (not per-job 300s) so parallel workers can drain a large
+    backlog without the orchestrator giving up early or hitting RQ's default 1800s cap.
+    """
+    if not jobs:
+        return
+    deadline = time.monotonic() + CHUNK_BATCH_WAIT_SECONDS
+    pending: dict[str, Job] = {job.id: job for job in jobs}
+    while pending and time.monotonic() < deadline:
+        finished_ids: list[str] = []
+        for job_id, job in pending.items():
+            try:
+                status = job.get_status(refresh=True)
+            except Exception:
+                logger.exception("chunk job %s: error while polling status", job_id)
+                finished_ids.append(job_id)
+                continue
+            if status in _TERMINAL_CHUNK_JOB_STATUSES:
+                if status != JobStatus.FINISHED:
+                    logger.warning("chunk job %s ended with status %s", job_id, status)
+                finished_ids.append(job_id)
+        for job_id in finished_ids:
+            pending.pop(job_id, None)
+        if pending:
+            time.sleep(_CHUNK_JOB_POLL_INTERVAL_SECONDS)
+    if pending:
+        logger.error(
+            "%s chunk job(s) did not finish within batch wait %ss: %s",
+            len(pending),
+            CHUNK_BATCH_WAIT_SECONDS,
+            ", ".join(sorted(pending.keys())[:20]),
+        )
 
 
 def enqueue_chunks_for_documents(
     document_ids: list[UUID] | None = None,
     workspace_name: str | None = None,
     *,
+    chunk_statuses: tuple[str, ...] | None = None,
+    exclude_document_ids: list[UUID] | None = None,
     wait: bool = False,
 ) -> int:
+    """
+    Enqueue process_chunk only for chunks that still need KG work.
+
+    Does not touch COMPLETED chunks or re-submit QUEUED/INPROGRESS jobs (avoids
+    resetting finished docs when POST preprocess is clicked again).
+    """
     from nodepoint.services.chunk_process import process_chunk
 
-    doc_qs = Document.objects.filter(status__in=_INCOMPLETE_DOC_STATUSES)
+    statuses = chunk_statuses or _CHUNK_ENQUEUE_STATUSES
+    chunk_qs = DocumentChunk.objects.filter(status__in=statuses).select_related(
+        "document"
+    )
     if document_ids:
-        doc_qs = doc_qs.filter(id__in=document_ids)
+        chunk_qs = chunk_qs.filter(document_id__in=document_ids)
     if workspace_name:
-        doc_qs = doc_qs.filter(workspace__name=workspace_name)
-
-    chunk_qs = DocumentChunk.objects.filter(
-        document_id__in=doc_qs.values("id"),
-        status__in=_INCOMPLETE_CHUNK_STATUSES,
-    ).select_related("document")
+        chunk_qs = chunk_qs.filter(document__workspace__name=workspace_name)
+    if exclude_document_ids:
+        chunk_qs = chunk_qs.exclude(document_id__in=exclude_document_ids)
 
     chunks = list(chunk_qs)
     if not chunks:
         logger.info("enqueue_chunks: no chunks to queue")
         return 0
 
-    queue = django_rq.get_queue("default")
+    queue = django_rq.get_queue(getattr(settings, "RQ_QUEUE_CHUNK", "chunk"))
     jobs = []
     for chunk in chunks:
         DocumentChunk.objects.filter(id=chunk.id).update(status=Status.QUEUED)
@@ -240,3 +311,18 @@ def enqueue_chunks_for_document(
         document_ids=[document_id],
         workspace_name=workspace_name,
     )
+
+
+def run_chunk_preprocess_failed_batch(
+    exclude_document_ids: list[UUID] | None = None,
+) -> int:
+    """Retry KG extraction for failed chunks across all workspaces."""
+    count = enqueue_chunks_for_documents(
+        chunk_statuses=(Status.FAILED,),
+        exclude_document_ids=exclude_document_ids,
+    )
+    logger.info(
+        "run_chunk_preprocess_failed_batch: enqueued %s failed chunk job(s)",
+        count,
+    )
+    return count

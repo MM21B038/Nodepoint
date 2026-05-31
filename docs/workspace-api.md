@@ -8,13 +8,23 @@ Scope: provide **exactly one** of `workspace_name=<name>` or `group=<name>`. Mis
 
 ## Workspace groups
 
+Groups have a fixed **`tag`** set at create: `workspace` (default) | `files` | `entity` | `relation`. Each group holds members of that type only.
+
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/group/create/` | Create group `{ "name": "..." }` |
-| GET | `/api/group/list/` | All groups with `workspace_count` |
-| GET | `/api/group/<name>/` | Members and metadata |
-| POST | `/api/group/<name>/workspaces/` | Add `{ "workspace_name": "..." }` |
-| DELETE | `/api/group/<name>/workspaces/<workspace_name>/` | Remove member |
+| POST | `/api/group/create/` | Create group `{ "name": "...", "tag": "workspace", "description": "..." }` |
+| GET | `/api/group/list/` | Paginated groups (`?tag=`, `?page=`, `?page_size=`) |
+| GET | `/api/group/<name>/` | Group metadata + paginated typed `members` |
+| GET | `/api/group/<name>/members/` | Paginated members only (all tag types) |
+| PATCH | `/api/group/<name>/` | Update `{ "name", "description" }` only |
+| POST | `/api/group/<name>/workspaces/` | Add workspace (workspace tag) |
+| DELETE | `/api/group/<name>/workspaces/<workspace_name>/` | Remove workspace |
+| POST | `/api/group/<name>/files/` | Add file (files tag) |
+| DELETE | `/api/group/<name>/files/<document_id>/` | Remove file |
+| POST | `/api/group/<name>/entities/` | Add entity (entity tag) |
+| DELETE | `/api/group/<name>/entities/<entity_id>/` | Remove entity |
+| POST | `/api/group/<name>/relations/` | Add relation (relation tag) |
+| DELETE | `/api/group/<name>/relations/<relation_id>/` | Remove relation |
 | DELETE | `/api/group/<name>/` | Delete group |
 
 ### Entity types
@@ -39,6 +49,8 @@ Lists distinct `entity_type` values with counts per workspace.
 
 ```json
 {
+  "group": "research",
+  "tag": "workspace",
   "workspaces": [
     { "workspace": "PRAJNA", "entity_types": [{ "type": "PER", "count": 42 }] }
   ]
@@ -92,10 +104,19 @@ Sorted by `count` descending. `type` is `null` when the stored value is blank.
 }
 ```
 
-**Group** — `?group=research` (same optional filters; each graph object includes `filters`, `truncated`, `nodes`, `edges`)
+**Group** — `?group=research` (same optional filters; response includes `tag` and `graphs` per member workspace)
+
+| Group `tag` | Graph seeds |
+|-------------|-------------|
+| `workspace` | All entities in each member workspace (respecting filters) |
+| `files` | Entities in member documents only |
+| `entity` | Member entities + optional BFS neighbors |
+| `relation` | Endpoints of member relations + optional BFS neighbors |
 
 ```json
 {
+  "group": "research",
+  "tag": "workspace",
   "graphs": [
     {
       "workspace": "PRAJNA",
@@ -124,7 +145,7 @@ Sorted by `count` descending. `type` is `null` when the stored value is blank.
 | `entity_type` | — | Optional comma-separated filter |
 | `file_name` | — | Optional comma-separated document file names (exact match) |
 
-Returns `matches` (ranked entities with `score`) and `graph` (nodes/edges around seeds). Scope: `workspace_name` or `group=<name>`.
+Returns `matches` (ranked entities with `score`) and `graph` (nodes/edges around seeds). Scope: `workspace_name` or `group=<name>`. For groups, response includes `tag` and a `workspaces` array (one bucket per workspace); non-`workspace` tags restrict candidates to group members.
 
 ## Chat summary
 
@@ -150,15 +171,17 @@ Query: `group=<name>`
 
 ```json
 {
+  "group": "research",
+  "tag": "workspace",
+  "member_count": 2,
+  "group_chat": { "updated_at": "...", "message_count": 5 },
   "workspaces": [
-    {
-      "workspace": "PRAJNA",
-      "updated_at": "...",
-      "message_count": 0
-    }
+    { "workspace": "PRAJNA", "updated_at": "...", "message_count": 0 }
   ]
 }
 ```
+
+For non-`workspace` tags, `workspaces` is omitted; `member_count` reflects files/entities/relations in the group.
 
 Group chat: `GET /api/chat/group/<name>/`, `ws://.../ws/chat/group/<name>/` (separate thread; search uses group members only). Per-workspace: `GET /api/chat/<workspace_name>/`. See [API.md](../API.md).
 

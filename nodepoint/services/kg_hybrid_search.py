@@ -9,6 +9,7 @@ from rapidfuzz import fuzz
 from nodepoint.backend.vector import get_agent
 from nodepoint.quadrant.manager import search_by_workspaces
 from nodepoint.services import kg_search
+from nodepoint.services.group_scope import GroupSearchScope, filter_records_by_scope
 from nodepoint.services.kg_records import record_search_text
 
 _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
@@ -130,6 +131,7 @@ def hybrid_search(
     semantic_weight: float = 0.6,
     lexical_weight: float = 0.4,
     bm25_weight: float = 0.5,
+    scope: GroupSearchScope | None = None,
 ) -> list[dict[str, Any]]:
     vector = get_agent().vector(query).squeeze().tolist()
     hits = search_by_workspaces(
@@ -139,6 +141,8 @@ def hybrid_search(
         type_filter=record_type,
     )
     records = kg_search.resolve_hits(hits)
+    if scope is not None and not scope.is_workspace_tag:
+        records = filter_records_by_scope(records, scope)
     reranked = rerank_records(
         query,
         records,

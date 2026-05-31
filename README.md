@@ -28,7 +28,7 @@ docker compose up -d --build
 | Redis | 6379 |
 | Qdrant | 6333 |
 
-Migrations run on web container start (`RUN_MIGRATIONS=1`).
+Migrations run on web container start (`RUN_MIGRATIONS=1`). After model changes, generate migration files with `python manage.py makemigrations` and commit them — they apply automatically on the next `docker compose up`.
 
 ## Features
 

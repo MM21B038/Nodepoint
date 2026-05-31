@@ -1,18 +1,35 @@
 import logging
 
-from mongoengine import connect
+from mongoengine import connect, disconnect
 
 from nodepoint.mongo.models import ChunkContent, Content
 from nodepoint.settings_loader import mongo_config, mongo_uri
 
 logger = logging.getLogger(__name__)
 
-_cfg = mongo_config()
-connect(db=_cfg["database"], host=mongo_uri())
+_connected = False
+
+
+def ensure_mongo_connection() -> None:
+    """Open MongoEngine lazily so fork-based workers (RQ, uvicorn) stay safe."""
+    global _connected
+    if _connected:
+        return
+    cfg = mongo_config()
+    connect(db=cfg["database"], host=mongo_uri(), connect=False)
+    _connected = True
+
+
+def reset_mongo_connection() -> None:
+    """Drop MongoEngine connections before fork (RQ workers)."""
+    global _connected
+    disconnect()
+    _connected = False
 
 
 def ingest_document(doc_id, content):
     """Legacy full-document storage (deprecated for new uploads)."""
+    ensure_mongo_connection()
     try:
         existing = Content.objects(id=str(doc_id)).first()
         if existing:
@@ -27,6 +44,7 @@ def ingest_document(doc_id, content):
 
 
 def ingest_chunk(chunk_id, document_id, index, content) -> bool:
+    ensure_mongo_connection()
     try:
         cid = str(chunk_id)
         existing = ChunkContent.objects(id=cid).first()
@@ -50,6 +68,7 @@ def ingest_chunk(chunk_id, document_id, index, content) -> bool:
 
 def get_document_text(document_id) -> str | None:
     """Full document text: legacy Mongo Content, else joined chunks, else file on disk."""
+    ensure_mongo_connection()
     try:
         row = Content.objects(id=str(document_id)).first()
         if row is not None and row.content:
@@ -83,6 +102,7 @@ def get_document_text(document_id) -> str | None:
 
 
 def get_chunk_text(chunk_id) -> str | None:
+    ensure_mongo_connection()
     try:
         row = ChunkContent.objects(id=str(chunk_id)).first()
         if row is None:
@@ -94,6 +114,7 @@ def get_chunk_text(chunk_id) -> str | None:
 
 
 def delete_chunks_for_document(document_id) -> None:
+    ensure_mongo_connection()
     try:
         ChunkContent.objects(document_id=str(document_id)).delete()
     except Exception:

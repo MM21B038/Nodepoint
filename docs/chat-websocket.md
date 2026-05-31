@@ -4,7 +4,7 @@ Backend-only streaming chat over Django Channels. Requires **ASGI** (`uvicorn co
 
 ## Quick start (group-scoped chat)
 
-1. Create a group: `POST /api/group/create/` with `{ "name": "research" }`
+1. Create a group: `POST /api/group/create/` with `{ "name": "research", "tag": "workspace", "description": "..." }` (`tag` optional, default `workspace`)
 2. Add workspaces: `POST /api/group/research/workspaces/` with `{ "workspace_name": "..." }`
 3. `GET /api/chat/group/research/` — lazy-create group chat thread
 4. Connect: `ws://localhost:8000/ws/chat/group/research/`
@@ -27,7 +27,7 @@ Backend-only streaming chat over Django Channels. Requires **ASGI** (`uvicorn co
 
 | URL | Scope |
 |-----|--------|
-| `/ws/chat/group/<name>/` | Group chat (`chat.ready` includes `group`, `workspaces`) |
+| `/ws/chat/group/<name>/` | Group chat (`chat.ready` includes `group`, `tag`, `members`, `member_count`; `workspaces` when tag is `workspace`) |
 | `/ws/chat/<workspace_name>/` | Single workspace (`chat.ready` includes `workspace`) |
 
 ### Client → server
@@ -42,13 +42,12 @@ Backend-only streaming chat over Django Channels. Requires **ASGI** (`uvicorn co
 
 ### Server → client
 
-- `chat.ready` — on connect (`conversation_id`, `active_branch_id`; `agent_busy: true` if a turn is still running — live stream auto-attaches)
+- `chat.ready` — on connect (`conversation_id`, `active_branch_id`, **`agent_busy`** always `true` or `false`; when `true`, live stream auto-attaches)
 - `chat.turn_started` — turn accepted (`turn_id`)
 - `chat.reconnected` — reply to `chat.reconnect`
 - `chat.status` — reply to `chat.status` (`agent_busy`, `turn_id`, `turn_started_at`)
 - `chat.branch_updated` — active branch changed after compression
 - Agent stream events — see `nodepoint/agent/schema.py` (via channel-layer fan-out)
-- Stream blocks use **`segment_index`** on each `section` open/close and token frame; keep an array of segments (do not replace one thinking/tools panel). `chat.done` includes **`latest_response_segment_index`** — use only that segment for citation / interactive icons.
 - `chat.compress_started` — compression LLM call began (`message`)
 - `chat.compress_completed` — summary ready (`message`, `summary_chars`)
 - `chat.compressed` — internal context compression succeeded (new branch)
@@ -72,6 +71,8 @@ After reconnect:
 3. **Once**, call `GET /api/chat/<workspace>/` or `GET /api/chat/group/<name>/` to fill text that arrived while you were offline (no token replay).
 4. Send `chat.send` only when `agent_busy` is false.
 
+**Multi-worker:** Active turn metadata is stored in **Redis** (`nodepoint:chat:turn:{conversation_id}`), so `agent_busy` is consistent across uvicorn workers (`WEB_WORKERS>1`). `chat.cancel` reaches the owning worker via Redis pub/sub.
+
 Use `ping` / `pong` for keepalive on long tool or LLM runs (`AGENT_REQUEST_TIMEOUT` defaults to 300s).
 
 Multiple tabs on the same chat each receive the same live stream.
@@ -80,15 +81,14 @@ Multiple tabs on the same chat each receive the same live stream.
 
 | Chat mode | `Knowledge.search_graph` searches |
 |-----------|----------------------------------|
-| Group (`/ws/chat/group/<name>/`) | All workspaces in that group |
-| Flagged (`/ws/chat/flagged/`) | Workspaces in group `flagged` |
+| Group (`/ws/chat/group/<name>/`) | Scoped by group `tag`: workspaces, files, entities, or relations in that group |
 | Per-workspace | That workspace only |
 
-If a group has no member workspaces, the tool returns a message that the group is empty.
+If a group has no members, the tool returns a message that the group is empty.
 
 ## Concurrency
 
-- Each WebSocket connection runs **one agent task** at a time (`Agent busy` if a second `chat.send` arrives during a turn).
+- Each WebSocket connection runs **one agent task** at a time (`Agent busy` if a second `chat.send` arrives during a turn). Turn active-state is in Redis, not process memory.
 - Different users/workspaces run **in parallel** on the same `web` service (async event loop + httpx LLM streaming).
 - Knowledge tools share a per-worker slot limit: `CHAT_MAX_CONCURRENT_SEARCHES` (default `8`).
 - Scale horizontally: set `WEB_WORKERS` (default `4`) on the `web` container, or `docker compose up --scale web=2`.
@@ -107,7 +107,8 @@ If a group has no member workspaces, the tool returns a message that the group i
 - `LOG_LEVEL` — Django/app log level (default `INFO`)
 - `CHAT_DEFAULT_SYSTEM` — system prompt for new chats
 - `CHAT_MAX_CONCURRENT_SEARCHES` — default `8`
-- `WEB_WORKERS` — uvicorn worker processes (default `4`)
+- `WEB_WORKERS` — uvicorn worker processes (default `4`; safe with Redis turn registry)
+- `CHAT_TURN_REDIS_TTL` — seconds to retain active-turn metadata if a worker crashes (default `3600`)
 - `DB_CONN_MAX_AGE` — Postgres connection reuse per worker (default `60`)
 - `AGENT_REQUEST_TIMEOUT` — LLM HTTP read timeout seconds (default `300`)
 - `BASE_URL`, `API_KEY` — required for `Agent`

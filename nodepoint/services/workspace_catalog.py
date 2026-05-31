@@ -9,6 +9,7 @@ from nodepoint.models import (
     KnowledgeRelation,
     Workspace,
 )
+from nodepoint.services import optional_fields as opt
 from nodepoint.services.workspace_group import user_workspaces_qs
 
 DEFAULT_PAGE_SIZE = 20
@@ -103,6 +104,8 @@ def serialize_workspace_row(
     groups = sorted(m.group.name for m in ws.group_memberships.all())
     row = {
         "name": ws.name,
+        "tag": opt.optional_field_for_api(ws.tag),
+        "description": opt.optional_field_for_api(ws.description),
         "groups": groups,
         "created_at": ws.created_at,
     }

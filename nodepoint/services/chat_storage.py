@@ -115,11 +115,35 @@ def list_chat_summary_for_workspace(workspace: Workspace) -> dict[str, Any]:
     return workspace_chat_summary(workspace)
 
 
-def list_chat_summary_for_group(group_name: str) -> list[dict[str, Any]]:
-    from nodepoint.services.workspace_group import get_group_workspaces_qs
+def list_chat_summary_for_group(group_name: str) -> dict[str, Any]:
+    from nodepoint.enums import GroupTag
+    from nodepoint.services.group_scope import resolve_group_search_scope
+    from nodepoint.services.workspace_group import (
+        get_group_by_name,
+        get_or_create_group_chat_workspace,
+    )
 
-    workspaces = get_group_workspaces_qs(group_name).order_by("name")
-    return [workspace_chat_summary(ws) for ws in workspaces]
+    group = get_group_by_name(group_name)
+    scope = resolve_group_search_scope(group_name)
+    chat_workspace = get_or_create_group_chat_workspace(group_name)
+    payload: dict[str, Any] = {
+        "group": group_name,
+        "tag": group.tag,
+        "member_count": len(scope.document_ids)
+        if group.tag == GroupTag.FILES
+        else len(scope.entity_ids)
+        if group.tag == GroupTag.ENTITY
+        else len(scope.relation_ids)
+        if group.tag == GroupTag.RELATION
+        else len(scope.workspace_names),
+        "group_chat": workspace_chat_summary(chat_workspace),
+    }
+    if group.tag == GroupTag.WORKSPACE:
+        from nodepoint.services.workspace_group import get_group_workspaces_qs
+
+        workspaces = get_group_workspaces_qs(group_name).order_by("name")
+        payload["workspaces"] = [workspace_chat_summary(ws) for ws in workspaces]
+    return payload
 
 
 def load_root_messages(conversation_id: uuid.UUID) -> list[ChatMessage]:

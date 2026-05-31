@@ -1,6 +1,10 @@
+from __future__ import annotations
+
 import logging
+from uuid import UUID
 
 import django_rq
+from django.conf import settings
 from rq import Retry
 
 from nodepoint.models import DocumentChunk, KnowledgeEntity, KnowledgeRelation
@@ -15,6 +19,10 @@ from nodepoint.services.chunking import CHUNK_JOB_TIMEOUT
 logger = logging.getLogger(__name__)
 
 _VECTOR_RETRY = Retry(max=3, interval=[10, 30, 60])
+
+
+def _vector_queue():
+    return django_rq.get_queue(getattr(settings, "RQ_QUEUE_VECTOR", "vector"))
 
 
 def process_vector(point_id, kind):
@@ -60,7 +68,7 @@ def vector_preprocess(document_id=None, workspace_name=None):
     entity_ids = list(entity_qs.values_list("id", flat=True))
     relation_ids = list(relation_qs.values_list("id", flat=True))
     chunk_ids = list(chunk_qs.values_list("id", flat=True))
-    queue = django_rq.get_queue("default")
+    queue = _vector_queue()
 
     for point_id in entity_ids:
         queue.enqueue(
@@ -98,3 +106,32 @@ def vector_preprocess(document_id=None, workspace_name=None):
         document_id,
         workspace_name,
     )
+
+
+def enqueue_vectors_for_chunk(
+    chunk_id: UUID,
+    entity_ids: list | None = None,
+    relation_ids: list | None = None,
+) -> int:
+    """Enqueue embedding jobs for KG rows produced by a single completed chunk."""
+    queue = _vector_queue()
+    count = 0
+    job_kwargs = {"job_timeout": CHUNK_JOB_TIMEOUT, "retry": _VECTOR_RETRY}
+
+    for point_id in entity_ids or []:
+        queue.enqueue(process_vector, point_id, "entity", **job_kwargs)
+        count += 1
+    for point_id in relation_ids or []:
+        queue.enqueue(process_vector, point_id, "relation", **job_kwargs)
+        count += 1
+    queue.enqueue(process_vector, chunk_id, "chunk", **job_kwargs)
+    count += 1
+
+    logger.info(
+        "Enqueued %s vector job(s) for chunk %s (%s entities, %s relations)",
+        count,
+        chunk_id,
+        len(entity_ids or []),
+        len(relation_ids or []),
+    )
+    return count

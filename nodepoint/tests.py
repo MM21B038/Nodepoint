@@ -1,5 +1,8 @@
+import asyncio
+import sys
 import tempfile
 import uuid
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -65,37 +68,64 @@ class KnowledgeGraphIngestTests(TestCase):
 
 
 class PreprocessPipelineTests(TestCase):
-    @patch("nodepoint.services.preprocess_pipeline.django_rq.get_queue")
+    @patch("nodepoint.services.preprocess_pipeline._orchestrator_queue")
     def test_enqueue_pipeline_with_upload_sequential_order(self, mock_get_queue):
         from nodepoint.services.preprocess_pipeline import enqueue_preprocess_pipeline
 
         mock_queue = MagicMock()
         mock_get_queue.return_value = mock_queue
-        j1, j2, j3, j4 = MagicMock(), MagicMock(), MagicMock(), MagicMock()
-        j1.id, j2.id, j3.id, j4.id = "j1", "j2", "j3", "j4"
-        mock_queue.enqueue.side_effect = [j1, j2, j3, j4]
+        j1, j2, j2b, j3 = MagicMock(), MagicMock(), MagicMock(), MagicMock()
+        j1.id, j2.id, j2b.id, j3.id = "j1", "j2", "j2b", "j3"
+        mock_queue.enqueue.side_effect = [j1, j2, j2b, j3]
 
         doc_id = uuid.uuid4()
-        result = enqueue_preprocess_pipeline(uploaded_document_id=doc_id)
+        result = enqueue_preprocess_pipeline(
+            uploaded_document_id=doc_id,
+            workspace_name="upload-ws",
+        )
 
         self.assertEqual(mock_queue.enqueue.call_count, 4)
         self.assertEqual(len(result["steps"]), 4)
-        self.assertIn("prepare document", result["message"])
+        self.assertIn("document-scoped", result["message"])
+        self.assertIn("failed catch-up", result["message"])
 
         calls = mock_queue.enqueue.call_args_list
         self.assertEqual(calls[0][0][0].__name__, "run_prepare_document")
         self.assertEqual(calls[0][0][1], doc_id)
         self.assertEqual(calls[1][0][0].__name__, "run_chunk_preprocess_batch")
+        self.assertEqual(calls[1][0][1], "upload-ws")
+        self.assertEqual(calls[1][1]["document_ids"], [doc_id])
         self.assertEqual(calls[1][1]["depends_on"], [j1])
-        self.assertEqual(calls[2][0][0].__name__, "run_vector_preprocess_batch")
-        self.assertEqual(calls[2][1]["depends_on"], j2)
-        self.assertEqual(calls[3][0][0].__name__, "run_chunk_mongo_repair_batch")
-        self.assertEqual(calls[3][1]["depends_on"], j3)
+        self.assertEqual(calls[2][0][0].__name__, "run_upload_failed_catchup_batch")
+        self.assertEqual(calls[2][0][1], doc_id)
+        self.assertEqual(calls[2][1]["depends_on"], [j1])
+        self.assertEqual(calls[3][0][0].__name__, "schedule_workspace_pipeline_tail")
+        self.assertEqual(calls[3][0][1], "upload-ws")
+        self.assertEqual(calls[3][1]["depends_on"], [j2, j2b])
 
-    @patch("nodepoint.services.preprocess_pipeline.django_rq.get_queue")
-    def test_enqueue_pipeline_post_prepare_legacy_then_sequential(self, mock_get_queue):
+    @patch("nodepoint.services.preprocess_pipeline.try_acquire_workspace_pipeline_lock")
+    @patch("nodepoint.services.preprocess_pipeline._orchestrator_queue")
+    def test_enqueue_workspace_pipeline_coalesces_when_lock_held(
+        self, mock_get_queue, mock_acquire
+    ):
         from nodepoint.services.preprocess_pipeline import enqueue_preprocess_pipeline
 
+        mock_acquire.return_value = False
+        result = enqueue_preprocess_pipeline(workspace_name="my-ws")
+
+        mock_get_queue.assert_not_called()
+        self.assertTrue(result["coalesced"])
+        self.assertEqual(result["steps"], [])
+        self.assertIn("already queued", result["message"])
+
+    @patch("nodepoint.services.preprocess_pipeline.try_acquire_workspace_pipeline_lock")
+    @patch("nodepoint.services.preprocess_pipeline._orchestrator_queue")
+    def test_enqueue_pipeline_post_prepare_legacy_then_sequential(
+        self, mock_get_queue, mock_acquire
+    ):
+        from nodepoint.services.preprocess_pipeline import enqueue_preprocess_pipeline
+
+        mock_acquire.return_value = True
         mock_queue = MagicMock()
         mock_get_queue.return_value = mock_queue
         j1, j2, j3, j4 = MagicMock(), MagicMock(), MagicMock(), MagicMock()
@@ -111,19 +141,151 @@ class PreprocessPipelineTests(TestCase):
         self.assertEqual(calls[0][0][0].__name__, "run_prepare_legacy_batch")
         self.assertEqual(calls[0][0][1], "my-ws")
         self.assertEqual(calls[1][1]["depends_on"], [j1])
-        self.assertEqual(calls[2][1]["depends_on"], j2)
-        self.assertEqual(calls[3][1]["depends_on"], j3)
+        self.assertEqual(calls[2][1]["depends_on"], [j2])
+        self.assertEqual(calls[3][1]["depends_on"], [j3])
 
-    @patch("nodepoint.views.preprocess.enqueue_preprocess_pipeline")
-    def test_post_preprocess_passes_workspace_name(self, mock_enqueue):
+    @patch("nodepoint.services.preprocess_pipeline.try_acquire_workspace_pipeline_lock")
+    @patch("nodepoint.services.preprocess_pipeline._orchestrator_queue")
+    def test_schedule_workspace_pipeline_tail_coalesces(self, mock_get_queue, mock_acquire):
+        from nodepoint.services.preprocess_pipeline import schedule_workspace_pipeline_tail
+
+        mock_acquire.return_value = False
+        result = schedule_workspace_pipeline_tail("busy-ws")
+        self.assertTrue(result["coalesced"])
+        mock_get_queue.assert_not_called()
+
+    @patch("nodepoint.services.preprocess_pipeline.enqueue_chunks_for_documents", return_value=2)
+    def test_run_chunk_preprocess_batch_non_blocking(self, mock_enqueue):
+        from nodepoint.services.preprocess_pipeline import run_chunk_preprocess_batch
+
+        doc_id = uuid.uuid4()
+        count = run_chunk_preprocess_batch(
+            workspace_name="ws",
+            document_ids=[doc_id],
+        )
+        self.assertEqual(count, 2)
+        mock_enqueue.assert_called_once_with(
+            document_ids=[doc_id],
+            workspace_name="ws",
+            wait=False,
+        )
+
+    @patch("nodepoint.views.preprocess.enqueue_priority_workspace_preprocess")
+    def test_post_preprocess_defaults_current_workspace_only(self, mock_enqueue):
         from rest_framework.test import APIClient
 
-        mock_enqueue.return_value = {"message": "ok", "steps": [], "jobs": {}}
+        mock_enqueue.return_value = {
+            "message": "ok",
+            "priority_workspace": "post-ws",
+            "priority_pipeline": {"steps": [], "jobs": {}},
+            "other_workspaces": [],
+        }
         client = APIClient()
         Workspace.objects.create(name="post-ws")
         resp = client.post("/api/workspace/preprocess/post-ws/")
         self.assertEqual(resp.status_code, 200)
-        mock_enqueue.assert_called_once_with(workspace_name="post-ws")
+        mock_enqueue.assert_called_once_with(
+            "post-ws",
+            priority=False,
+            include_other_workspaces=False,
+        )
+        self.assertEqual(resp.data["priority_workspace"], "post-ws")
+
+    @patch("nodepoint.views.preprocess.enqueue_priority_workspace_preprocess")
+    def test_post_preprocess_opt_in_priority_and_others(self, mock_enqueue):
+        from rest_framework.test import APIClient
+
+        mock_enqueue.return_value = {
+            "message": "ok",
+            "priority_workspace": "post-ws",
+            "priority_pipeline": {},
+            "other_workspaces": [{"workspace": "other-ws", "queued": True}],
+        }
+        client = APIClient()
+        Workspace.objects.create(name="post-ws")
+        resp = client.post(
+            "/api/workspace/preprocess/post-ws/"
+            "?priority=true&include_other_workspaces=true"
+        )
+        self.assertEqual(resp.status_code, 200)
+        mock_enqueue.assert_called_once_with(
+            "post-ws",
+            priority=True,
+            include_other_workspaces=True,
+        )
+
+    @patch("nodepoint.services.preprocess_pipeline._enqueue_workspace_preprocess")
+    @patch("nodepoint.services.preprocess_pipeline._other_workspaces_needing_preprocess")
+    def test_enqueue_priority_routes_queues(
+        self, mock_others, mock_enqueue
+    ):
+        from nodepoint.services.preprocess_pipeline import (
+            enqueue_priority_workspace_preprocess,
+        )
+
+        mock_enqueue.side_effect = [
+            {"coalesced": False, "jobs": {"prepare_legacy": "j1"}},
+            {"coalesced": True, "jobs": {}},
+        ]
+        mock_others.return_value = ["ws-b"]
+
+        result = enqueue_priority_workspace_preprocess(
+            "ws-a",
+            priority=True,
+            include_other_workspaces=True,
+        )
+
+        self.assertEqual(result["priority_workspace"], "ws-a")
+        self.assertEqual(len(result["other_workspaces"]), 1)
+        self.assertFalse(result["other_workspaces"][0]["queued"])
+        self.assertTrue(result["other_workspaces"][0]["coalesced"])
+        self.assertEqual(mock_enqueue.call_count, 2)
+        mock_enqueue.assert_any_call(
+            "ws-a", orchestrator_queue_name="high"
+        )
+        mock_enqueue.assert_any_call(
+            "ws-b", orchestrator_queue_name="low"
+        )
+
+    @patch("nodepoint.services.preprocess_pipeline._enqueue_workspace_preprocess")
+    def test_enqueue_priority_defaults_single_workspace_orchestrator(self, mock_enqueue):
+        from nodepoint.services.preprocess_pipeline import (
+            enqueue_priority_workspace_preprocess,
+        )
+
+        mock_enqueue.return_value = {"coalesced": False, "jobs": {}}
+
+        enqueue_priority_workspace_preprocess("ws-a")
+
+        mock_enqueue.assert_called_once_with(
+            "ws-a", orchestrator_queue_name="orchestrator"
+        )
+
+    @patch("nodepoint.services.chunking.django_rq.get_queue")
+    def test_enqueue_chunks_includes_inprogress_documents(self, mock_get_queue):
+        from nodepoint.services.chunking import enqueue_chunks_for_documents
+
+        workspace = Workspace.objects.create(name="inprogress-ws")
+        document = Document.objects.create(
+            workspace=workspace,
+            file_name="note.md",
+            status=Status.INPROGRESS,
+            content=True,
+        )
+        chunk = DocumentChunk.objects.create(
+            document=document,
+            index=0,
+            status=Status.PENDING,
+            vector=Status.PENDING,
+        )
+        mock_queue = MagicMock()
+        mock_get_queue.return_value = mock_queue
+
+        count = enqueue_chunks_for_documents(workspace_name=workspace.name)
+        self.assertEqual(count, 1)
+        mock_queue.enqueue.assert_called_once()
+        chunk.refresh_from_db()
+        self.assertEqual(chunk.status, Status.QUEUED)
 
     @patch("nodepoint.services.document.enqueue_chunks_for_document", return_value=1)
     @patch("nodepoint.services.document.prepare_document", return_value=[uuid.uuid4()])
@@ -166,6 +328,153 @@ class PreprocessPipelineTests(TestCase):
         self.assertTrue(document.content)
         self.assertEqual(DocumentChunk.objects.filter(document=document).count(), 1)
         mock_ingest.assert_called()
+
+
+class PreprocessRecoveryTests(TestCase):
+    def test_reset_orphaned_chunk_statuses(self):
+        from nodepoint.services.preprocess_recovery import reset_orphaned_chunk_statuses
+
+        ws = Workspace.objects.create(name="recover-ws")
+        doc = Document.objects.create(
+            workspace=ws, file_name="r.md", status=Status.INPROGRESS, content=True
+        )
+        queued = DocumentChunk.objects.create(
+            document=doc, index=0, status=Status.QUEUED, vector=Status.PENDING
+        )
+        in_progress = DocumentChunk.objects.create(
+            document=doc, index=1, status=Status.INPROGRESS, vector=Status.PENDING
+        )
+        completed = DocumentChunk.objects.create(
+            document=doc, index=2, status=Status.COMPLETED, vector=Status.COMPLETED
+        )
+
+        stats = reset_orphaned_chunk_statuses()
+        self.assertEqual(stats["queued_reset"], 1)
+        self.assertEqual(stats["in_progress_reset"], 1)
+
+        queued.refresh_from_db()
+        in_progress.refresh_from_db()
+        completed.refresh_from_db()
+        self.assertEqual(queued.status, Status.PENDING)
+        self.assertEqual(in_progress.status, Status.PENDING)
+        self.assertEqual(completed.status, Status.COMPLETED)
+
+    @patch("nodepoint.services.preprocess_recovery.vector_preprocess")
+    @patch("nodepoint.services.preprocess_recovery.enqueue_chunks_for_documents", return_value=3)
+    @patch("nodepoint.services.preprocess_recovery.run_prepare_failed_documents_batch", return_value=0)
+    @patch("nodepoint.services.preprocess_recovery.run_prepare_legacy_batch", return_value=1)
+    def test_run_preprocess_recovery(
+        self,
+        mock_legacy,
+        mock_failed,
+        mock_enqueue,
+        mock_vector,
+    ):
+        from nodepoint.services.preprocess_recovery import run_preprocess_recovery
+
+        ws = Workspace.objects.create(name="recover-run-ws")
+        doc = Document.objects.create(
+            workspace=ws, file_name="stuck.md", status=Status.QUEUED, content=True
+        )
+        DocumentChunk.objects.create(
+            document=doc, index=0, status=Status.QUEUED, vector=Status.PENDING
+        )
+
+        stats = run_preprocess_recovery()
+        self.assertEqual(stats["queued_reset"], 1)
+        self.assertEqual(stats["legacy_prepared"], 1)
+        self.assertEqual(stats["chunks_enqueued"], 3)
+        self.assertTrue(stats["vector_sweep"])
+        mock_enqueue.assert_called_once_with()
+        mock_vector.assert_called_once_with()
+
+    @patch("nodepoint.services.preprocess_recovery.run_preprocess_recovery")
+    @patch("nodepoint.services.preprocess_recovery.get_connection")
+    def test_maybe_run_startup_recovery_respects_lock(self, mock_conn, mock_run):
+        from nodepoint.services.preprocess_recovery import maybe_run_startup_recovery
+
+        mock_conn.return_value.set.return_value = False
+        result = maybe_run_startup_recovery()
+        self.assertIsNone(result)
+        mock_run.assert_not_called()
+
+    @patch("nodepoint.services.preprocess_recovery.run_preprocess_recovery")
+    @patch("nodepoint.services.preprocess_recovery.get_connection")
+    def test_maybe_run_startup_recovery_runs_when_lock_acquired(
+        self, mock_conn, mock_run
+    ):
+        from nodepoint.services.preprocess_recovery import maybe_run_startup_recovery
+
+        mock_conn.return_value.set.return_value = True
+        mock_run.return_value = {"chunks_enqueued": 2}
+        result = maybe_run_startup_recovery()
+        self.assertEqual(result["chunks_enqueued"], 2)
+        mock_run.assert_called_once()
+
+    @patch.dict("os.environ", {"PREPROCESS_RECOVERY_ON_STARTUP": "0"})
+    @patch("nodepoint.services.preprocess_recovery.run_preprocess_recovery")
+    def test_maybe_run_startup_recovery_disabled(self, mock_run):
+        from nodepoint.services.preprocess_recovery import maybe_run_startup_recovery
+
+        result = maybe_run_startup_recovery()
+        self.assertIsNone(result)
+        mock_run.assert_not_called()
+
+    @patch("nodepoint.services.preprocess_recovery.maybe_run_startup_recovery")
+    def test_apps_ready_runs_recovery_for_orchestrator_worker(self, mock_recovery):
+        from django.apps import apps
+
+        config = apps.get_app_config("nodepoint")
+        with patch.object(sys, "argv", ["manage.py", "rqworker", "high", "orchestrator", "low"]):
+            config.ready()
+        mock_recovery.assert_called_once()
+
+    @patch("nodepoint.services.preprocess_recovery.maybe_run_startup_recovery")
+    def test_apps_ready_skips_recovery_for_chunk_worker(self, mock_recovery):
+        from django.apps import apps
+
+        config = apps.get_app_config("nodepoint")
+        with patch.object(sys, "argv", ["manage.py", "rqworker", "chunk", "vector"]):
+            config.ready()
+        mock_recovery.assert_not_called()
+
+    @patch("nodepoint.services.queue_status._queue_counts")
+    def test_orphaned_chunk_count_when_rq_idle(self, mock_counts):
+        from nodepoint.services.queue_status import build_database_backlog
+
+        mock_counts.return_value = {"queued": 0, "started": 0, "failed": 0, "deferred": 0}
+        ws = Workspace.objects.create(name="orphan-ws")
+        doc = Document.objects.create(
+            workspace=ws, file_name="o.md", status=Status.INPROGRESS, content=True
+        )
+        DocumentChunk.objects.create(
+            document=doc, index=0, status=Status.QUEUED, vector=Status.PENDING
+        )
+        DocumentChunk.objects.create(
+            document=doc, index=1, status=Status.INPROGRESS, vector=Status.PENDING
+        )
+        DocumentChunk.objects.create(
+            document=doc, index=2, status=Status.COMPLETED, vector=Status.COMPLETED
+        )
+
+        backlog = build_database_backlog(workspace="orphan-ws")
+        self.assertEqual(backlog["chunks_orphaned"], 2)
+
+    @patch("nodepoint.services.queue_status._queue_counts")
+    def test_orphaned_chunk_count_zero_when_rq_busy(self, mock_counts):
+        from nodepoint.services.queue_status import build_database_backlog
+
+        mock_counts.return_value = {"queued": 1, "started": 0, "failed": 0, "deferred": 0}
+        ws = Workspace.objects.create(name="busy-rq-ws")
+        doc = Document.objects.create(
+            workspace=ws, file_name="b.md", status=Status.QUEUED, content=True
+        )
+        DocumentChunk.objects.create(
+            document=doc, index=0, status=Status.QUEUED, vector=Status.PENDING
+        )
+
+        backlog = build_database_backlog(workspace="busy-rq-ws")
+        self.assertEqual(backlog["chunks_orphaned"], 0)
 
 
 class ChunkPipelineTests(TestCase):
@@ -245,6 +554,29 @@ class ChunkPipelineTests(TestCase):
         self.assertEqual(mock_job.get_status.call_count, 3)
         self.assertEqual(mock_sleep.call_count, 2)
 
+    @patch("nodepoint.services.chunking.time.sleep")
+    @patch("nodepoint.services.chunking.time.monotonic")
+    def test_wait_for_chunk_jobs_uses_batch_deadline(self, mock_monotonic, mock_sleep):
+        from nodepoint.services.chunking import wait_for_chunk_jobs
+        from rq.job import JobStatus
+
+        job_a = MagicMock()
+        job_a.id = "job-a"
+        job_b = MagicMock()
+        job_b.id = "job-b"
+        job_a.get_status.side_effect = [JobStatus.STARTED, JobStatus.FINISHED]
+        job_b.get_status.side_effect = [JobStatus.QUEUED, JobStatus.FINISHED]
+        mock_monotonic.side_effect = [0.0, 0.1, 0.2, 0.3]
+
+        with patch(
+            "nodepoint.services.chunking.CHUNK_BATCH_WAIT_SECONDS",
+            600,
+        ):
+            wait_for_chunk_jobs([job_a, job_b])
+
+        self.assertGreaterEqual(job_a.get_status.call_count, 1)
+        self.assertGreaterEqual(job_b.get_status.call_count, 1)
+
     @patch("nodepoint.services.chunking.wait_for_chunk_jobs")
     @patch("nodepoint.services.chunking.django_rq.get_queue")
     def test_enqueue_chunks_can_wait_for_jobs(self, mock_get_queue, mock_wait):
@@ -310,6 +642,105 @@ class ChunkPipelineTests(TestCase):
         self.assertEqual(count, 1)
         self.assertEqual(DocumentChunk.objects.filter(document=document).count(), 1)
 
+    @patch("nodepoint.services.chunking.prepare_document")
+    @patch("nodepoint.services.chunking.ingest_chunk", return_value=True)
+    def test_prepare_legacy_skips_docs_that_already_have_chunks(
+        self, mock_ingest, mock_prepare
+    ):
+        from nodepoint.services.chunking import run_prepare_legacy_batch
+
+        workspace = Workspace.objects.create(name="legacy-skip-ws")
+        document = Document.objects.create(
+            workspace=workspace,
+            file_name="has-chunks.md",
+            status=Status.INPROGRESS,
+            content=False,
+        )
+        DocumentChunk.objects.create(
+            document=document,
+            index=0,
+            status=Status.COMPLETED,
+            vector=Status.COMPLETED,
+        )
+        count = run_prepare_legacy_batch(workspace_name=workspace.name)
+        self.assertEqual(count, 0)
+        mock_prepare.assert_not_called()
+        self.assertEqual(DocumentChunk.objects.filter(document=document).count(), 1)
+
+    @patch("nodepoint.services.chunking.django_rq.get_queue")
+    def test_enqueue_chunks_skips_completed_and_already_queued(self, mock_get_queue):
+        from nodepoint.services.chunking import enqueue_chunks_for_documents
+
+        workspace = Workspace.objects.create(name="skip-chunk-ws")
+        document = Document.objects.create(
+            workspace=workspace,
+            file_name="done.md",
+            status=Status.COMPLETED,
+            content=True,
+        )
+        DocumentChunk.objects.create(
+            document=document,
+            index=0,
+            status=Status.COMPLETED,
+            vector=Status.COMPLETED,
+        )
+        DocumentChunk.objects.create(
+            document=document,
+            index=1,
+            status=Status.QUEUED,
+            vector=Status.PENDING,
+        )
+        pending = DocumentChunk.objects.create(
+            document=document,
+            index=2,
+            status=Status.PENDING,
+            vector=Status.PENDING,
+        )
+        mock_queue = MagicMock()
+        mock_get_queue.return_value = mock_queue
+
+        count = enqueue_chunks_for_documents(workspace_name=workspace.name)
+        self.assertEqual(count, 1)
+        mock_queue.enqueue.assert_called_once()
+        self.assertEqual(mock_queue.enqueue.call_args[0][1], pending.id)
+        pending.refresh_from_db()
+        self.assertEqual(pending.status, Status.QUEUED)
+        done = DocumentChunk.objects.get(document=document, index=0)
+        self.assertEqual(done.status, Status.COMPLETED)
+
+    @patch("nodepoint.services.chunking.django_rq.get_queue")
+    def test_enqueue_failed_chunks_global_excludes_document(self, mock_get_queue):
+        from nodepoint.services.chunking import run_chunk_preprocess_failed_batch
+
+        ws_a = Workspace.objects.create(name="failed-a")
+        ws_b = Workspace.objects.create(name="failed-b")
+        doc_a = Document.objects.create(
+            workspace=ws_a, file_name="a.md", status=Status.FAILED, content=True
+        )
+        doc_b = Document.objects.create(
+            workspace=ws_b, file_name="b.md", status=Status.FAILED, content=True
+        )
+        doc_new = Document.objects.create(
+            workspace=ws_a, file_name="new.md", status=Status.PENDING, content=False
+        )
+        failed_a = DocumentChunk.objects.create(
+            document=doc_a, index=0, status=Status.FAILED, vector=Status.PENDING
+        )
+        DocumentChunk.objects.create(
+            document=doc_b, index=0, status=Status.FAILED, vector=Status.PENDING
+        )
+        DocumentChunk.objects.create(
+            document=doc_new, index=0, status=Status.PENDING, vector=Status.PENDING
+        )
+        mock_queue = MagicMock()
+        mock_get_queue.return_value = mock_queue
+
+        count = run_chunk_preprocess_failed_batch(exclude_document_ids=[doc_new.id])
+        self.assertEqual(count, 2)
+        self.assertEqual(mock_queue.enqueue.call_count, 2)
+        failed_a.refresh_from_db()
+        self.assertEqual(failed_a.status, Status.QUEUED)
+
 
 class DocPreprocessTests(TestCase):
     @patch("nodepoint.services.chunking.django_rq.get_queue")
@@ -336,6 +767,68 @@ class DocPreprocessTests(TestCase):
             from nodepoint.services.chunk_process import process_chunk
 
             self.assertEqual(args[0], process_chunk)
+        mock_get_queue.assert_called_with("chunk")
+
+
+class PerChunkVectorEnqueueTests(TestCase):
+    @patch("nodepoint.services.vector._vector_queue")
+    def test_enqueue_vectors_for_chunk(self, mock_get_queue):
+        from nodepoint.services.vector import enqueue_vectors_for_chunk
+
+        mock_queue = MagicMock()
+        mock_get_queue.return_value = mock_queue
+        chunk_id = uuid.uuid4()
+        entity_id = uuid.uuid4()
+        relation_id = uuid.uuid4()
+
+        count = enqueue_vectors_for_chunk(
+            chunk_id,
+            entity_ids=[entity_id],
+            relation_ids=[relation_id],
+        )
+        self.assertEqual(count, 3)
+        self.assertEqual(mock_queue.enqueue.call_count, 3)
+
+    @patch("nodepoint.services.vector.enqueue_vectors_for_chunk")
+    @patch("nodepoint.services.chunk_process.ingest_knowledge_graph_for_chunk")
+    @patch("nodepoint.services.chunk_process.get_chunk_text", return_value="chunk body")
+    @patch("nodepoint.services.chunk_process.extract_knowledge_graph")
+    @patch("nodepoint.services.chunk_process.Agent")
+    def test_process_chunk_enqueues_vectors_per_chunk(
+        self,
+        mock_agent_cls,
+        mock_extract,
+        mock_get_text,
+        mock_ingest,
+        mock_enqueue_vectors,
+    ):
+        from nodepoint.services.chunk_process import process_chunk
+
+        mock_agent = MagicMock()
+        mock_agent_cls.return_value = mock_agent
+        entity = Entity(name="Alice", type="PER", attributes={})
+        mock_extract.return_value = ([entity], [])
+        entity_id = uuid.uuid4()
+        mock_ingest.return_value = (True, [entity_id], [])
+        workspace = Workspace.objects.create(name="vec-ws")
+        document = Document.objects.create(
+            workspace=workspace,
+            file_name="v.md",
+            file=SimpleUploadedFile("v.md", b"x"),
+            status=Status.QUEUED,
+            content=True,
+        )
+        chunk = DocumentChunk.objects.create(
+            document=document,
+            index=0,
+            status=Status.QUEUED,
+        )
+
+        process_chunk(chunk.id)
+
+        mock_enqueue_vectors.assert_called_once_with(chunk.id, [entity_id], [])
+        chunk.refresh_from_db()
+        self.assertEqual(chunk.status, Status.COMPLETED)
 
 
 class AgentParserModelTests(TestCase):
@@ -562,6 +1055,126 @@ class LegacyDerivePhaseTests(TestCase):
             content=True,
         )
         self.assertEqual(phase, "needs_prepare")
+
+
+class QueueStatusServiceTests(TestCase):
+    def test_parse_args_summary_workspace_batch(self):
+        from nodepoint.services.queue_status import _parse_args_summary
+
+        summary = _parse_args_summary(
+            "nodepoint.services.preprocess_pipeline.run_chunk_preprocess_batch",
+            ("my-ws",),
+            {"document_ids": [uuid.uuid4()]},
+        )
+        self.assertEqual(summary["workspace"], "my-ws")
+        self.assertIn("document_ids", summary)
+
+    def test_parse_args_summary_prepare_document(self):
+        from nodepoint.services.queue_status import _parse_args_summary
+
+        doc_id = uuid.uuid4()
+        summary = _parse_args_summary(
+            "nodepoint.services.preprocess_pipeline.run_prepare_document",
+            (doc_id,),
+            {},
+        )
+        self.assertEqual(summary["document_id"], str(doc_id))
+
+    @patch("nodepoint.services.queue_status.build_active_pipelines")
+    @patch("nodepoint.services.queue_status.build_rq_snapshot")
+    @patch("nodepoint.services.queue_status._scan_pipeline_locks")
+    def test_build_queue_status_structure(self, mock_locks, mock_rq, mock_active):
+        from nodepoint.services.queue_status import build_queue_status
+
+        mock_locks.return_value = [
+            {"workspace": "ws-a", "key": "nodepoint:preprocess:pipeline:ws-a", "ttl_seconds": 3600}
+        ]
+        mock_rq.return_value = {"queues": {}, "workers": []}
+        mock_active.return_value = []
+
+        data = build_queue_status()
+        self.assertIn("generated_at", data)
+        self.assertIsNone(data["workspace_filter"])
+        self.assertEqual(data["redis"]["pipeline_locks"][0]["workspace"], "ws-a")
+        self.assertIn("database", data)
+        self.assertIn("active_pipelines", data)
+
+    def test_database_backlog_counts(self):
+        from nodepoint.services.queue_status import build_database_backlog
+
+        ws = Workspace.objects.create(name="queue-ws")
+        doc = Document.objects.create(
+            workspace=ws, file_name="q.md", status=Status.INPROGRESS
+        )
+        DocumentChunk.objects.create(
+            document=doc, index=0, status=Status.QUEUED, vector=Status.PENDING
+        )
+        KnowledgeEntity.objects.create(
+            document=doc, name="E", entity_type="PER", vector=Status.PENDING
+        )
+
+        backlog = build_database_backlog(workspace="queue-ws")
+        self.assertEqual(backlog["documents"]["INPROGRESS"], 1)
+        self.assertEqual(backlog["chunks"]["QUEUED"], 1)
+        self.assertEqual(backlog["vectors"]["entities"]["pending"], 1)
+
+
+class QueueStatusAPITests(TestCase):
+    def setUp(self):
+        from rest_framework.test import APIClient
+
+        self.client = APIClient()
+
+    @patch("nodepoint.views.preprocess.build_queue_status")
+    def test_queue_status_endpoint(self, mock_build):
+        mock_build.return_value = {
+            "generated_at": "2026-05-29T00:00:00+00:00",
+            "workspace_filter": None,
+            "rq": {"queues": {}, "workers": []},
+            "redis": {"pipeline_locks": []},
+            "database": {},
+            "active_pipelines": [],
+        }
+        resp = self.client.get("/api/preprocess/queue-status/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["generated_at"], "2026-05-29T00:00:00+00:00")
+        mock_build.assert_called_once_with(workspace=None)
+
+    @patch("nodepoint.views.preprocess.build_queue_status")
+    def test_queue_status_workspace_query(self, mock_build):
+        mock_build.return_value = {"workspace_filter": "filtered-ws"}
+        resp = self.client.get("/api/preprocess/queue-status/?workspace=filtered-ws")
+        self.assertEqual(resp.status_code, 200)
+        mock_build.assert_called_once_with(workspace="filtered-ws")
+
+    @patch("nodepoint.services.queue_status.Worker")
+    @patch("nodepoint.services.queue_status.django_rq.get_queue")
+    @patch("nodepoint.services.queue_status.get_connection")
+    def test_rq_snapshot_mocked(self, mock_conn, mock_get_queue, mock_worker_cls):
+        from nodepoint.services.queue_status import build_rq_snapshot
+
+        mock_connection = MagicMock()
+        mock_conn.return_value = mock_connection
+
+        mock_queue = MagicMock()
+        mock_queue.count = 2
+        mock_queue.get_jobs.return_value = []
+        mock_get_queue.return_value = mock_queue
+
+        with patch("nodepoint.services.queue_status.StartedJobRegistry") as mock_started, patch(
+            "nodepoint.services.queue_status.FailedJobRegistry"
+        ) as mock_failed, patch(
+            "nodepoint.services.queue_status.DeferredJobRegistry"
+        ) as mock_deferred:
+            for reg in (mock_started, mock_failed, mock_deferred):
+                reg.return_value.count = 0
+                reg.return_value.get_job_ids.return_value = []
+
+            mock_worker_cls.all.return_value = []
+
+            snapshot = build_rq_snapshot()
+            self.assertIn("orchestrator", snapshot["queues"])
+            self.assertEqual(snapshot["queues"]["orchestrator"]["counts"]["queued"], 2)
 
 
 import asyncio
@@ -895,9 +1508,70 @@ class KnowledgeGraphAPITests(TestCase):
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
         self.assertEqual(data["group"], "pair")
+        self.assertEqual(data["tag"], "workspace")
         workspaces = [g["workspace"] for g in data["graphs"]]
         self.assertIn("api-kg-ws", workspaces)
         self.assertIn("api-kg-ws-2", workspaces)
+
+    def test_get_by_files_group(self):
+        from nodepoint.services import workspace_group as group_svc
+
+        group_svc.create_group("kg-files", tag="files")
+        group_svc.add_document_to_group("kg-files", self.doc)
+        resp = self.client.get(
+            "/api/knowledge-graph/", {"group": "kg-files", "depth": "0"}
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["tag"], "files")
+        self.assertEqual(len(data["graphs"]), 1)
+        graph = data["graphs"][0]
+        self.assertEqual(graph["workspace"], "api-kg-ws")
+        self.assertIn("filters", graph)
+        names = {n["name"] for n in graph["nodes"]}
+        self.assertEqual(names, {"Alice", "Acme"})
+        self.assertNotIn("Carol", names)
+
+    def test_get_by_entity_group(self):
+        from nodepoint.models import KnowledgeEntity
+        from nodepoint.services import workspace_group as group_svc
+
+        alice = KnowledgeEntity.objects.get(name="Alice", document=self.doc)
+        group_svc.create_group("kg-entity", tag="entity")
+        group_svc.add_entity_to_group("kg-entity", alice)
+        resp = self.client.get(
+            "/api/knowledge-graph/", {"group": "kg-entity", "depth": "0"}
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["tag"], "entity")
+        graph = data["graphs"][0]
+        names = {n["name"] for n in graph["nodes"]}
+        self.assertEqual(names, {"Alice"})
+
+    def test_get_by_relation_group(self):
+        from nodepoint.models import KnowledgeRelation
+        from nodepoint.services import workspace_group as group_svc
+
+        rel = KnowledgeRelation.objects.get(
+            source__name="Alice", target__name="Acme", document=self.doc
+        )
+        group_svc.create_group("kg-relation", tag="relation")
+        group_svc.add_relation_to_group("kg-relation", rel)
+        resp = self.client.get(
+            "/api/knowledge-graph/", {"group": "kg-relation", "depth": "0"}
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["tag"], "relation")
+        graph = data["graphs"][0]
+        names = {n["name"] for n in graph["nodes"]}
+        self.assertEqual(names, {"Alice", "Acme"})
+        self.assertEqual(len(graph["edges"]), 1)
+
+    def test_get_by_unknown_group_404(self):
+        resp = self.client.get("/api/knowledge-graph/", {"group": "missing-group"})
+        self.assertEqual(resp.status_code, 404)
 
     def test_get_by_group_name(self):
         from nodepoint.services import workspace_group as group_svc
@@ -1006,13 +1680,32 @@ class KnowledgeGraphEntityTypesAPITests(TestCase):
     def test_entity_types_by_group(self):
         from nodepoint.services import workspace_group as group_svc
 
-        group_svc.add_workspace_to_group("flagged", self.ws)
+        group_svc.create_group("types-group")
+        group_svc.add_workspace_to_group("types-group", self.ws)
         resp = self.client.get(
-            "/api/knowledge-graph/entity-types/", {"group": "flagged"}
+            "/api/knowledge-graph/entity-types/", {"group": "types-group"}
         )
         self.assertEqual(resp.status_code, 200)
-        names = [w["workspace"] for w in resp.json()["workspaces"]]
+        data = resp.json()
+        self.assertEqual(data["tag"], "workspace")
+        names = [w["workspace"] for w in data["workspaces"]]
         self.assertIn("types-ws", names)
+
+    def test_entity_types_by_files_group(self):
+        from nodepoint.services import workspace_group as group_svc
+
+        group_svc.create_group("types-files", tag="files")
+        group_svc.add_document_to_group("types-files", self.doc)
+        resp = self.client.get(
+            "/api/knowledge-graph/entity-types/", {"group": "types-files"}
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["tag"], "files")
+        ws_row = data["workspaces"][0]
+        types = {row["type"]: row["count"] for row in ws_row["entity_types"]}
+        self.assertEqual(types["PER"], 2)
+        self.assertEqual(types["ORG"], 1)
 
     def test_entity_types_missing_scope_400(self):
         resp = self.client.get("/api/knowledge-graph/entity-types/")
@@ -1138,14 +1831,38 @@ class KnowledgeEntitySearchAPITests(TestCase):
     def test_group_scope(self):
         from nodepoint.services import workspace_group as group_svc
 
-        group_svc.add_workspace_to_group("flagged", self.ws)
+        group_svc.create_group("search-ws-group")
+        group_svc.add_workspace_to_group("search-ws-group", self.ws)
         resp = self.client.get(
             "/api/knowledge/entities/search/",
-            {"q": "Alice", "group": "flagged"},
+            {"q": "Alice", "group": "search-ws-group"},
         )
         self.assertEqual(resp.status_code, 200)
-        names = [w["workspace"] for w in resp.json()["workspaces"]]
+        data = resp.json()
+        self.assertEqual(data["tag"], "workspace")
+        names = [w["workspace"] for w in data["workspaces"]]
         self.assertIn("entity-search-ws", names)
+
+    def test_files_group_entity_search(self):
+        from nodepoint.services import workspace_group as group_svc
+
+        group_svc.create_group("search-files", tag="files")
+        group_svc.add_document_to_group("search-files", self.doc)
+        resp = self.client.get(
+            "/api/knowledge/entities/search/",
+            {"q": "Alice", "group": "search-files", "threshold": "0.9"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["tag"], "files")
+        self.assertEqual(len(data["workspaces"]), 1)
+        matches = data["workspaces"][0]["matches"]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["name"], "Alice")
+        self.assertNotIn(
+            "Acme Corp",
+            {m["name"] for m in matches},
+        )
 
 
 class KgEntitySearchServiceTests(TestCase):
@@ -1458,14 +2175,137 @@ class WorkspaceGroupAPITests(TestCase):
     def test_create_and_list_groups(self):
         resp = self.client.post(
             "/api/group/create/",
-            {"name": "research"},
+            {
+                "name": "research",
+                "tag": "entity",
+                "description": "Research workspace collection",
+            },
             format="json",
         )
         self.assertEqual(resp.status_code, 201)
-        resp = self.client.get("/api/group/list/")
+        self.assertEqual(resp.json()["group"]["tag"], "entity")
+        self.assertEqual(
+            resp.json()["group"]["description"], "Research workspace collection"
+        )
+        resp = self.client.get("/api/group/list/", {"tag": "entity"})
         self.assertEqual(resp.status_code, 200)
-        names = [g["name"] for g in resp.json()["groups"]]
+        body = resp.json()
+        self.assertIn("pagination", body)
+        groups = body["groups"]
+        names = [g["name"] for g in groups]
         self.assertIn("research", names)
+        research = next(g for g in groups if g["name"] == "research")
+        self.assertEqual(research["tag"], "entity")
+        self.assertEqual(research["description"], "Research workspace collection")
+
+    def test_list_groups_pagination(self):
+        from nodepoint.services import workspace_group as group_svc
+
+        for i in range(5):
+            group_svc.create_group(f"pag-group-{i}", tag="relation")
+        resp = self.client.get(
+            "/api/group/list/",
+            {"page": "1", "page_size": "2", "tag": "relation"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(len(body["groups"]), 2)
+        self.assertEqual(body["pagination"]["total_items"], 5)
+        self.assertTrue(body["pagination"]["has_next"])
+
+    def test_group_members_pagination_workspace_tag(self):
+        from nodepoint.services import workspace_group as group_svc
+
+        group_svc.create_group("pag-ws-group")
+        for i in range(5):
+            ws = Workspace.objects.create(name=f"pag-ws-{i}")
+            group_svc.add_workspace_to_group("pag-ws-group", ws)
+        resp = self.client.get(
+            "/api/group/pag-ws-group/members/",
+            {"page": "1", "page_size": "2"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["tag"], "workspace")
+        self.assertEqual(body["member_count"], 5)
+        self.assertEqual(len(body["members"]), 2)
+        self.assertEqual(body["pagination"]["total_pages"], 3)
+        page2 = self.client.get(
+            "/api/group/pag-ws-group/members/",
+            {"page": "2", "page_size": "2"},
+        )
+        self.assertEqual(len(page2.json()["members"]), 2)
+
+    def test_group_members_pagination_files_tag(self):
+        from nodepoint.models import Document
+        from nodepoint.services import workspace_group as group_svc
+
+        ws = Workspace.objects.create(name="pag-files-ws")
+        group_svc.create_group("pag-files-group", tag="files")
+        for i in range(3):
+            doc = Document.objects.create(
+                workspace=ws,
+                file_name=f"file-{i}.md",
+                file=SimpleUploadedFile(f"file-{i}.md", b"content"),
+            )
+            group_svc.add_document_to_group("pag-files-group", doc)
+        resp = self.client.get(
+            "/api/group/pag-files-group/members/",
+            {"page": "1", "page_size": "2"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["tag"], "files")
+        self.assertEqual(body["member_count"], 3)
+        self.assertEqual(len(body["members"]), 2)
+        self.assertTrue(body["members"][0]["document_id"])
+
+    def test_group_members_pagination_entity_tag(self):
+        from nodepoint.models import Document, KnowledgeEntity
+        from nodepoint.services import workspace_group as group_svc
+
+        ws = Workspace.objects.create(name="pag-entity-ws")
+        doc = Document.objects.create(
+            workspace=ws,
+            file_name="entities.md",
+            file=SimpleUploadedFile("entities.md", b"content"),
+        )
+        group_svc.create_group("pag-entity-group", tag="entity")
+        for i in range(3):
+            entity = KnowledgeEntity.objects.create(
+                document=doc,
+                name=f"Entity-{i}",
+                entity_type="PER",
+            )
+            group_svc.add_entity_to_group("pag-entity-group", entity)
+        resp = self.client.get(
+            "/api/group/pag-entity-group/members/",
+            {"page": "2", "page_size": "2"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["tag"], "entity")
+        self.assertEqual(body["member_count"], 3)
+        self.assertEqual(len(body["members"]), 1)
+        self.assertIn("entity_id", body["members"][0])
+
+    def test_create_group_without_tag_defaults_workspace(self):
+        resp = self.client.post(
+            "/api/group/create/",
+            {"name": "untagged"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.json()["group"]["tag"], "workspace")
+        self.assertIsNone(resp.json()["group"]["description"])
+
+    def test_create_group_invalid_tag(self):
+        resp = self.client.post(
+            "/api/group/create/",
+            {"name": "bad-tag", "tag": "papers"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
 
     def test_add_remove_workspace_and_detail(self):
         from nodepoint.services import workspace_group as group_svc
@@ -1481,14 +2321,16 @@ class WorkspaceGroupAPITests(TestCase):
         detail = self.client.get("/api/group/team-a/")
         self.assertEqual(detail.status_code, 200)
         body = detail.json()
-        self.assertEqual(body["workspace_count"], 1)
-        self.assertEqual(body["workspaces"][0]["name"], "member-ws")
+        self.assertEqual(body["member_count"], 1)
+        self.assertEqual(body["tag"], "workspace")
+        self.assertIn("description", body)
+        self.assertEqual(body["members"][0]["name"], "member-ws")
         self.assertIn("pagination", body)
 
         rm_resp = self.client.delete("/api/group/team-a/workspaces/member-ws/")
         self.assertEqual(rm_resp.status_code, 200)
         detail2 = self.client.get("/api/group/team-a/")
-        self.assertEqual(detail2.json()["workspace_count"], 0)
+        self.assertEqual(detail2.json()["member_count"], 0)
 
     def test_delete_group(self):
         from nodepoint.services import workspace_group as group_svc
@@ -1504,6 +2346,97 @@ class WorkspaceGroupAPITests(TestCase):
         resp = self.client.get("/api/chat/group/chat-group/")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["group"], "chat-group")
+
+    def test_update_group_metadata(self):
+        self.client.post(
+            "/api/group/create/",
+            {"name": "old-group", "tag": "workspace", "description": "Old desc"},
+            format="json",
+        )
+        resp = self.client.patch(
+            "/api/group/old-group/",
+            {"description": "New desc"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["group"]["name"], "old-group")
+        self.assertEqual(body["group"]["tag"], "workspace")
+        self.assertEqual(body["group"]["description"], "New desc")
+        self.assertNotIn("previous_name", body)
+
+    def test_update_group_tag_rejected(self):
+        self.client.post(
+            "/api/group/create/",
+            {"name": "fixed-tag", "tag": "workspace"},
+            format="json",
+        )
+        resp = self.client.patch(
+            "/api/group/fixed-tag/",
+            {"tag": "entity"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_update_group_rename(self):
+        from nodepoint.models import Workspace
+
+        self.client.post("/api/group/create/", {"name": "rename-me"}, format="json")
+        self.client.get("/api/chat/group/rename-me/")
+        resp = self.client.patch(
+            "/api/group/rename-me/",
+            {"name": "renamed-group"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["group"]["name"], "renamed-group")
+        self.assertEqual(body["previous_name"], "rename-me")
+        self.assertFalse(
+            Workspace.objects.filter(name="__group_chat__rename-me").exists()
+        )
+        self.assertTrue(
+            Workspace.objects.filter(name="__group_chat__renamed-group").exists()
+        )
+        detail = self.client.get("/api/group/renamed-group/")
+        self.assertEqual(detail.status_code, 200)
+
+    def test_update_group_empty_body_400(self):
+        self.client.post("/api/group/create/", {"name": "no-op"}, format="json")
+        resp = self.client.patch("/api/group/no-op/", {}, format="json")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_files_group_membership(self):
+        from nodepoint.models import Document
+
+        ws = Workspace.objects.create(name="file-group-ws")
+        doc = Document.objects.create(
+            workspace=ws,
+            file_name="note.md",
+            file=SimpleUploadedFile("note.md", b"content"),
+        )
+        self.client.post(
+            "/api/group/create/",
+            {"name": "file-group", "tag": "files"},
+            format="json",
+        )
+        add = self.client.post(
+            "/api/group/file-group/files/",
+            {"document_id": str(doc.id)},
+            format="json",
+        )
+        self.assertEqual(add.status_code, 200)
+        wrong = self.client.post(
+            "/api/group/file-group/workspaces/",
+            {"workspace_name": "file-group-ws"},
+            format="json",
+        )
+        self.assertEqual(wrong.status_code, 400)
+        detail = self.client.get("/api/group/file-group/")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["tag"], "files")
+        self.assertEqual(detail.json()["member_count"], 1)
+        self.assertEqual(detail.json()["members"][0]["file_name"], "note.md")
 
 
 class UploadDefaultWorkspaceTests(TestCase):
@@ -1538,7 +2471,11 @@ class UploadDefaultWorkspaceTests(TestCase):
 class WorkspaceCatalogAPITests(TestCase):
     def setUp(self):
         self.client = APIClient()
-        self.ws_a = Workspace.objects.create(name="cat-ws-a")
+        self.ws_a = Workspace.objects.create(
+            name="cat-ws-a",
+            tag="alpha",
+            description="Workspace A",
+        )
         self.ws_b = Workspace.objects.create(name="cat-ws-b")
         doc = Document.objects.create(
             workspace=self.ws_a,
@@ -1583,6 +2520,8 @@ class WorkspaceCatalogAPITests(TestCase):
         names = [w["name"] for w in data["workspaces"]]
         self.assertIn("cat-ws-a", names)
         row = next(w for w in data["workspaces"] if w["name"] == "cat-ws-a")
+        self.assertEqual(row["tag"], "alpha")
+        self.assertEqual(row["description"], "Workspace A")
         self.assertEqual(row["counts"]["files"], 1)
         self.assertEqual(row["counts"]["entities"], 2)
         self.assertEqual(row["counts"]["relations"], 1)
@@ -1618,6 +2557,83 @@ class WorkspaceCatalogAPITests(TestCase):
         self.assertIn("pagination", data)
         self.assertIn("workspaces", data)
         self.assertFalse(data["include_counts"])
+        row = next(w for w in data["workspaces"] if w["name"] == "cat-ws-a")
+        self.assertEqual(row["tag"], "alpha")
+        self.assertEqual(row["description"], "Workspace A")
+
+
+class WorkspaceAPITests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+    def test_create_workspace_with_tag_and_description(self):
+        resp = self.client.post(
+            "/api/workspace/create/",
+            {
+                "name": "tagged-ws",
+                "tag": "notes",
+                "description": "Personal notes workspace",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()["workspace"]
+        self.assertEqual(body["name"], "tagged-ws")
+        self.assertEqual(body["tag"], "notes")
+        self.assertEqual(body["description"], "Personal notes workspace")
+
+    def test_create_workspace_without_optional_fields(self):
+        resp = self.client.post(
+            "/api/workspace/create/",
+            {"name": "plain-ws"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()["workspace"]
+        self.assertIsNone(body["tag"])
+        self.assertIsNone(body["description"])
+
+    def test_update_workspace_metadata(self):
+        self.client.post(
+            "/api/workspace/create/",
+            {"name": "edit-ws", "tag": "old"},
+            format="json",
+        )
+        resp = self.client.patch(
+            "/api/workspace/update/edit-ws/",
+            {"tag": "new-tag", "description": "Updated"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["workspace"]["name"], "edit-ws")
+        self.assertEqual(body["workspace"]["tag"], "new-tag")
+        self.assertEqual(body["workspace"]["description"], "Updated")
+
+    def test_update_workspace_rename(self):
+        self.client.post(
+            "/api/workspace/create/",
+            {"name": "before-rename"},
+            format="json",
+        )
+        resp = self.client.patch(
+            "/api/workspace/update/before-rename/",
+            {"name": "after-rename"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["workspace"]["name"], "after-rename")
+        self.assertEqual(body["previous_name"], "before-rename")
+        from nodepoint.models import Workspace
+
+        self.assertFalse(Workspace.objects.filter(name="before-rename").exists())
+        self.assertTrue(Workspace.objects.filter(name="after-rename").exists())
+
+    def test_update_workspace_empty_body_400(self):
+        self.client.post("/api/workspace/create/", {"name": "noop-ws"}, format="json")
+        resp = self.client.patch("/api/workspace/update/noop-ws/", {}, format="json")
+        self.assertEqual(resp.status_code, 400)
 
 
 class KnowledgeToolGroupScopeTests(TestCase):
@@ -1813,62 +2829,138 @@ class ChatCompressionTests(TestCase):
         self.assertIn("summary capped", capped)
 
 
-class ChatStreamFormatTests(TestCase):
-    def test_multi_round_keeps_distinct_thinking_segments(self):
-        from nodepoint.services.chat_stream_format import ChatStreamFormatter
+class ChatTurnRedisTests(TestCase):
+    def test_try_set_active_turn_nx(self):
+        from nodepoint.services import chat_turn_redis
 
-        fmt = ChatStreamFormatter()
-        frames: list[dict] = []
+        conv_id = uuid.uuid4()
+        turn_a = uuid.uuid4()
+        turn_b = uuid.uuid4()
+        started = datetime.now(timezone.utc)
 
-        def feed(payload: dict) -> None:
-            frames.extend(fmt.format(payload))
+        with patch("nodepoint.services.chat_turn_redis.get_connection") as mock_conn:
+            conn = MagicMock()
+            mock_conn.return_value = conn
+            conn.set.side_effect = [True, False]
+            conn.get.return_value = None
 
-        feed({"type": "agent_turn_start", "turn_index": 0})
-        feed({"type": "thinking_token", "token": "a"})
-        feed(
-            {
-                "type": "assistant_tool_calls_message",
-                "tool_calls": [{"function": {"name": "Knowledge.search_graph"}}],
-                "content": "searching",
-            }
+            self.assertTrue(
+                chat_turn_redis.try_set_active_turn(conv_id, turn_a, started)
+            )
+            self.assertFalse(
+                chat_turn_redis.try_set_active_turn(conv_id, turn_b, started)
+            )
+
+    def test_clear_active_turn_matches_turn_id(self):
+        from nodepoint.services import chat_turn_redis
+
+        conv_id = uuid.uuid4()
+        turn_id = uuid.uuid4()
+        other = uuid.uuid4()
+        started = datetime.now(timezone.utc)
+        payload = chat_turn_redis._serialize_record(
+            turn_id=turn_id,
+            started_at=started,
+            owner_worker_id="host:1",
         )
-        feed({"type": "tool_result", "tool_name": "Knowledge.search_graph", "tool_call_id": "c1", "ok": True})
-        feed({"type": "agent_turn_start", "turn_index": 1})
-        feed({"type": "thinking_token", "token": "b"})
-        feed({"type": "assistant_response_token", "token": "Answer"})
-        frames.extend(fmt.close_sections())
 
-        thinking_opens = [
-            f["segment_index"]
-            for f in frames
-            if f.get("type") == "section"
-            and f.get("section") == "thinking"
-            and f.get("action") == "open"
-        ]
-        self.assertEqual(len(thinking_opens), 2)
-        self.assertNotEqual(thinking_opens[0], thinking_opens[1])
+        with patch("nodepoint.services.chat_turn_redis.get_connection") as mock_conn:
+            conn = MagicMock()
+            mock_conn.return_value = conn
+            conn.get.return_value = payload
 
-        response_closes = [
-            f
-            for f in frames
-            if f.get("type") == "section"
-            and f.get("section") == "response"
-            and f.get("action") == "close"
-        ]
-        self.assertTrue(any(c.get("is_intermediate") is True for c in response_closes))
-        self.assertTrue(any(c.get("is_intermediate") is False for c in response_closes))
+            self.assertFalse(chat_turn_redis.clear_active_turn(conv_id, other))
+            conn.delete.assert_not_called()
 
-        meta = fmt.turn_metadata()
-        self.assertEqual(meta["latest_response_segment_index"], response_closes[-1]["segment_index"])
+            self.assertTrue(chat_turn_redis.clear_active_turn(conv_id, turn_id))
+            conn.delete.assert_called_once()
 
-    def test_tokens_carry_segment_index(self):
-        from nodepoint.services.chat_stream_format import ChatStreamFormatter
 
-        fmt = ChatStreamFormatter()
-        frames = fmt.format({"type": "thinking_token", "token": "x"})
-        token_frames = [f for f in frames if f.get("type") == "thinking_token"]
-        self.assertEqual(len(token_frames), 1)
-        self.assertIn("segment_index", token_frames[0])
+class ChatTurnRegistryRedisTests(TestCase):
+    def test_get_status_reads_redis_not_local_memory(self):
+        from asgiref.sync import async_to_sync
+        from nodepoint.services import chat_turn_registry, chat_turn_redis
+
+        conv_id = uuid.uuid4()
+        turn_id = uuid.uuid4()
+        started = datetime.now(timezone.utc)
+        record = chat_turn_redis.ActiveTurnRecord(
+            turn_id=turn_id,
+            started_at=started,
+            worker_id="worker-a",
+        )
+
+        with patch(
+            "nodepoint.services.chat_turn_registry.chat_turn_redis.get_active_turn",
+            return_value=record,
+        ):
+            status = async_to_sync(chat_turn_registry.get_status)(conv_id)
+            self.assertTrue(status.active)
+            self.assertEqual(status.turn_id, turn_id)
+
+    def test_register_raises_when_redis_nx_fails(self):
+        from asgiref.sync import async_to_sync
+        from nodepoint.services import chat_turn_registry
+        from nodepoint.services.chat_turn_registry import TurnAlreadyActive
+
+        conv_id = uuid.uuid4()
+        turn_id = uuid.uuid4()
+
+        async def run():
+            task = asyncio.create_task(asyncio.sleep(10))
+            try:
+                with patch(
+                    "nodepoint.services.chat_turn_registry.chat_turn_redis.try_set_active_turn",
+                    return_value=False,
+                ):
+                    with self.assertRaises(TurnAlreadyActive):
+                        await chat_turn_registry.register(conv_id, task, turn_id)
+            finally:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        async_to_sync(run)()
+
+    def test_cancel_turn_publishes_when_no_local_task(self):
+        from asgiref.sync import async_to_sync
+        from nodepoint.services import chat_turn_registry, chat_turn_redis
+
+        conv_id = uuid.uuid4()
+        record = chat_turn_redis.ActiveTurnRecord(
+            turn_id=uuid.uuid4(),
+            started_at=datetime.now(timezone.utc),
+            worker_id="worker-b",
+        )
+
+        with patch(
+            "nodepoint.services.chat_turn_registry.chat_turn_redis.get_active_turn",
+            return_value=record,
+        ), patch(
+            "nodepoint.services.chat_turn_registry.chat_turn_redis.publish_cancel"
+        ) as mock_publish:
+            ok = async_to_sync(chat_turn_registry.cancel_turn)(conv_id)
+            self.assertTrue(ok)
+            mock_publish.assert_called_once_with(conv_id)
+
+
+class ChatTurnCancelListenerTests(TestCase):
+    def test_should_start_for_uvicorn_not_for_test(self):
+        from nodepoint.services.chat_turn_cancel_listener import (
+            should_start_chat_cancel_listener,
+        )
+
+        self.assertFalse(
+            should_start_chat_cancel_listener(["manage.py", "test", "nodepoint.tests"])
+        )
+        self.assertTrue(
+            should_start_chat_cancel_listener(["uvicorn", "config.asgi:application"])
+        )
+        self.assertFalse(
+            should_start_chat_cancel_listener(["manage.py", "migrate"])
+        )
 
 
 class WebSocketStreamReconnectTests(TransactionTestCase):
@@ -1908,6 +3000,7 @@ class WebSocketStreamReconnectTests(TransactionTestCase):
                 self.assertTrue(connected)
                 ready1 = await comm1.receive_json_from(timeout=2)
                 self.assertEqual(ready1["type"], "chat.ready")
+                self.assertFalse(ready1["agent_busy"])
 
                 await comm1.send_json_to(
                     {"type": "chat.send", "content": "hello"}
@@ -1924,7 +3017,7 @@ class WebSocketStreamReconnectTests(TransactionTestCase):
                 self.assertTrue(connected2)
                 ready2 = await comm2.receive_json_from(timeout=2)
                 self.assertEqual(ready2["type"], "chat.ready")
-                self.assertTrue(ready2.get("agent_busy"))
+                self.assertIs(ready2["agent_busy"], True)
 
                 saw_live = False
                 saw_done = False
@@ -1962,7 +3055,7 @@ class WebSocketStreamReconnectTests(TransactionTestCase):
             await comm.send_json_to({"type": "chat.reconnect"})
             reply = await comm.receive_json_from(timeout=2)
             self.assertEqual(reply["type"], "chat.reconnected")
-            self.assertFalse(reply.get("agent_busy"))
+            self.assertIs(reply["agent_busy"], False)
             await comm.disconnect()
 
         async_to_sync(run)()

@@ -2,6 +2,7 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from nodepoint.enums import GroupTag
 from nodepoint.services import workspace_catalog
 from nodepoint.services.workspace_group import GroupNotFoundError, get_group_by_name
 
@@ -26,7 +27,17 @@ class WorkspacePageAPIView(APIView):
                 request.query_params.get("group")
             )
             if group_name:
-                get_group_by_name(group_name)
+                group = get_group_by_name(group_name)
+                if group.tag != GroupTag.WORKSPACE:
+                    return Response(
+                        {
+                            "error": (
+                                f"workspace/page group filter requires a workspace-tagged "
+                                f"group; '{group_name}' is tag '{group.tag}'"
+                            )
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
             page, page_size = workspace_catalog.parse_pagination(
                 request.query_params.get("page"),
                 request.query_params.get("page_size"),

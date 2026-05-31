@@ -14,14 +14,7 @@ class ChatSummaryAPIView(APIView):
             return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
 
         if scope.is_group_scope:
-            return Response(
-                {
-                    "group": scope.group_name,
-                    "workspaces": chat_storage.list_chat_summary_for_group(
-                        scope.group_name
-                    ),
-                }
-            )
+            return Response(chat_storage.list_chat_summary_for_group(scope.group_name))
 
         try:
             workspace = Workspace.objects.get(name=scope.workspace_name)

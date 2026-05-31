@@ -101,16 +101,24 @@ def extract_relations(doc: str, entities: list[str], agent: Agent) -> list:
     return []
 
 
-def extract_knowledge_graph(doc: str) -> Schema.KnowledgeGraph:
-    agent = Agent()
-    entity_types = set(get_entity_types().keys())
-    md_entity_table = entity_types_as_md_table(get_entity_types())
-    entities = extract_entities(doc, entity_types, md_entity_table, agent)
-    if len(entities) > 1:
-        relations = extract_relations(doc, [entity.name for entity in entities], agent)
-    else:
-        relations = []
-    return entities, relations
+def extract_knowledge_graph(doc: str, agent: Agent | None = None) -> Schema.KnowledgeGraph:
+    owned_agent = agent is None
+    if agent is None:
+        agent = Agent()
+    try:
+        entity_types = set(get_entity_types().keys())
+        md_entity_table = entity_types_as_md_table(get_entity_types())
+        entities = extract_entities(doc, entity_types, md_entity_table, agent)
+        if len(entities) > 1:
+            relations = extract_relations(
+                doc, [entity.name for entity in entities], agent
+            )
+        else:
+            relations = []
+        return entities, relations
+    finally:
+        if owned_agent:
+            agent.session.close()
 
 
 def ingest_knowledge_graph_for_chunk(
