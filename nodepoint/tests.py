@@ -421,9 +421,16 @@ class PreprocessRecoveryTests(TestCase):
         mock_run.assert_not_called()
 
     @patch("nodepoint.services.preprocess_recovery.maybe_run_startup_recovery")
-    def test_apps_ready_runs_recovery_for_orchestrator_worker(self, mock_recovery):
+    @patch("nodepoint.apps.threading.Thread")
+    def test_apps_ready_runs_recovery_for_orchestrator_worker(
+        self, mock_thread, mock_recovery
+    ):
         from django.apps import apps
 
+        def run_target_immediately(*, target, **kwargs):
+            return type("_ImmediateThread", (), {"start": lambda self: target()})()
+
+        mock_thread.side_effect = run_target_immediately
         config = apps.get_app_config("nodepoint")
         with patch.object(sys, "argv", ["manage.py", "rqworker", "high", "orchestrator", "low"]):
             config.ready()
@@ -2466,6 +2473,65 @@ class UploadDefaultWorkspaceTests(TestCase):
             format="multipart",
         )
         self.assertEqual(resp.status_code, 400)
+
+    @patch("nodepoint.views.document.enqueue_preprocess_pipeline")
+    def test_upload_duplicate_replaces_existing(self, mock_pipeline):
+        Workspace.objects.create(name="dup-ws")
+        mock_pipeline.return_value = {"message": "ok", "steps": [], "jobs": {}}
+
+        first = self.client.post(
+            "/api/document/upload/",
+            {
+                "workspace_name": "dup-ws",
+                "file": SimpleUploadedFile("scan.txt", b"original"),
+            },
+            format="multipart",
+        )
+        self.assertEqual(first.status_code, 200)
+        self.assertFalse(first.json()["replaced"])
+        doc_id = first.json()["id"]
+
+        second = self.client.post(
+            "/api/document/upload/",
+            {
+                "workspace_name": "dup-ws",
+                "file": SimpleUploadedFile("scan.txt", b"updated"),
+            },
+            format="multipart",
+        )
+        self.assertEqual(second.status_code, 200)
+        self.assertTrue(second.json()["replaced"])
+        self.assertEqual(second.json()["id"], doc_id)
+        self.assertEqual(second.json()["status"], Status.PENDING)
+        self.assertEqual(mock_pipeline.call_count, 2)
+
+        doc = Document.objects.get(id=doc_id)
+        self.assertEqual(doc.file.read(), b"updated")
+        self.assertFalse(doc.content)
+
+    @patch("nodepoint.views.document.enqueue_preprocess_pipeline")
+    def test_upload_duplicate_does_not_500(self, mock_pipeline):
+        Workspace.objects.create(name="dup-ws-2")
+        mock_pipeline.return_value = {"message": "ok", "steps": [], "jobs": {}}
+
+        for content in (b"v1", b"v2"):
+            resp = self.client.post(
+                "/api/document/upload/",
+                {
+                    "workspace_name": "dup-ws-2",
+                    "file": SimpleUploadedFile("same.txt", content),
+                },
+                format="multipart",
+            )
+            self.assertEqual(resp.status_code, 200)
+
+        self.assertEqual(
+            Document.objects.filter(
+                workspace__name="dup-ws-2",
+                file_name="same.txt",
+            ).count(),
+            1,
+        )
 
 
 class WorkspaceCatalogAPITests(TestCase):

@@ -1,11 +1,13 @@
 import os
 
 from django.conf import settings
+from django.db import IntegrityError, transaction
 from rest_framework import status
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from nodepoint.enums import Status
 from nodepoint.models import Workspace, Document
 from nodepoint.services.preprocess_pipeline import enqueue_preprocess_pipeline
 from nodepoint.services.workspace import require_default_upload_workspace
@@ -54,11 +56,39 @@ class UploadDocumentAPIView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        document = Document.objects.create(
-            workspace=workspace,
-            file_name=uploaded_file.name,
-            file=uploaded_file,
-        )
+        replaced = False
+        try:
+            with transaction.atomic():
+                document = (
+                    Document.objects.select_for_update()
+                    .filter(
+                        workspace=workspace,
+                        file_name=uploaded_file.name,
+                    )
+                    .first()
+                )
+                if document is None:
+                    document = Document.objects.create(
+                        workspace=workspace,
+                        file_name=uploaded_file.name,
+                        file=uploaded_file,
+                    )
+                else:
+                    document.file.save(uploaded_file.name, uploaded_file, save=False)
+                    document.status = Status.PENDING
+                    document.content = False
+                    document.save(update_fields=["file", "status", "content"])
+                    replaced = True
+        except IntegrityError:
+            document = Document.objects.get(
+                workspace=workspace,
+                file_name=uploaded_file.name,
+            )
+            document.file.save(uploaded_file.name, uploaded_file, save=False)
+            document.status = Status.PENDING
+            document.content = False
+            document.save(update_fields=["file", "status", "content"])
+            replaced = True
 
         pipeline = enqueue_preprocess_pipeline(
             uploaded_document_id=document.id,
@@ -68,6 +98,7 @@ class UploadDocumentAPIView(APIView):
         return Response(
             {
                 "message": "File uploaded successfully",
+                "replaced": replaced,
                 "pipeline": pipeline,
                 "id": str(document.id),
                 "file_name": document.file_name,

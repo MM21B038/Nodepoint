@@ -639,14 +639,21 @@ Upload triggers a **4-step global preprocess pipeline** (see [Preprocess](#prepr
   "file_name": "notes.md",
   "file_path": "/path/to/media/workspaces/PRAJNA/notes.md",
   "file_url": "/media/workspaces/PRAJNA/notes.md",
-  "status": "PENDING"
+  "status": "PENDING",
+  "replaced": false
 }
 ```
+
+| Field | Meaning |
+|-------|---------|
+| `replaced` | `false` on first upload; `true` when an existing document with the same `file_name` in the workspace was overwritten and re-queued for preprocessing |
 
 | Status | Condition |
 |--------|-----------|
 | `400` | Missing file, bad extension, or no group member workspace when `workspace_name` omitted |
 | `404` | Workspace not found |
+
+Duplicate filename in the same workspace returns **`200`** (replace file, reset status, re-queue pipeline) — not `500`.
 
 ---
 
