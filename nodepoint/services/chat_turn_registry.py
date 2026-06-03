@@ -6,12 +6,20 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from django.conf import settings
+
 from nodepoint.services import chat_turn_redis
 
 logger = logging.getLogger(__name__)
 
 _lock = asyncio.Lock()
 _turns: dict[uuid.UUID, TurnState] = {}
+
+CANCEL_WAIT_POLL_INTERVAL = 0.05
+
+
+def _cancel_wait_timeout() -> float:
+    return float(getattr(settings, "CHAT_CANCEL_WAIT_TIMEOUT", 10.0))
 
 
 class TurnAlreadyActive(Exception):
@@ -31,6 +39,16 @@ class TurnStatus:
     active: bool
     turn_id: uuid.UUID | None = None
     started_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class CancelResult:
+    cancelled: bool
+    turn_inactive: bool = False
+
+    @property
+    def flushed(self) -> bool:
+        return self.cancelled and self.turn_inactive
 
 
 async def register(
@@ -113,10 +131,24 @@ async def cancel_local_turn(conversation_id: uuid.UUID) -> bool:
     return True
 
 
-async def cancel_turn(conversation_id: uuid.UUID) -> bool:
+async def _wait_turn_inactive(conversation_id: uuid.UUID) -> bool:
+    deadline = asyncio.get_running_loop().time() + _cancel_wait_timeout()
+    while asyncio.get_running_loop().time() < deadline:
+        if not await is_turn_active(conversation_id):
+            return True
+        await asyncio.sleep(CANCEL_WAIT_POLL_INTERVAL)
+    logger.warning(
+        "chat_turn_registry: cancel wait timed out for conversation %s",
+        conversation_id,
+    )
+    return False
+
+
+async def cancel_turn(conversation_id: uuid.UUID) -> CancelResult:
     if await cancel_local_turn(conversation_id):
-        return True
+        return CancelResult(cancelled=True, turn_inactive=True)
     if not await is_turn_active(conversation_id):
-        return False
+        return CancelResult(cancelled=False, turn_inactive=True)
     await asyncio.to_thread(chat_turn_redis.publish_cancel, conversation_id)
-    return True
+    turn_inactive = await _wait_turn_inactive(conversation_id)
+    return CancelResult(cancelled=True, turn_inactive=turn_inactive)

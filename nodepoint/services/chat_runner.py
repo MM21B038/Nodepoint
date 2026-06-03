@@ -4,6 +4,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from django.conf import settings
@@ -26,6 +27,22 @@ from nodepoint.services import chat_storage_async as storage_async
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class SavedSegment:
+    message_id: str
+    content: str
+    reasoning_content: str | None
+
+    def as_saved_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "message_id": self.message_id,
+            "content": self.content,
+        }
+        if self.reasoning_content:
+            payload["reasoning_content"] = self.reasoning_content
+        return payload
+
+
 async def run_agent_stream(
     thread: Thread,
     agent: Agent,
@@ -37,6 +54,7 @@ async def run_agent_stream(
     tools: list[dict[str, Any]] | None = None,
     exclude_servers: set[str] | None = None,
     on_event: Callable[[dict[str, Any]], Awaitable[None]],
+    interrupt_state: dict[str, Any] | None = None,
 ) -> tuple[Thread, uuid.UUID | None]:
     """
     Stream agent events to ``on_event`` (JSON-serializable dicts).
@@ -68,34 +86,42 @@ async def run_agent_stream(
         payload["type"] = payload.get("type", ev.__class__.__name__)
         await on_event(payload)
 
-    async def flush_streaming_segment(*, interrupted: bool = False) -> bool:
-        """Persist in-progress assistant text (e.g. disconnect or cancel mid-stream)."""
+    async def flush_streaming_segment(*, interrupted: bool = False) -> SavedSegment | None:
+        """Persist in-progress assistant text (e.g. cancel mid-stream)."""
         nonlocal segment_saved
         if segment_saved:
-            return False
+            return None
         text = "".join(response_buf)
         reasoning = "".join(thinking_buf) or None
         if not text and not reasoning:
-            return False
+            return None
         thread.addAssistant(text)
-        await storage_async.append_message_visible(
+        msg = await storage_async.append_message_visible(
             conversation_id,
             effective_branch_id,
             role=ChatMessageRole.ASSISTANT,
             content=text,
             reasoning_content=reasoning,
         )
+        saved = SavedSegment(
+            message_id=str(msg.id),
+            content=text,
+            reasoning_content=reasoning,
+        )
         segment_saved = True
         thinking_buf.clear()
         response_buf.clear()
+        if interrupt_state is not None:
+            interrupt_state["saved"] = saved.as_saved_dict()
         if interrupted:
             await on_event(
                 {
                     "type": "chat.interrupted",
-                    "message": "Response saved; reconnect or refresh history to continue.",
+                    "message": "Response saved; merge saved content or refresh history.",
+                    "saved": saved.as_saved_dict(),
                 }
             )
-        return True
+        return saved
 
     async def maybe_compress() -> None:
         nonlocal thread, new_branch_id, effective_branch_id, segment_saved

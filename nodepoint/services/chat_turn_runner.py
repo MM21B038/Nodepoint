@@ -15,8 +15,8 @@ from nodepoint.services.chat_turn_registry import TurnAlreadyActive
 logger = logging.getLogger(__name__)
 
 RECONNECT_HINT = (
-    "Refresh chat history via REST for content received while offline; "
-    "live stream continues from reconnect."
+    "After chat.cancelled or chat.interrupted, merge saved from the frame or refresh "
+    "REST once. While offline, live stream continues from reconnect."
 )
 
 
@@ -90,6 +90,7 @@ async def _run_turn(
 ) -> None:
     agent = Agent()
     formatter = chat_stream_format.ChatStreamFormatter()
+    interrupt_state: dict[str, Any] = {}
 
     async def on_event(payload: dict[str, Any]) -> None:
         await publish_frames(conversation_id, formatter.format(payload))
@@ -105,6 +106,7 @@ async def _run_turn(
             tools=tools,
             exclude_servers=exclude_servers,
             on_event=on_event,
+            interrupt_state=interrupt_state,
         )
         await publish_frames(conversation_id, formatter.close_sections())
         done_frame: dict[str, Any] = {"type": "chat.done", "turn_id": str(turn_id)}
@@ -113,10 +115,14 @@ async def _run_turn(
         await publish_frame(conversation_id, done_frame)
     except asyncio.CancelledError:
         await publish_frames(conversation_id, formatter.close_sections())
-        await publish_frame(
-            conversation_id,
-            {"type": "chat.cancelled", "turn_id": str(turn_id)},
-        )
+        cancelled_frame: dict[str, Any] = {
+            "type": "chat.cancelled",
+            "turn_id": str(turn_id),
+        }
+        saved = interrupt_state.get("saved")
+        if saved:
+            cancelled_frame["saved"] = saved
+        await publish_frame(conversation_id, cancelled_frame)
         raise
     except Exception as exc:
         logger.exception(

@@ -210,11 +210,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
         if self.conversation_id is None:
             await self._safe_send_json({"type": "chat.cancelled"})
             return
-        cancelled = await chat_turn_registry.cancel_turn(self.conversation_id)
-        self._streaming = False
-        if cancelled:
-            await self._safe_send_json({"type": "chat.cancelled"})
-        else:
+        result = await chat_turn_registry.cancel_turn(self.conversation_id)
+        if not result.cancelled:
+            self._streaming = False
             await self._safe_send_json(
                 {
                     "type": "chat.cancelled",

@@ -53,25 +53,36 @@ Backend-only streaming chat over Django Channels. Requires **ASGI** (`uvicorn co
 - `chat.compressed` — internal context compression succeeded (new branch)
 - `chat.compress_failed` — compression failed; turn continues on same branch (non-fatal)
 - `chat.done` — turn finished (`turn_id`, optional `active_branch_id`)
-- `chat.interrupted` — partial assistant text was saved (disconnect/cancel mid-stream)
-- `chat.cancelled` — turn stopped by `chat.cancel`
+- `chat.interrupted` — partial assistant text was saved (cancel or error mid-stream). Includes optional **`saved`** object: `{ "message_id", "content", "reasoning_content"? }`
+- `chat.cancelled` — turn stopped by `chat.cancel` (channel fan-out). Includes optional **`saved`** with the same shape when partial text was persisted. If no turn was active, sent directly with `{ "message": "..." }`.
+
+### Stop streaming (`chat.cancel`)
+
+To stop generation and **save partial text received so far**, send `{ "type": "chat.cancel" }` (do not rely on closing the WebSocket alone).
+
+Event order on successful cancel:
+
+1. `chat.interrupted` with `saved` (partial assistant message persisted to Postgres)
+2. `chat.cancelled` with the same `saved` block and `turn_id`
+
+Merge `saved.content` into the UI immediately; optionally call REST once to reconcile `message_id` / ordering.
 
 ### Disconnect and reconnect (live stream)
 
 If the WebSocket drops **during** a turn:
 
-- The agent **keeps running** (not cancelled).
-- Events are broadcast on the conversation channel group (`chat_{conversation_id}`), so **any** reconnect to the same workspace/group chat receives **live** tokens from that point on.
-- Partial assistant text is still **flushed to Postgres** on cancel/disconnect mid-stream.
+- The agent **keeps running** (not cancelled). Partial text is **not** saved until the turn completes, errors, or you send `chat.cancel`.
+- Events are broadcast on the conversation channel group (`chat_{conversation_id}`), so **any** reconnect to the same workspace/group chat receives **live** tokens from that point on (no token replay).
 
 After reconnect:
 
 1. Open WebSocket again (or send `{ "type": "chat.reconnect" }` on an existing socket).
 2. On `chat.ready` with `agent_busy: true`, you are already subscribed — live events flow immediately.
-3. **Once**, call `GET /api/chat/<workspace>/` or `GET /api/chat/group/<name>/` to fill text that arrived while you were offline (no token replay).
-4. Send `chat.send` only when `agent_busy` is false.
+3. **Once**, call `GET /api/chat/<workspace>/` or `GET /api/chat/group/<name>/` to fill persisted messages that arrived while you were offline.
+4. After `chat.cancelled` or `chat.interrupted`, use the `saved` payload first; REST refresh is the fallback.
+5. Send `chat.send` only when `agent_busy` is false.
 
-**Multi-worker:** Active turn metadata is stored in **Redis** (`nodepoint:chat:turn:{conversation_id}`), so `agent_busy` is consistent across uvicorn workers (`WEB_WORKERS>1`). `chat.cancel` reaches the owning worker via Redis pub/sub.
+**Multi-worker:** Active turn metadata is stored in **Redis** (`nodepoint:chat:turn:{conversation_id}`), so `agent_busy` is consistent across uvicorn workers (`WEB_WORKERS>1`). `chat.cancel` reaches the owning worker via Redis pub/sub and waits until the turn is inactive before the cancel request completes on the requesting worker.
 
 Use `ping` / `pong` for keepalive on long tool or LLM runs (`AGENT_REQUEST_TIMEOUT` defaults to 300s).
 
@@ -109,6 +120,7 @@ If a group has no members, the tool returns a message that the group is empty.
 - `CHAT_MAX_CONCURRENT_SEARCHES` — default `8`
 - `WEB_WORKERS` — uvicorn worker processes (default `4`; safe with Redis turn registry)
 - `CHAT_TURN_REDIS_TTL` — seconds to retain active-turn metadata if a worker crashes (default `3600`)
+- `CHAT_CANCEL_WAIT_TIMEOUT` — seconds to wait for remote turn cancel to finish (default `10`)
 - `DB_CONN_MAX_AGE` — Postgres connection reuse per worker (default `60`)
 - `AGENT_REQUEST_TIMEOUT` — LLM HTTP read timeout seconds (default `300`)
 - `BASE_URL`, `API_KEY` — required for `Agent`

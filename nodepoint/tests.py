@@ -2687,6 +2687,48 @@ class ChatRunnerPersistenceTests(TestCase):
 
     @patch("nodepoint.services.chat_runner.chat_compression.compress_async", new_callable=AsyncMock)
     @patch.object(chat_runner.Agent, "stream_agent_events_async")
+    def test_flush_partial_reasoning_on_cancel(self, mock_stream, mock_compress):
+        from asgiref.sync import async_to_sync
+        from nodepoint.agent.schema import ThinkingTokenEvent
+        from nodepoint.services.chat_runner import run_agent_stream
+
+        async def stream_then_cancel(*args, **kwargs):
+            yield ThinkingTokenEvent(token="Chain of thought")
+            raise asyncio.CancelledError()
+
+        mock_stream.side_effect = stream_then_cancel
+        mock_compress.return_value = "summary"
+
+        workspace = Workspace.objects.create(name="partial-reasoning-ws")
+        conversation, root = chat_storage.create_conversation(workspace)
+        thread, _, _ = chat_storage.load_thread(root.id)
+        interrupt_state: dict = {}
+
+        with patch.dict(
+            "os.environ",
+            {"BASE_URL": "http://test", "API_KEY": "test-key"},
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                async_to_sync(run_agent_stream)(
+                    thread,
+                    chat_runner.Agent(),
+                    root.id,
+                    conversation.id,
+                    tools=[],
+                    on_event=AsyncMock(),
+                    interrupt_state=interrupt_state,
+                )
+
+        messages = chat_storage.load_branch_messages(root.id)
+        assistant = [m for m in messages if m.role == "assistant"]
+        self.assertEqual(len(assistant), 1)
+        self.assertEqual(assistant[0].content, "")
+        self.assertEqual(assistant[0].reasoning_content, "Chain of thought")
+        self.assertIn("saved", interrupt_state)
+        self.assertEqual(interrupt_state["saved"]["reasoning_content"], "Chain of thought")
+
+    @patch("nodepoint.services.chat_runner.chat_compression.compress_async", new_callable=AsyncMock)
+    @patch.object(chat_runner.Agent, "stream_agent_events_async")
     def test_turn_completes_normally_without_duplicate_assistant(self, mock_stream, mock_compress):
         from asgiref.sync import async_to_sync
         from nodepoint.agent.schema import (
@@ -2934,15 +2976,20 @@ class ChatTurnRegistryRedisTests(TestCase):
             started_at=datetime.now(timezone.utc),
             worker_id="worker-b",
         )
+        active_checks = iter([record, record, None])
 
         with patch(
             "nodepoint.services.chat_turn_registry.chat_turn_redis.get_active_turn",
-            return_value=record,
+            side_effect=lambda _cid: next(active_checks, None),
         ), patch(
             "nodepoint.services.chat_turn_registry.chat_turn_redis.publish_cancel"
-        ) as mock_publish:
-            ok = async_to_sync(chat_turn_registry.cancel_turn)(conv_id)
-            self.assertTrue(ok)
+        ) as mock_publish, patch(
+            "nodepoint.services.chat_turn_registry.CANCEL_WAIT_POLL_INTERVAL",
+            0.001,
+        ):
+            result = async_to_sync(chat_turn_registry.cancel_turn)(conv_id)
+            self.assertTrue(result.cancelled)
+            self.assertTrue(result.turn_inactive)
             mock_publish.assert_called_once_with(conv_id)
 
 
@@ -2961,6 +3008,101 @@ class ChatTurnCancelListenerTests(TestCase):
         self.assertFalse(
             should_start_chat_cancel_listener(["manage.py", "migrate"])
         )
+
+
+class WebSocketCancelPartialSaveTests(TransactionTestCase):
+    @patch("nodepoint.services.chat_runner.chat_compression.compress_async", new_callable=AsyncMock)
+    @patch.object(chat_runner.Agent, "stream_agent_events_async")
+    def test_chat_cancel_saves_partial_and_emits_saved_payload(
+        self, mock_stream, mock_compress
+    ):
+        from asgiref.sync import async_to_sync
+        from channels.testing import WebsocketCommunicator
+        from config.asgi import application
+        from nodepoint.agent.schema import AssistantResponseTokenEvent
+        from rest_framework.test import APIClient
+
+        mock_compress.return_value = "summary"
+        blocked = asyncio.Event()
+
+        async def stream_until_cancel(*args, **kwargs):
+            yield AssistantResponseTokenEvent(token="Partial ")
+            yield AssistantResponseTokenEvent(token="answer")
+            await blocked.wait()
+
+        mock_stream.side_effect = stream_until_cancel
+
+        Workspace.objects.create(name="ws-cancel-partial")
+
+        async def run():
+            with patch.dict(
+                "os.environ",
+                {"BASE_URL": "http://test", "API_KEY": "test-key"},
+            ), patch(
+                "nodepoint.services.chat_turn_registry.chat_turn_redis.try_set_active_turn",
+                return_value=True,
+            ), patch(
+                "nodepoint.services.chat_turn_registry.chat_turn_redis.get_active_turn",
+                return_value=None,
+            ), patch(
+                "nodepoint.services.chat_turn_registry.chat_turn_redis.clear_active_turn",
+                return_value=True,
+            ):
+                comm = WebsocketCommunicator(
+                    application, "/ws/chat/ws-cancel-partial/"
+                )
+                connected, _ = await comm.connect()
+                self.assertTrue(connected)
+                await comm.receive_json_from(timeout=2)
+
+                await comm.send_json_to({"type": "chat.send", "content": "hello"})
+                started = await comm.receive_json_from(timeout=2)
+                self.assertEqual(started["type"], "chat.turn_started")
+
+                saw_token = False
+                for _ in range(20):
+                    msg = await asyncio.wait_for(
+                        comm.receive_json_from(), timeout=2
+                    )
+                    if msg.get("type") == "assistant_response_token":
+                        saw_token = True
+                    if saw_token and msg.get("token") == "answer":
+                        break
+
+                await comm.send_json_to({"type": "chat.cancel"})
+
+                saw_interrupted = False
+                saw_cancelled = False
+                saved_payload = None
+                for _ in range(30):
+                    msg = await asyncio.wait_for(
+                        comm.receive_json_from(), timeout=2
+                    )
+                    if msg.get("type") == "chat.interrupted":
+                        saw_interrupted = True
+                        self.assertIn("saved", msg)
+                        self.assertEqual(msg["saved"]["content"], "Partial answer")
+                    if msg.get("type") == "chat.cancelled":
+                        saw_cancelled = True
+                        saved_payload = msg.get("saved")
+                        break
+
+                await comm.disconnect()
+                self.assertTrue(saw_interrupted)
+                self.assertTrue(saw_cancelled)
+                self.assertIsNotNone(saved_payload)
+                self.assertEqual(saved_payload["content"], "Partial answer")
+
+        async_to_sync(run)()
+
+        client = APIClient()
+        response = client.get("/api/chat/ws-cancel-partial/")
+        self.assertEqual(response.status_code, 200)
+        assistant_msgs = [
+            m for m in response.json()["messages"] if m["role"] == "assistant"
+        ]
+        self.assertEqual(len(assistant_msgs), 1)
+        self.assertEqual(assistant_msgs[0]["content"], "Partial answer")
 
 
 class WebSocketStreamReconnectTests(TransactionTestCase):
