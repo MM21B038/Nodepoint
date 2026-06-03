@@ -1314,6 +1314,52 @@ class QueueStatusServiceTests(TestCase):
         self.assertIn("database", data)
         self.assertIn("active_pipelines", data)
 
+    def test_workspaces_incomplete_includes_active_pipeline_when_db_ready(self):
+        from nodepoint.services.queue_status import _build_workspaces_incomplete_list
+
+        ws = Workspace.objects.create(name="running-ws")
+        doc = Document.objects.create(
+            workspace=ws,
+            file_name="done.md",
+            status=Status.COMPLETED,
+            content=True,
+        )
+        DocumentChunk.objects.create(
+            document=doc,
+            index=0,
+            status=Status.COMPLETED,
+            vector=Status.COMPLETED,
+        )
+        active = [
+            {
+                "workspace": "running-ws",
+                "lock_held": True,
+                "lock_ttl_seconds": 3600,
+                "orchestrator_jobs": [{"id": "job-1"}],
+            }
+        ]
+        rows = _build_workspaces_incomplete_list(active_pipelines=active)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["workspace"], "running-ws")
+        self.assertEqual(rows[0]["phase"], "running")
+        self.assertTrue(rows[0]["pipeline_active"])
+        self.assertTrue(rows[0]["lock_held"])
+        self.assertEqual(rows[0]["orchestrator_jobs"], 1)
+
+    def test_workspaces_incomplete_lists_all_not_ready_workspaces(self):
+        from nodepoint.services.queue_status import _build_workspaces_incomplete_list
+
+        for name in ("ws-aaa", "ws-bbb", "ws-ccc"):
+            ws = Workspace.objects.create(name=name)
+            Document.objects.create(
+                workspace=ws,
+                file_name=f"{name}.md",
+                status=Status.INPROGRESS,
+            )
+        rows = _build_workspaces_incomplete_list(active_pipelines=[])
+        names = {r["workspace"] for r in rows}
+        self.assertEqual(names, {"ws-aaa", "ws-bbb", "ws-ccc"})
+
     def test_database_backlog_counts(self):
         from nodepoint.services.queue_status import build_database_backlog
 

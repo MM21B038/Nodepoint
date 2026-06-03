@@ -853,7 +853,11 @@ Use this to debug idle workers, stuck `nodepoint:preprocess:pipeline:{workspace}
         "workspace": "PRAJNA",
         "phase": "embedding",
         "documents_total": 6,
-        "documents_failed": 0
+        "documents_failed": 0,
+        "chunks_orphaned": 0,
+        "pipeline_active": true,
+        "lock_held": true,
+        "orchestrator_jobs": 2
       }
     ]
   },
@@ -880,8 +884,8 @@ Use this to debug idle workers, stuck `nodepoint:preprocess:pipeline:{workspace}
 | `database.documents` / `chunks` | Row counts by `status` (global or filtered workspace) |
 | `database.chunks_orphaned` | Chunks in `QUEUED` or `INPROGRESS` while the **chunk** RQ queue has no `queued` or `started` jobs (stale after restart; `worker-orchestrator` startup recovery resets and re-enqueues these) |
 | `database.vectors.*` | Rows with vector status `PENDING` or `FAILED` only (embedding backlog) |
-| `database.workspaces_incomplete` | Omitted when `?workspace=` is set; otherwise workspaces where per-workspace preprocess is not `ready` |
-| `active_pipelines` | Workspaces with a pipeline lock and/or matching orchestrator queue jobs |
+| `database.workspaces_incomplete` | Omitted when `?workspace=` is set; otherwise workspaces where preprocess is not `ready` **or** an orchestrator pipeline is active (`pipeline_active`, `lock_held`, `orchestrator_jobs`) |
+| `active_pipelines` | Same running pipelines in detail (lock TTL, job list); also folded into `workspaces_incomplete` for the overview table |
 
 Monitored queues: `orchestrator`, `chunk`, `vector`, `default` (from `RQ_QUEUES`).
 

@@ -35,7 +35,8 @@ PIPELINE_LOCK_SCAN_PREFIX = "nodepoint:preprocess:pipeline:*"
 MONITORED_QUEUES = ("high", "orchestrator", "low", "chunk", "vector", "default")
 MAX_JOBS_LISTED = 40
 MAX_FAILED_SAMPLE = 15
-MAX_INCOMPLETE_WORKSPACES = 100
+# Cap only for optional truncation metadata; scan uses all workspaces with documents.
+MAX_INCOMPLETE_WORKSPACES = 500
 ERROR_TRUNCATE = 500
 
 _WORKSPACE_FIRST_ARG_FUNCS = frozenset(
@@ -370,7 +371,93 @@ def _orphaned_chunk_count(*, workspace: str | None = None) -> int:
     )
 
 
-def build_database_backlog(*, workspace: str | None = None) -> dict[str, Any]:
+def _workspace_not_ready_row(
+    ws: Workspace,
+    *,
+    pipeline_active: bool = False,
+    lock_held: bool = False,
+    orchestrator_jobs: int = 0,
+    phase_override: str | None = None,
+) -> dict[str, Any]:
+    status = build_workspace_preprocess_status(ws)
+    overall = status["overall"]
+    phase = phase_override or overall["phase"]
+    return {
+        "workspace": ws.name,
+        "phase": phase,
+        "documents_total": overall["documents_total"],
+        "documents_failed": overall["documents_failed"],
+        "chunks_orphaned": _orphaned_chunk_count(workspace=ws.name),
+        "pipeline_active": pipeline_active,
+        "lock_held": lock_held,
+        "orchestrator_jobs": orchestrator_jobs,
+    }
+
+
+def _build_workspaces_incomplete_list(
+    *,
+    active_pipelines: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Workspaces that are not preprocess-ready in Postgres and/or have an active
+    orchestrator pipeline (lock or queued/started jobs).
+
+    Merges DB backlog with active_pipelines so the global overview lists
+    workspaces that are running but may already show per-file ready in the DB.
+    """
+    active_pipelines = active_pipelines or []
+    by_name: dict[str, dict[str, Any]] = {}
+
+    for ws in Workspace.objects.order_by("name"):
+        status = build_workspace_preprocess_status(ws)
+        overall = status["overall"]
+        if overall["documents_total"] == 0:
+            continue
+        if overall.get("ready"):
+            continue
+        by_name[ws.name] = _workspace_not_ready_row(ws)
+
+    for entry in active_pipelines:
+        ws_name = entry["workspace"]
+        job_count = len(entry.get("orchestrator_jobs") or [])
+        lock_held = bool(entry.get("lock_held"))
+        if ws_name in by_name:
+            row = by_name[ws_name]
+            row["pipeline_active"] = True
+            row["lock_held"] = lock_held
+            row["orchestrator_jobs"] = job_count
+            continue
+        try:
+            ws = Workspace.objects.get(name=ws_name)
+        except Workspace.DoesNotExist:
+            continue
+        status = build_workspace_preprocess_status(ws)
+        overall = status["overall"]
+        phase = overall["phase"] if not overall.get("ready") else "running"
+        by_name[ws_name] = _workspace_not_ready_row(
+            ws,
+            pipeline_active=True,
+            lock_held=lock_held,
+            orchestrator_jobs=job_count,
+            phase_override=phase,
+        )
+
+    rows = sorted(by_name.values(), key=lambda r: r["workspace"])
+    if len(rows) > MAX_INCOMPLETE_WORKSPACES:
+        logger.warning(
+            "queue_status: %s incomplete workspace(s); list truncated to %s",
+            len(rows),
+            MAX_INCOMPLETE_WORKSPACES,
+        )
+        return rows[:MAX_INCOMPLETE_WORKSPACES]
+    return rows
+
+
+def build_database_backlog(
+    *,
+    workspace: str | None = None,
+    active_pipelines: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     pending_failed = [Status.PENDING, Status.FAILED]
     result: dict[str, Any] = {
         "documents": _status_counts(_document_qs(workspace)),
@@ -392,25 +479,9 @@ def build_database_backlog(*, workspace: str | None = None) -> dict[str, Any]:
     if workspace:
         return result
 
-    incomplete: list[dict[str, Any]] = []
-    for ws in Workspace.objects.order_by("name")[:MAX_INCOMPLETE_WORKSPACES]:
-        status = build_workspace_preprocess_status(ws)
-        overall = status["overall"]
-        if overall["documents_total"] == 0:
-            continue
-        if overall.get("ready"):
-            continue
-        ws_backlog = build_database_backlog(workspace=ws.name)
-        incomplete.append(
-            {
-                "workspace": ws.name,
-                "phase": overall["phase"],
-                "documents_total": overall["documents_total"],
-                "documents_failed": overall["documents_failed"],
-                "chunks_orphaned": ws_backlog["chunks_orphaned"],
-            }
-        )
-    result["workspaces_incomplete"] = incomplete
+    result["workspaces_incomplete"] = _build_workspaces_incomplete_list(
+        active_pipelines=active_pipelines,
+    )
     return result
 
 
@@ -492,11 +563,15 @@ def build_queue_status(*, workspace: str | None = None) -> dict[str, Any]:
     if ws:
         locks = [lock for lock in locks if lock["workspace"] == ws]
 
+    active = build_active_pipelines(locks, workspace=ws)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "workspace_filter": ws,
         "rq": build_rq_snapshot(workspace=ws),
         "redis": {"pipeline_locks": locks},
-        "database": build_database_backlog(workspace=ws),
-        "active_pipelines": build_active_pipelines(locks, workspace=ws),
+        "database": build_database_backlog(
+            workspace=ws,
+            active_pipelines=active if not ws else None,
+        ),
+        "active_pipelines": active,
     }
