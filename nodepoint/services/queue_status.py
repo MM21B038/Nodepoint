@@ -301,6 +301,31 @@ def _relation_qs(workspace: str | None):
     return qs
 
 
+def _chunk_queue_busy(connection) -> bool:
+    """
+    True when chunk work is actively running.
+
+    Stale StartedJobRegistry entries after a worker crash can outlive the worker;
+    only queued jobs and live busy chunk workers count as real backlog.
+    """
+    chunk_queue = getattr(settings, "RQ_QUEUE_CHUNK", "chunk")
+    counts = _queue_counts(chunk_queue, connection)
+    if counts["queued"] > 0:
+        return True
+    try:
+        for worker in Worker.all(connection=connection):
+            if chunk_queue not in worker.queue_names():
+                continue
+            if worker.get_state() == "busy" and worker.get_current_job_id():
+                return True
+    except Exception:
+        logger.warning(
+            "queue_status: could not inspect chunk workers; treating queue as idle",
+            exc_info=True,
+        )
+    return False
+
+
 def _orphaned_chunk_count(*, workspace: str | None = None) -> int:
     """
     Chunks marked QUEUED/INPROGRESS in Postgres while the chunk RQ queue is idle.
@@ -308,10 +333,8 @@ def _orphaned_chunk_count(*, workspace: str | None = None) -> int:
     Indicates work lost after a worker/Redis restart; run recover_preprocess or
     restart worker-orchestrator with PREPROCESS_RECOVERY_ON_STARTUP enabled.
     """
-    chunk_queue = getattr(settings, "RQ_QUEUE_CHUNK", "chunk")
     connection = get_connection()
-    counts = _queue_counts(chunk_queue, connection)
-    if counts["queued"] + counts["started"] > 0:
+    if _chunk_queue_busy(connection):
         return 0
     return _chunk_qs(workspace).filter(
         status__in=[Status.QUEUED, Status.INPROGRESS],

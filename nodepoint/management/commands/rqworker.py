@@ -18,6 +18,12 @@ class Command(RQWorkerCommand):
     """RQ worker with orchestrator startup preprocess recovery."""
 
     def handle(self, *args, **options):
+        import logging
+
+        logger = logging.getLogger(__name__)
         if should_run_startup_recovery(args):
+            logger.info("rqworker: running startup preprocess recovery (queues=%s)", args)
             maybe_run_startup_recovery()
+        else:
+            logger.info("rqworker: skipping startup preprocess recovery (queues=%s)", args)
         super().handle(*args, **options)

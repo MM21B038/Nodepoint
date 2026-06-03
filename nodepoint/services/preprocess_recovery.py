@@ -34,30 +34,44 @@ def _recovery_enabled() -> bool:
     return str(raw).strip().lower() not in ("0", "false", "no", "off")
 
 
-def reset_orphaned_chunk_statuses() -> dict[str, int]:
+def reset_orphaned_chunk_statuses(*, workspace: str | None = None) -> dict[str, int]:
     """Move QUEUED/INPROGRESS chunks back to PENDING after RQ job loss."""
-    in_progress_reset = DocumentChunk.objects.filter(status=Status.INPROGRESS).update(
-        status=Status.PENDING
-    )
-    queued_reset = DocumentChunk.objects.filter(status=Status.QUEUED).update(
-        status=Status.PENDING
-    )
+    in_progress_qs = DocumentChunk.objects.filter(status=Status.INPROGRESS)
+    queued_qs = DocumentChunk.objects.filter(status=Status.QUEUED)
+    if workspace:
+        in_progress_qs = in_progress_qs.filter(document__workspace__name=workspace)
+        queued_qs = queued_qs.filter(document__workspace__name=workspace)
+    in_progress_reset = in_progress_qs.update(status=Status.PENDING)
+    queued_reset = queued_qs.update(status=Status.PENDING)
     return {
         "in_progress_reset": in_progress_reset,
         "queued_reset": queued_reset,
     }
 
 
-def _rollup_stale_document_statuses() -> int:
+def _rollup_stale_document_statuses(*, workspace: str | None = None) -> int:
     """Reconcile document rows left INPROGRESS/QUEUED after chunk status reset."""
-    doc_ids = list(
-        Document.objects.filter(
-            status__in=[Status.INPROGRESS, Status.QUEUED],
-        ).values_list("id", flat=True)
-    )
+    doc_qs = Document.objects.filter(status__in=[Status.INPROGRESS, Status.QUEUED])
+    if workspace:
+        doc_qs = doc_qs.filter(workspace__name=workspace)
+    doc_ids = list(doc_qs.values_list("id", flat=True))
     for doc_id in doc_ids:
         rollup_document_status(doc_id)
     return len(doc_ids)
+
+
+def recover_orphaned_chunks(*, workspace: str | None = None) -> dict[str, int]:
+    """Reset orphaned chunk rows for a workspace (or globally) when the chunk queue is idle."""
+    if not has_orphaned_preprocess_work(workspace=workspace):
+        return {
+            "in_progress_reset": 0,
+            "queued_reset": 0,
+            "documents_rolled_up": 0,
+        }
+    stats = reset_orphaned_chunk_statuses(workspace=workspace)
+    stats["documents_rolled_up"] = _rollup_stale_document_statuses(workspace=workspace)
+    logger.info("recover_orphaned_chunks: %s (workspace=%s)", stats, workspace)
+    return stats
 
 
 def run_preprocess_recovery() -> dict[str, Any]:
@@ -92,12 +106,20 @@ def maybe_run_startup_recovery(*, force: bool = False) -> dict[str, Any] | None:
 
     conn = get_connection()
     orphaned = has_orphaned_preprocess_work()
+    inflight_db = DocumentChunk.objects.filter(
+        status__in=[Status.QUEUED, Status.INPROGRESS],
+    ).count()
 
-    if force or orphaned:
+    if force or orphaned or inflight_db > 0:
         conn.delete(RECOVERY_LOCK_KEY)
         conn.set(RECOVERY_LOCK_KEY, "1", ex=_RECOVERY_LOCK_TTL)
-        if orphaned:
-            logger.info("maybe_run_startup_recovery: orphaned chunk work detected")
+        if orphaned or inflight_db > 0:
+            logger.info(
+                "maybe_run_startup_recovery: recovering stale preprocess work "
+                "(orphaned=%s, inflight_db=%s)",
+                orphaned,
+                inflight_db,
+            )
     elif not conn.set(RECOVERY_LOCK_KEY, "1", nx=True, ex=_RECOVERY_LOCK_TTL):
         logger.info("maybe_run_startup_recovery: skipped (recovery lock held)")
         return None

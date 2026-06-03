@@ -122,6 +122,49 @@ def is_legacy_document(chunks: dict[str, int], content: bool) -> bool:
     return chunks.get("total", 0) == 0 and bool(content)
 
 
+def _vector_work_counts(
+    entities: dict[str, int],
+    relations: dict[str, int],
+    chunk_vectors: dict[str, int],
+) -> tuple[int, int]:
+    pending = (
+        entities.get("pending", 0)
+        + relations.get("pending", 0)
+        + chunk_vectors.get("pending", 0)
+    )
+    failed = (
+        entities.get("failed", 0)
+        + relations.get("failed", 0)
+        + chunk_vectors.get("failed", 0)
+    )
+    return pending, failed
+
+
+def file_has_preprocess_failure(
+    document_status: str,
+    phase: str,
+    chunks: dict[str, int],
+    entities: dict[str, int],
+    relations: dict[str, int],
+    chunk_vectors: dict[str, int],
+) -> bool:
+    """True when a file has a terminal preprocess failure (for Failed docs counts)."""
+    if phase == "failed":
+        return True
+    if document_status in (Status.INVALID, Status.TERMINATED):
+        return True
+    if document_status == Status.FAILED and phase not in (
+        "processing",
+        "queued",
+        "needs_prepare",
+    ):
+        return True
+    if chunks.get("failed", 0) > 0:
+        return True
+    _pending, vector_failed = _vector_work_counts(entities, relations, chunk_vectors)
+    return vector_failed > 0 and _pending == 0
+
+
 def derive_file_phase(
     document_status: str,
     chunks: dict[str, int],
@@ -147,11 +190,14 @@ def derive_file_phase(
         if document_status == Status.FAILED:
             return "failed"
 
-        vector_pending = entities.get("pending", 0) + relations.get("pending", 0)
-        vector_failed = entities.get("failed", 0) + relations.get("failed", 0)
+        vector_pending, vector_failed = _vector_work_counts(
+            entities, relations, chunk_vectors
+        )
         if kg_total > 0:
-            if vector_pending > 0 or (vector_failed > 0 and kg_total > 0):
+            if vector_pending > 0:
                 return "embedding"
+            if vector_failed > 0:
+                return "failed"
             return "ready"
         return "needs_prepare"
 
@@ -169,19 +215,17 @@ def derive_file_phase(
     if chunks.get("completed", 0) < chunk_total:
         return "processing"
 
-    vector_pending = (
-        entities.get("pending", 0)
-        + relations.get("pending", 0)
-        + chunk_vectors.get("pending", 0)
-    )
-    vector_failed = (
-        entities.get("failed", 0)
-        + relations.get("failed", 0)
-        + chunk_vectors.get("failed", 0)
+    if document_status == Status.FAILED:
+        return "failed"
+
+    vector_pending, vector_failed = _vector_work_counts(
+        entities, relations, chunk_vectors
     )
 
-    if vector_pending > 0 or (vector_failed > 0 and kg_total > 0):
+    if vector_pending > 0:
         return "embedding"
+    if vector_failed > 0:
+        return "failed"
 
     if kg_total == 0 and chunk_vectors.get("completed", 0) == chunk_vectors.get("total", 0):
         return "kg_ready"
@@ -189,7 +233,12 @@ def derive_file_phase(
     return "ready"
 
 
-def overall_from_files(file_phases: list[str], documents_total: int) -> dict[str, Any]:
+def overall_from_files(
+    file_phases: list[str],
+    documents_total: int,
+    *,
+    documents_failed: int | None = None,
+) -> dict[str, Any]:
     if documents_total == 0:
         return {
             "phase": "idle",
@@ -198,7 +247,9 @@ def overall_from_files(file_phases: list[str], documents_total: int) -> dict[str
             "documents_failed": 0,
         }
 
-    documents_failed = sum(1 for p in file_phases if p == "failed")
+    if documents_failed is None:
+        documents_failed = sum(1 for p in file_phases if p == "failed")
+
     ready = all(p == "ready" for p in file_phases) and documents_failed == 0
 
     if any(p == "needs_prepare" for p in file_phases):
@@ -207,10 +258,10 @@ def overall_from_files(file_phases: list[str], documents_total: int) -> dict[str
         phase = "processing"
     elif any(p == "queued" for p in file_phases):
         phase = "queued"
+    elif documents_failed > 0:
+        phase = "failed"
     elif any(p == "embedding" for p in file_phases):
         phase = "embedding"
-    elif documents_failed > 0 and not ready:
-        phase = "failed"
     elif any(p == "kg_ready" for p in file_phases):
         phase = "kg_ready"
     elif ready:
@@ -285,7 +336,21 @@ def build_workspace_preprocess_status(workspace: Workspace) -> dict[str, Any]:
         )
 
     vectors = _workspace_vector_totals(workspace)
-    overall = overall_from_files(file_phases, len(docs))
+    documents_failed = sum(
+        1
+        for f in files
+        if file_has_preprocess_failure(
+            f["document_status"],
+            f["phase"],
+            f["chunks"],
+            f["entities"],
+            f["relations"],
+            f["chunk_vectors"],
+        )
+    )
+    overall = overall_from_files(
+        file_phases, len(docs), documents_failed=documents_failed
+    )
 
     return {
         "workspace": workspace.name,

@@ -97,6 +97,9 @@ def run_chunk_preprocess_batch(
     document_ids: list[UUID] | None = None,
 ) -> int:
     """Enqueue process_chunk jobs without blocking the orchestrator worker."""
+    from nodepoint.services.preprocess_recovery import recover_orphaned_chunks
+
+    recover_orphaned_chunks(workspace=workspace_name)
     count = enqueue_chunks_for_documents(
         document_ids=document_ids,
         workspace_name=workspace_name,

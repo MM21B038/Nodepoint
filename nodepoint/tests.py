@@ -154,8 +154,9 @@ class PreprocessPipelineTests(TestCase):
         self.assertTrue(result["coalesced"])
         mock_get_queue.assert_not_called()
 
+    @patch("nodepoint.services.preprocess_recovery.recover_orphaned_chunks")
     @patch("nodepoint.services.preprocess_pipeline.enqueue_chunks_for_documents", return_value=2)
-    def test_run_chunk_preprocess_batch_non_blocking(self, mock_enqueue):
+    def test_run_chunk_preprocess_batch_non_blocking(self, mock_enqueue, mock_recover):
         from nodepoint.services.preprocess_pipeline import run_chunk_preprocess_batch
 
         doc_id = uuid.uuid4()
@@ -419,6 +420,27 @@ class PreprocessRecoveryTests(TestCase):
     @patch("nodepoint.services.preprocess_recovery.has_orphaned_preprocess_work", return_value=False)
     @patch("nodepoint.services.preprocess_recovery.run_preprocess_recovery")
     @patch("nodepoint.services.preprocess_recovery.get_connection")
+    def test_maybe_run_startup_recovery_runs_when_inflight_db_despite_lock(
+        self, mock_conn, mock_run, _mock_orphaned
+    ):
+        from nodepoint.services.preprocess_recovery import maybe_run_startup_recovery
+
+        ws = Workspace.objects.create(name="inflight-ws")
+        doc = Document.objects.create(
+            workspace=ws, file_name="x.md", status=Status.INPROGRESS, content=True
+        )
+        DocumentChunk.objects.create(
+            document=doc, index=0, status=Status.INPROGRESS, vector=Status.PENDING
+        )
+        mock_run.return_value = {"chunks_enqueued": 1}
+        result = maybe_run_startup_recovery()
+        self.assertEqual(result["chunks_enqueued"], 1)
+        mock_conn.return_value.delete.assert_called_once()
+        mock_run.assert_called_once()
+
+    @patch("nodepoint.services.preprocess_recovery.has_orphaned_preprocess_work", return_value=False)
+    @patch("nodepoint.services.preprocess_recovery.run_preprocess_recovery")
+    @patch("nodepoint.services.preprocess_recovery.get_connection")
     def test_maybe_run_startup_recovery_runs_when_lock_acquired(
         self, mock_conn, mock_run, _mock_orphaned
     ):
@@ -474,11 +496,13 @@ class PreprocessRecoveryTests(TestCase):
         mock_recovery.assert_called_once()
         mock_super_handle.assert_called_once_with("chunk", "vector")
 
+    @patch("nodepoint.services.queue_status.Worker")
     @patch("nodepoint.services.queue_status._queue_counts")
-    def test_orphaned_chunk_count_when_rq_idle(self, mock_counts):
+    def test_orphaned_chunk_count_when_rq_idle(self, mock_counts, mock_worker_cls):
         from nodepoint.services.queue_status import build_database_backlog
 
         mock_counts.return_value = {"queued": 0, "started": 0, "failed": 0, "deferred": 0}
+        mock_worker_cls.all.return_value = []
         ws = Workspace.objects.create(name="orphan-ws")
         doc = Document.objects.create(
             workspace=ws, file_name="o.md", status=Status.INPROGRESS, content=True
@@ -511,6 +535,50 @@ class PreprocessRecoveryTests(TestCase):
 
         backlog = build_database_backlog(workspace="busy-rq-ws")
         self.assertEqual(backlog["chunks_orphaned"], 0)
+
+    @patch("nodepoint.services.queue_status.Worker")
+    @patch("nodepoint.services.queue_status._queue_counts")
+    def test_orphaned_chunk_count_when_started_registry_stale(
+        self, mock_counts, mock_worker_cls
+    ):
+        from nodepoint.services.queue_status import build_database_backlog
+
+        mock_counts.return_value = {"queued": 0, "started": 3, "failed": 0, "deferred": 0}
+        mock_worker_cls.all.return_value = []
+        ws = Workspace.objects.create(name="stale-started-ws")
+        doc = Document.objects.create(
+            workspace=ws, file_name="s.md", status=Status.INPROGRESS, content=True
+        )
+        DocumentChunk.objects.create(
+            document=doc, index=0, status=Status.INPROGRESS, vector=Status.PENDING
+        )
+
+        backlog = build_database_backlog(workspace="stale-started-ws")
+        self.assertEqual(backlog["chunks_orphaned"], 1)
+
+    @patch("nodepoint.services.preprocess_pipeline.enqueue_chunks_for_documents", return_value=1)
+    def test_run_chunk_preprocess_batch_recovers_orphaned_chunks(self, mock_enqueue):
+        from nodepoint.services.preprocess_pipeline import run_chunk_preprocess_batch
+
+        ws = Workspace.objects.create(name="batch-recover-ws")
+        doc = Document.objects.create(
+            workspace=ws, file_name="stuck.md", status=Status.INPROGRESS, content=True
+        )
+        chunk = DocumentChunk.objects.create(
+            document=doc, index=0, status=Status.INPROGRESS, vector=Status.PENDING
+        )
+
+        with patch("nodepoint.services.queue_status._chunk_queue_busy", return_value=False):
+            count = run_chunk_preprocess_batch(workspace_name=ws.name)
+
+        self.assertEqual(count, 1)
+        chunk.refresh_from_db()
+        self.assertEqual(chunk.status, Status.PENDING)
+        mock_enqueue.assert_called_once_with(
+            document_ids=None,
+            workspace_name=ws.name,
+            wait=False,
+        )
 
 
 class ChunkPipelineTests(TestCase):
@@ -1059,6 +1127,52 @@ class PreprocessStatusAPITests(TestCase):
         resp = self.client.get("/api/workspace/status-ws/preprocess-status/")
         self.assertEqual(resp.json()["files"][0]["phase"], "needs_prepare")
 
+    def test_document_failed_status_counts_as_failed_doc(self):
+        doc = Document.objects.create(
+            workspace=self.workspace,
+            file_name="failed.md",
+            status=Status.FAILED,
+            content=True,
+        )
+        DocumentChunk.objects.create(
+            document=doc, index=0, status=Status.COMPLETED, vector=Status.COMPLETED
+        )
+        resp = self.client.get("/api/workspace/status-ws/preprocess-status/")
+        data = resp.json()
+        self.assertEqual(data["files"][0]["phase"], "failed")
+        self.assertEqual(data["overall"]["documents_failed"], 1)
+        self.assertEqual(data["overall"]["phase"], "failed")
+
+    def test_terminal_vector_failure_counts_as_failed_doc(self):
+        doc = Document.objects.create(
+            workspace=self.workspace,
+            file_name="vec-fail.md",
+            status=Status.COMPLETED,
+            content=True,
+        )
+        DocumentChunk.objects.create(
+            document=doc, index=0, status=Status.COMPLETED, vector=Status.FAILED
+        )
+        resp = self.client.get("/api/workspace/status-ws/preprocess-status/")
+        data = resp.json()
+        self.assertEqual(data["files"][0]["phase"], "failed")
+        self.assertEqual(data["overall"]["documents_failed"], 1)
+
+    def test_failed_doc_retry_in_progress_not_counted(self):
+        doc = Document.objects.create(
+            workspace=self.workspace,
+            file_name="retry.md",
+            status=Status.FAILED,
+            content=True,
+        )
+        DocumentChunk.objects.create(
+            document=doc, index=0, status=Status.INPROGRESS, vector=Status.PENDING
+        )
+        resp = self.client.get("/api/workspace/status-ws/preprocess-status/")
+        data = resp.json()
+        self.assertEqual(data["files"][0]["phase"], "processing")
+        self.assertEqual(data["overall"]["documents_failed"], 0)
+
 
 class LegacyDerivePhaseTests(TestCase):
     def test_completed_legacy_with_pending_vectors_is_embedding(self):
@@ -1091,6 +1205,23 @@ class LegacyDerivePhaseTests(TestCase):
             content=True,
         )
         self.assertEqual(phase, "needs_prepare")
+
+    def test_legacy_vector_failure_only_is_failed(self):
+        from nodepoint.services.preprocess_status import derive_file_phase
+
+        chunks = {"total": 0, "pending": 0, "queued": 0, "in_progress": 0, "completed": 0, "failed": 0}
+        entities = {"total": 1, "pending": 0, "completed": 0, "failed": 1}
+        relations = {"total": 0, "pending": 0, "completed": 0, "failed": 0}
+        chunk_vectors = {"total": 0, "pending": 0, "completed": 0, "failed": 0}
+        phase = derive_file_phase(
+            Status.COMPLETED,
+            chunks,
+            entities,
+            relations,
+            chunk_vectors,
+            content=True,
+        )
+        self.assertEqual(phase, "failed")
 
 
 class QueueStatusServiceTests(TestCase):
