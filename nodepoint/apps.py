@@ -1,22 +1,6 @@
 import sys
-import threading
 
 from django.apps import AppConfig
-
-
-def _schedule_startup_recovery() -> None:
-    """Run preprocess recovery after AppConfig.ready() to avoid DB access during init."""
-
-    def _run() -> None:
-        from nodepoint.services.preprocess_recovery import maybe_run_startup_recovery
-
-        maybe_run_startup_recovery()
-
-    threading.Thread(
-        target=_run,
-        name="preprocess-startup-recovery",
-        daemon=True,
-    ).start()
 
 
 class NodepointConfig(AppConfig):
@@ -36,9 +20,6 @@ class NodepointConfig(AppConfig):
                 reset_mongo_connection()
 
             django_rq.utils.reset_db_connections = reset_connections
-
-            if "orchestrator" in sys.argv:
-                _schedule_startup_recovery()
 
         from nodepoint.services.chat_turn_cancel_listener import (
             should_start_chat_cancel_listener,

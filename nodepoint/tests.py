@@ -420,30 +420,25 @@ class PreprocessRecoveryTests(TestCase):
         self.assertIsNone(result)
         mock_run.assert_not_called()
 
+    @patch("django_rq.management.commands.rqworker.Command.handle")
     @patch("nodepoint.services.preprocess_recovery.maybe_run_startup_recovery")
-    @patch("nodepoint.apps.threading.Thread")
-    def test_apps_ready_runs_recovery_for_orchestrator_worker(
-        self, mock_thread, mock_recovery
+    def test_rqworker_runs_recovery_for_orchestrator_queues(
+        self, mock_recovery, mock_super_handle
     ):
-        from django.apps import apps
+        from nodepoint.management.commands.rqworker import Command
 
-        def run_target_immediately(*, target, **kwargs):
-            return type("_ImmediateThread", (), {"start": lambda self: target()})()
-
-        mock_thread.side_effect = run_target_immediately
-        config = apps.get_app_config("nodepoint")
-        with patch.object(sys, "argv", ["manage.py", "rqworker", "high", "orchestrator", "low"]):
-            config.ready()
+        Command().handle("high", "orchestrator", "low")
         mock_recovery.assert_called_once()
+        mock_super_handle.assert_called_once_with("high", "orchestrator", "low")
 
+    @patch("django_rq.management.commands.rqworker.Command.handle")
     @patch("nodepoint.services.preprocess_recovery.maybe_run_startup_recovery")
-    def test_apps_ready_skips_recovery_for_chunk_worker(self, mock_recovery):
-        from django.apps import apps
+    def test_rqworker_skips_recovery_for_chunk_queues(self, mock_recovery, mock_super_handle):
+        from nodepoint.management.commands.rqworker import Command
 
-        config = apps.get_app_config("nodepoint")
-        with patch.object(sys, "argv", ["manage.py", "rqworker", "chunk", "vector"]):
-            config.ready()
+        Command().handle("chunk", "vector")
         mock_recovery.assert_not_called()
+        mock_super_handle.assert_called_once_with("chunk", "vector")
 
     @patch("nodepoint.services.queue_status._queue_counts")
     def test_orphaned_chunk_count_when_rq_idle(self, mock_counts):
