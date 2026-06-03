@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from typing import Any
+from uuid import UUID
 
 from django_rq import get_connection
 
@@ -22,11 +23,19 @@ RECOVERY_LOCK_KEY = "nodepoint:preprocess:recovery:startup"
 _RECOVERY_LOCK_TTL = int(os.getenv("PREPROCESS_RECOVERY_LOCK_TTL", "300"))
 
 
-def has_orphaned_preprocess_work(*, workspace: str | None = None) -> bool:
-    """True when Postgres shows in-flight chunk work but the chunk RQ queue is idle."""
-    from nodepoint.services.queue_status import _orphaned_chunk_count
+def _live_chunk_job_ids() -> set[UUID]:
+    from nodepoint.services.queue_status import _chunk_ids_with_live_rq_jobs
 
-    return _orphaned_chunk_count(workspace=workspace) > 0
+    return _chunk_ids_with_live_rq_jobs()
+
+
+def has_orphaned_preprocess_work(*, workspace: str | None = None) -> bool:
+    """True when Postgres has in-flight chunks with no live process_chunk RQ job."""
+    live = _live_chunk_job_ids()
+    qs = DocumentChunk.objects.filter(status__in=[Status.QUEUED, Status.INPROGRESS])
+    if workspace:
+        qs = qs.filter(document__workspace__name=workspace)
+    return qs.exclude(id__in=live).exists()
 
 
 def _recovery_enabled() -> bool:
@@ -35,9 +44,12 @@ def _recovery_enabled() -> bool:
 
 
 def reset_orphaned_chunk_statuses(*, workspace: str | None = None) -> dict[str, int]:
-    """Move QUEUED/INPROGRESS chunks back to PENDING after RQ job loss."""
-    in_progress_qs = DocumentChunk.objects.filter(status=Status.INPROGRESS)
-    queued_qs = DocumentChunk.objects.filter(status=Status.QUEUED)
+    """Move orphaned QUEUED/INPROGRESS chunks back to PENDING after RQ job loss."""
+    live = _live_chunk_job_ids()
+    in_progress_qs = DocumentChunk.objects.filter(status=Status.INPROGRESS).exclude(
+        id__in=live
+    )
+    queued_qs = DocumentChunk.objects.filter(status=Status.QUEUED).exclude(id__in=live)
     if workspace:
         in_progress_qs = in_progress_qs.filter(document__workspace__name=workspace)
         queued_qs = queued_qs.filter(document__workspace__name=workspace)
@@ -61,8 +73,14 @@ def _rollup_stale_document_statuses(*, workspace: str | None = None) -> int:
 
 
 def recover_orphaned_chunks(*, workspace: str | None = None) -> dict[str, int]:
-    """Reset orphaned chunk rows for a workspace (or globally) when the chunk queue is idle."""
-    if not has_orphaned_preprocess_work(workspace=workspace):
+    """Reset orphaned chunk rows (per workspace or globally) then rollup documents."""
+    live = _live_chunk_job_ids()
+    stuck_qs = DocumentChunk.objects.filter(
+        status__in=[Status.QUEUED, Status.INPROGRESS],
+    ).exclude(id__in=live)
+    if workspace:
+        stuck_qs = stuck_qs.filter(document__workspace__name=workspace)
+    if not stuck_qs.exists():
         return {
             "in_progress_reset": 0,
             "queued_reset": 0,
@@ -106,19 +124,15 @@ def maybe_run_startup_recovery(*, force: bool = False) -> dict[str, Any] | None:
 
     conn = get_connection()
     orphaned = has_orphaned_preprocess_work()
-    inflight_db = DocumentChunk.objects.filter(
-        status__in=[Status.QUEUED, Status.INPROGRESS],
-    ).count()
 
-    if force or orphaned or inflight_db > 0:
+    if force or orphaned:
         conn.delete(RECOVERY_LOCK_KEY)
         conn.set(RECOVERY_LOCK_KEY, "1", ex=_RECOVERY_LOCK_TTL)
-        if orphaned or inflight_db > 0:
+        if orphaned:
             logger.info(
                 "maybe_run_startup_recovery: recovering stale preprocess work "
-                "(orphaned=%s, inflight_db=%s)",
-                orphaned,
-                inflight_db,
+                "(orphaned_chunks=%s)",
+                _orphaned_chunk_count_global(),
             )
     elif not conn.set(RECOVERY_LOCK_KEY, "1", nx=True, ex=_RECOVERY_LOCK_TTL):
         logger.info("maybe_run_startup_recovery: skipped (recovery lock held)")
@@ -133,3 +147,9 @@ def maybe_run_startup_recovery(*, force: bool = False) -> dict[str, Any] | None:
         if force:
             raise
         return None
+
+
+def _orphaned_chunk_count_global() -> int:
+    from nodepoint.services.queue_status import _orphaned_chunk_count
+
+    return _orphaned_chunk_count()

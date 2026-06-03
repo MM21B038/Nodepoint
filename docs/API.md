@@ -966,7 +966,7 @@ Poll after upload until `overall.ready` is `true` and `overall.phase` is `ready`
 | `needs_prepare` | No chunks yet (`content=false`) or completed doc with no chunks/KG (run POST preprocess to migrate) |
 | `queued` | Document `PENDING` or `QUEUED` (awaiting chunk workers) |
 | `processing` | Chunks still running KG (`process_chunk`) or document `INPROGRESS` during prepare |
-| `kg_ready` | All chunks `COMPLETED` but no entity rows yet |
+| `kg_ready` | Legacy alias; empty KG after chunk completion is reported as `ready` |
 | `embedding` | Chunk KG done (or legacy doc with entity rows only) and some vectors not `COMPLETED` |
 | `ready` | All vectors `COMPLETED` (legacy: entity/relation vectors only when there are no chunks) |
 | `failed` | Document `FAILED`, `INVALID`, or `TERMINATED`, or chunk failures |

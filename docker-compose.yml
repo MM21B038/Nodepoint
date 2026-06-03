@@ -135,12 +135,9 @@ services:
         condition: service_healthy
     command:
       [
-        "/app/.venv/bin/python",
-        "manage.py",
-        "rqworker",
-        "high",
-        "orchestrator",
-        "low",
+        "/bin/sh",
+        "-c",
+        "if [ \"$${PREPROCESS_RECOVERY_ON_STARTUP:-1}\" != '0' ]; then /app/.venv/bin/python manage.py recover_preprocess --force; fi && exec /app/.venv/bin/python manage.py rqworker high orchestrator low",
       ]
 
   worker:

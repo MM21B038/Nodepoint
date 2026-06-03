@@ -402,11 +402,15 @@ class PreprocessRecoveryTests(TestCase):
         self.assertIsNone(result)
         mock_run.assert_not_called()
 
+    @patch(
+        "nodepoint.services.preprocess_recovery._orphaned_chunk_count_global",
+        return_value=2,
+    )
     @patch("nodepoint.services.preprocess_recovery.has_orphaned_preprocess_work", return_value=True)
     @patch("nodepoint.services.preprocess_recovery.run_preprocess_recovery")
     @patch("nodepoint.services.preprocess_recovery.get_connection")
     def test_maybe_run_startup_recovery_runs_when_orphaned_despite_lock(
-        self, mock_conn, mock_run, _mock_orphaned
+        self, mock_conn, mock_run, _mock_orphaned, _mock_count
     ):
         from nodepoint.services.preprocess_recovery import maybe_run_startup_recovery
 
@@ -417,11 +421,11 @@ class PreprocessRecoveryTests(TestCase):
         mock_conn.return_value.delete.assert_called_once()
         mock_run.assert_called_once()
 
-    @patch("nodepoint.services.preprocess_recovery.has_orphaned_preprocess_work", return_value=False)
+    @patch("nodepoint.services.preprocess_recovery._live_chunk_job_ids", return_value=set())
     @patch("nodepoint.services.preprocess_recovery.run_preprocess_recovery")
     @patch("nodepoint.services.preprocess_recovery.get_connection")
-    def test_maybe_run_startup_recovery_runs_when_inflight_db_despite_lock(
-        self, mock_conn, mock_run, _mock_orphaned
+    def test_maybe_run_startup_recovery_runs_when_stuck_chunks_despite_lock(
+        self, mock_conn, mock_run, _mock_live
     ):
         from nodepoint.services.preprocess_recovery import maybe_run_startup_recovery
 
@@ -496,13 +500,9 @@ class PreprocessRecoveryTests(TestCase):
         mock_recovery.assert_called_once()
         mock_super_handle.assert_called_once_with("chunk", "vector")
 
-    @patch("nodepoint.services.queue_status.Worker")
-    @patch("nodepoint.services.queue_status._queue_counts")
-    def test_orphaned_chunk_count_when_rq_idle(self, mock_counts, mock_worker_cls):
+    @patch("nodepoint.services.queue_status._chunk_ids_with_live_rq_jobs", return_value=set())
+    def test_orphaned_chunk_count_when_rq_idle(self, _mock_live):
         from nodepoint.services.queue_status import build_database_backlog
-
-        mock_counts.return_value = {"queued": 0, "started": 0, "failed": 0, "deferred": 0}
-        mock_worker_cls.all.return_value = []
         ws = Workspace.objects.create(name="orphan-ws")
         doc = Document.objects.create(
             workspace=ws, file_name="o.md", status=Status.INPROGRESS, content=True
@@ -520,31 +520,25 @@ class PreprocessRecoveryTests(TestCase):
         backlog = build_database_backlog(workspace="orphan-ws")
         self.assertEqual(backlog["chunks_orphaned"], 2)
 
-    @patch("nodepoint.services.queue_status._queue_counts")
-    def test_orphaned_chunk_count_zero_when_rq_busy(self, mock_counts):
+    @patch("nodepoint.services.queue_status._chunk_ids_with_live_rq_jobs")
+    def test_orphaned_chunk_count_zero_when_rq_busy(self, mock_live):
         from nodepoint.services.queue_status import build_database_backlog
 
-        mock_counts.return_value = {"queued": 1, "started": 0, "failed": 0, "deferred": 0}
         ws = Workspace.objects.create(name="busy-rq-ws")
         doc = Document.objects.create(
             workspace=ws, file_name="b.md", status=Status.QUEUED, content=True
         )
-        DocumentChunk.objects.create(
+        chunk = DocumentChunk.objects.create(
             document=doc, index=0, status=Status.QUEUED, vector=Status.PENDING
         )
+        mock_live.return_value = {chunk.id}
 
         backlog = build_database_backlog(workspace="busy-rq-ws")
         self.assertEqual(backlog["chunks_orphaned"], 0)
 
-    @patch("nodepoint.services.queue_status.Worker")
-    @patch("nodepoint.services.queue_status._queue_counts")
-    def test_orphaned_chunk_count_when_started_registry_stale(
-        self, mock_counts, mock_worker_cls
-    ):
+    @patch("nodepoint.services.queue_status._chunk_ids_with_live_rq_jobs", return_value=set())
+    def test_orphaned_chunk_count_when_started_registry_stale(self, _mock_live):
         from nodepoint.services.queue_status import build_database_backlog
-
-        mock_counts.return_value = {"queued": 0, "started": 3, "failed": 0, "deferred": 0}
-        mock_worker_cls.all.return_value = []
         ws = Workspace.objects.create(name="stale-started-ws")
         doc = Document.objects.create(
             workspace=ws, file_name="s.md", status=Status.INPROGRESS, content=True
@@ -555,6 +549,36 @@ class PreprocessRecoveryTests(TestCase):
 
         backlog = build_database_backlog(workspace="stale-started-ws")
         self.assertEqual(backlog["chunks_orphaned"], 1)
+
+    @patch("nodepoint.services.preprocess_recovery._live_chunk_job_ids")
+    @patch("nodepoint.services.preprocess_pipeline.enqueue_chunks_for_documents", return_value=1)
+    def test_workspace_orphan_recovery_while_other_chunk_job_live(
+        self, mock_enqueue, mock_live
+    ):
+        from nodepoint.services.preprocess_recovery import recover_orphaned_chunks
+
+        ws_a = Workspace.objects.create(name="ws-a")
+        ws_b = Workspace.objects.create(name="ws-b")
+        doc_a = Document.objects.create(
+            workspace=ws_a, file_name="a.md", status=Status.INPROGRESS, content=True
+        )
+        stuck = DocumentChunk.objects.create(
+            document=doc_a, index=0, status=Status.INPROGRESS, vector=Status.PENDING
+        )
+        doc_b = Document.objects.create(
+            workspace=ws_b, file_name="b.md", status=Status.INPROGRESS, content=True
+        )
+        active = DocumentChunk.objects.create(
+            document=doc_b, index=0, status=Status.INPROGRESS, vector=Status.PENDING
+        )
+        mock_live.return_value = {active.id}
+
+        stats = recover_orphaned_chunks(workspace="ws-a")
+        self.assertEqual(stats["in_progress_reset"], 1)
+        stuck.refresh_from_db()
+        active.refresh_from_db()
+        self.assertEqual(stuck.status, Status.PENDING)
+        self.assertEqual(active.status, Status.INPROGRESS)
 
     @patch("nodepoint.services.preprocess_pipeline.enqueue_chunks_for_documents", return_value=1)
     def test_run_chunk_preprocess_batch_recovers_orphaned_chunks(self, mock_enqueue):
@@ -568,7 +592,10 @@ class PreprocessRecoveryTests(TestCase):
             document=doc, index=0, status=Status.INPROGRESS, vector=Status.PENDING
         )
 
-        with patch("nodepoint.services.queue_status._chunk_queue_busy", return_value=False):
+        with patch(
+            "nodepoint.services.preprocess_recovery._live_chunk_job_ids",
+            return_value=set(),
+        ):
             count = run_chunk_preprocess_batch(workspace_name=ws.name)
 
         self.assertEqual(count, 1)
@@ -1116,6 +1143,27 @@ class PreprocessStatusAPITests(TestCase):
         )
         resp = self.client.get("/api/workspace/status-ws/preprocess-status/")
         self.assertEqual(resp.json()["files"][0]["phase"], "ready")
+
+    def test_empty_kg_after_chunk_completion_is_ready(self):
+        doc = Document.objects.create(
+            workspace=self.workspace,
+            file_name="empty-kg.md",
+            status=Status.COMPLETED,
+            content=True,
+        )
+        DocumentChunk.objects.create(
+            document=doc,
+            index=0,
+            status=Status.COMPLETED,
+            vector=Status.COMPLETED,
+        )
+        resp = self.client.get("/api/workspace/status-ws/preprocess-status/")
+        data = resp.json()
+        self.assertEqual(data["files"][0]["phase"], "ready")
+        self.assertEqual(data["files"][0]["entities"]["total"], 0)
+        self.assertEqual(data["files"][0]["relations"]["total"], 0)
+        self.assertTrue(data["overall"]["ready"])
+        self.assertEqual(data["overall"]["phase"], "ready")
 
     def test_zero_chunks_no_content_needs_prepare(self):
         Document.objects.create(

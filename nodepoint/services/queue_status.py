@@ -301,6 +301,34 @@ def _relation_qs(workspace: str | None):
     return qs
 
 
+def _chunk_ids_with_live_rq_jobs(connection=None) -> set[UUID]:
+    """Chunk IDs that have a waiting or started process_chunk job in Redis."""
+    connection = connection or get_connection()
+    chunk_queue = getattr(settings, "RQ_QUEUE_CHUNK", "chunk")
+    live: set[UUID] = set()
+    try:
+        queue = django_rq.get_queue(chunk_queue)
+        job_ids = [job.id for job in queue.get_jobs()]
+        started = StartedJobRegistry(chunk_queue, connection=connection)
+        job_ids.extend(started.get_job_ids())
+        for job in _fetch_jobs(job_ids, connection):
+            if _func_short_name(job.func_name) != "process_chunk":
+                continue
+            summary = _parse_args_summary(job.func_name, job.args or (), job.kwargs or {})
+            raw = summary.get("chunk_id")
+            if raw:
+                try:
+                    live.add(UUID(str(raw)))
+                except ValueError:
+                    pass
+    except Exception:
+        logger.warning(
+            "queue_status: could not list live chunk jobs; assuming none",
+            exc_info=True,
+        )
+    return live
+
+
 def _chunk_queue_busy(connection) -> bool:
     """
     True when chunk work is actively running.
@@ -328,17 +356,18 @@ def _chunk_queue_busy(connection) -> bool:
 
 def _orphaned_chunk_count(*, workspace: str | None = None) -> int:
     """
-    Chunks marked QUEUED/INPROGRESS in Postgres while the chunk RQ queue is idle.
+    Chunks marked QUEUED/INPROGRESS in Postgres with no live process_chunk RQ job.
 
     Indicates work lost after a worker/Redis restart; run recover_preprocess or
     restart worker-orchestrator with PREPROCESS_RECOVERY_ON_STARTUP enabled.
     """
-    connection = get_connection()
-    if _chunk_queue_busy(connection):
-        return 0
-    return _chunk_qs(workspace).filter(
-        status__in=[Status.QUEUED, Status.INPROGRESS],
-    ).count()
+    live = _chunk_ids_with_live_rq_jobs()
+    return (
+        _chunk_qs(workspace)
+        .filter(status__in=[Status.QUEUED, Status.INPROGRESS])
+        .exclude(id__in=live)
+        .count()
+    )
 
 
 def build_database_backlog(*, workspace: str | None = None) -> dict[str, Any]:
@@ -371,12 +400,14 @@ def build_database_backlog(*, workspace: str | None = None) -> dict[str, Any]:
             continue
         if overall.get("ready"):
             continue
+        ws_backlog = build_database_backlog(workspace=ws.name)
         incomplete.append(
             {
                 "workspace": ws.name,
                 "phase": overall["phase"],
                 "documents_total": overall["documents_total"],
                 "documents_failed": overall["documents_failed"],
+                "chunks_orphaned": ws_backlog["chunks_orphaned"],
             }
         )
     result["workspaces_incomplete"] = incomplete

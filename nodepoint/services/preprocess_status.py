@@ -10,6 +10,8 @@ from nodepoint.models import DocumentChunk, KnowledgeEntity, KnowledgeRelation, 
 
 VECTOR_BUCKETS = ("pending", "completed", "failed")
 CHUNK_STATUS_BUCKETS = ("pending", "queued", "in_progress", "completed", "failed")
+# Per-file phases that count as preprocess-complete for overall.ready
+_READY_FILE_PHASES = frozenset({"ready", "kg_ready"})
 
 
 def _empty_vector_counts() -> dict[str, int]:
@@ -227,9 +229,7 @@ def derive_file_phase(
     if vector_failed > 0:
         return "failed"
 
-    if kg_total == 0 and chunk_vectors.get("completed", 0) == chunk_vectors.get("total", 0):
-        return "kg_ready"
-
+    # All chunks done and vectors caught up (0 entities/relations is valid).
     return "ready"
 
 
@@ -250,7 +250,7 @@ def overall_from_files(
     if documents_failed is None:
         documents_failed = sum(1 for p in file_phases if p == "failed")
 
-    ready = all(p == "ready" for p in file_phases) and documents_failed == 0
+    ready = all(p in _READY_FILE_PHASES for p in file_phases) and documents_failed == 0
 
     if any(p == "needs_prepare" for p in file_phases):
         phase = "needs_prepare"

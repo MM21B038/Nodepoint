@@ -1,5 +1,6 @@
 from django_rq.management.commands.rqworker import Command as RQWorkerCommand
 
+from nodepoint.rq_hooks import install_rq_worker_hooks
 from nodepoint.services.preprocess_recovery import (
     has_orphaned_preprocess_work,
     maybe_run_startup_recovery,
@@ -20,6 +21,7 @@ class Command(RQWorkerCommand):
     def handle(self, *args, **options):
         import logging
 
+        install_rq_worker_hooks()
         logger = logging.getLogger(__name__)
         if should_run_startup_recovery(args):
             logger.info("rqworker: running startup preprocess recovery (queues=%s)", args)
