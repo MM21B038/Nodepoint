@@ -21,6 +21,7 @@ from nodepoint.views.preprocess import (
     PreprocessStatusAPIView,
     PreprocessWorkspaceAPIView,
     QueueStatusAPIView,
+    WorkspacesPreprocessSummaryAPIView,
 )
 
 from nodepoint.views.chat import (
@@ -102,6 +103,11 @@ urlpatterns = [
     path(
         "preprocess/queue-status/",
         QueueStatusAPIView.as_view(),
+    ),
+
+    path(
+        "preprocess/workspaces-summary/",
+        WorkspacesPreprocessSummaryAPIView.as_view(),
     ),
 
     path(

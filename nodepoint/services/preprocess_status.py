@@ -284,7 +284,8 @@ def _documents_by_status(docs) -> dict[str, int]:
     return counts
 
 
-def build_workspace_preprocess_status(workspace: Workspace) -> dict[str, Any]:
+def _workspace_file_rollups(workspace: Workspace) -> tuple[list, dict, dict, dict, dict]:
+    """Documents plus per-document aggregates used for phase / overall rollups."""
     docs = list(workspace.documents.order_by("-created_at"))
     entity_by_doc = _aggregate_vectors(
         KnowledgeEntity.objects.filter(document__workspace=workspace)
@@ -297,6 +298,51 @@ def build_workspace_preprocess_status(workspace: Workspace) -> dict[str, Any]:
     )
     chunk_vector_by_doc = _aggregate_chunk_vectors(
         DocumentChunk.objects.filter(document__workspace=workspace)
+    )
+    return docs, entity_by_doc, relation_by_doc, chunk_by_doc, chunk_vector_by_doc
+
+
+def build_workspace_preprocess_overall(workspace: Workspace) -> dict[str, Any]:
+    """Overall preprocess rollup without per-file payload (bulk summaries)."""
+    docs, entity_by_doc, relation_by_doc, chunk_by_doc, chunk_vector_by_doc = (
+        _workspace_file_rollups(workspace)
+    )
+    file_phases: list[str] = []
+    documents_failed = 0
+
+    for doc in docs:
+        entities = entity_by_doc.get(doc.id, _empty_vector_counts())
+        relations = relation_by_doc.get(doc.id, _empty_vector_counts())
+        chunks = chunk_by_doc.get(doc.id, _empty_chunk_counts())
+        chunk_vectors = chunk_vector_by_doc.get(doc.id, _empty_vector_counts())
+        phase = derive_file_phase(
+            doc.status,
+            chunks,
+            entities,
+            relations,
+            chunk_vectors,
+            content=doc.content,
+        )
+        file_phases.append(phase)
+        if file_has_preprocess_failure(
+            doc.status,
+            phase,
+            chunks,
+            entities,
+            relations,
+            chunk_vectors,
+        ):
+            documents_failed += 1
+
+    overall = overall_from_files(
+        file_phases, len(docs), documents_failed=documents_failed
+    )
+    return {"workspace": workspace.name, "overall": overall}
+
+
+def build_workspace_preprocess_status(workspace: Workspace) -> dict[str, Any]:
+    docs, entity_by_doc, relation_by_doc, chunk_by_doc, chunk_vector_by_doc = (
+        _workspace_file_rollups(workspace)
     )
 
     files: list[dict[str, Any]] = []
@@ -363,7 +409,7 @@ def build_workspace_preprocess_status(workspace: Workspace) -> dict[str, Any]:
 
 def workspace_needs_preprocess(workspace: Workspace) -> bool:
     """True when the workspace has documents and preprocess is not fully ready."""
-    overall = build_workspace_preprocess_status(workspace)["overall"]
+    overall = build_workspace_preprocess_overall(workspace)["overall"]
     if overall["documents_total"] == 0:
         return False
     return not overall.get("ready", False)

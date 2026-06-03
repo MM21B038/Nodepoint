@@ -5,7 +5,10 @@ from rest_framework.views import APIView
 from nodepoint.models import Workspace
 from nodepoint.services.preprocess_pipeline import enqueue_priority_workspace_preprocess
 from nodepoint.services.preprocess_status import build_workspace_preprocess_status
-from nodepoint.services.queue_status import build_queue_status
+from nodepoint.services.queue_status import (
+    build_queue_status,
+    build_workspaces_preprocess_summary,
+)
 
 
 def _parse_bool_param(value, default: bool) -> bool:
@@ -20,6 +23,13 @@ class QueueStatusAPIView(APIView):
     def get(self, request):
         workspace = (request.query_params.get("workspace") or "").strip() or None
         return Response(build_queue_status(workspace=workspace))
+
+
+class WorkspacesPreprocessSummaryAPIView(APIView):
+    """GET /api/preprocess/workspaces-summary/ — not-ready workspaces in one call."""
+
+    def get(self, request):
+        return Response(build_workspaces_preprocess_summary())
 
 
 class PreprocessStatusAPIView(APIView):

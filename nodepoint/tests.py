@@ -1360,6 +1360,45 @@ class QueueStatusServiceTests(TestCase):
         names = {r["workspace"] for r in rows}
         self.assertEqual(names, {"ws-aaa", "ws-bbb", "ws-ccc"})
 
+    def test_workspaces_incomplete_skips_ready_workspaces_outside_candidates(self):
+        from nodepoint.services.queue_status import (
+            _build_workspaces_incomplete_list,
+            _collect_incomplete_workspace_candidate_names,
+        )
+
+        ready = Workspace.objects.create(name="ready-ws")
+        doc = Document.objects.create(
+            workspace=ready,
+            file_name="done.md",
+            status=Status.COMPLETED,
+            content=True,
+        )
+        DocumentChunk.objects.create(
+            document=doc,
+            index=0,
+            status=Status.COMPLETED,
+            vector=Status.COMPLETED,
+        )
+        for i in range(3):
+            ws = Workspace.objects.create(name=f"filler-{i}")
+            doc = Document.objects.create(
+                workspace=ws,
+                file_name=f"{i}.md",
+                status=Status.COMPLETED,
+                content=True,
+            )
+            DocumentChunk.objects.create(
+                document=doc,
+                index=0,
+                status=Status.COMPLETED,
+                vector=Status.COMPLETED,
+            )
+        candidates = _collect_incomplete_workspace_candidate_names()
+        self.assertNotIn("ready-ws", candidates)
+        self.assertEqual(candidates, set())
+        rows = _build_workspaces_incomplete_list(active_pipelines=[])
+        self.assertEqual(rows, [])
+
     def test_database_backlog_counts(self):
         from nodepoint.services.queue_status import build_database_backlog
 
@@ -1407,6 +1446,17 @@ class QueueStatusAPITests(TestCase):
         resp = self.client.get("/api/preprocess/queue-status/?workspace=filtered-ws")
         self.assertEqual(resp.status_code, 200)
         mock_build.assert_called_once_with(workspace="filtered-ws")
+
+    @patch("nodepoint.views.preprocess.build_workspaces_preprocess_summary")
+    def test_workspaces_summary_endpoint(self, mock_build):
+        mock_build.return_value = {
+            "generated_at": "2026-06-03T00:00:00+00:00",
+            "workspaces": [{"workspace": "busy-ws", "phase": "embedding"}],
+        }
+        resp = self.client.get("/api/preprocess/workspaces-summary/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["workspaces"][0]["workspace"], "busy-ws")
+        mock_build.assert_called_once_with()
 
     @patch("nodepoint.services.queue_status.Worker")
     @patch("nodepoint.services.queue_status.django_rq.get_queue")

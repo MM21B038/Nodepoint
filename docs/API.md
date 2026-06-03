@@ -162,6 +162,7 @@ Base path: `/api/`. All paths below are relative to that prefix.
 | GET | `document/<workspace_name>/` | List documents in workspace |
 | DELETE | `document/delete/<workspace_name>/<file_name>/` | Delete one document |
 | GET | `preprocess/queue-status/` | Global RQ queues, workers, locks, DB backlog |
+| GET | `preprocess/workspaces-summary/` | Not-ready workspaces only (pipeline modal table) |
 | GET | `workspace/<workspace_name>/preprocess-status/` | Pipeline / vector / chunk status |
 | POST | `workspace/preprocess/<workspace_name>/` | Queue full workspace preprocess |
 | GET | `knowledge-graph/entity-types/` | Distinct entity types + counts |
@@ -888,6 +889,43 @@ Use this to debug idle workers, stuck `nodepoint:preprocess:pipeline:{workspace}
 | `active_pipelines` | Same running pipelines in detail (lock TTL, job list); also folded into `workspaces_incomplete` for the overview table |
 
 Monitored queues: `orchestrator`, `chunk`, `vector`, `default` (from `RQ_QUEUES`).
+
+**Performance:** `database.workspaces_incomplete` is built from DB backlog queries, Redis pipeline locks, and RQ job `args_summary.workspace` candidates — not by scanning every workspace. For a pipeline modal table without loading full per-file status, prefer **`GET /api/preprocess/workspaces-summary/`** (same row shape, one request).
+
+---
+
+### `GET /api/preprocess/workspaces-summary/`
+
+Lightweight list of workspaces that are not preprocess-ready and/or have an active orchestrator pipeline. Same row objects as `database.workspaces_incomplete` on queue-status, without RQ worker/queue payload.
+
+Use this instead of paginating `GET /api/workspace/list/` and calling `preprocess-status` per workspace.
+
+**Response `200`**
+
+```json
+{
+  "generated_at": "2026-06-03T12:00:00+00:00",
+  "workspaces": [
+    {
+      "workspace": "PRAJNA",
+      "phase": "embedding",
+      "documents_total": 6,
+      "documents_failed": 0,
+      "chunks_orphaned": 0,
+      "pipeline_active": true,
+      "lock_held": true,
+      "orchestrator_jobs": 2
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `generated_at` | UTC timestamp when the snapshot was built |
+| `workspaces` | Sorted by workspace name; empty when all workspaces with documents are ready and no pipeline is active |
+
+Poll with `GET /api/preprocess/queue-status/` when you also need queue counts and job samples.
 
 ---
 
@@ -2031,6 +2069,7 @@ Alphabetical by path segment. See sections above for full request/response bodie
 | GET | `/api/workspace/page/` | [Workspace](#get-apiworkspacepage) |
 | GET | `/api/workspace/stats/` | [Workspace](#get-apiworkspacestats) |
 | GET | `/api/preprocess/queue-status/` | [Preprocess](#get-apipreprocessqueue-status) |
+| GET | `/api/preprocess/workspaces-summary/` | [Preprocess](#get-apipreprocessworkspaces-summary) |
 | GET | `/api/workspace/<workspace_name>/preprocess-status/` | [Preprocess](#get-apiworkspaceworkspace_namepreprocess-status) |
 | POST | `/api/workspace/preprocess/<workspace_name>/` | [Preprocess](#post-apiworkspacepreprocessworkspace_name) |
 

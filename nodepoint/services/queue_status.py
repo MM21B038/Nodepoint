@@ -27,7 +27,7 @@ from nodepoint.models import (
     KnowledgeRelation,
     Workspace,
 )
-from nodepoint.services.preprocess_status import build_workspace_preprocess_status
+from nodepoint.services.preprocess_status import build_workspace_preprocess_overall
 
 logger = logging.getLogger(__name__)
 
@@ -223,9 +223,18 @@ def build_rq_snapshot(*, workspace: str | None = None) -> dict[str, Any]:
 
 
 def _scan_pipeline_locks() -> list[dict[str, Any]]:
-    conn = get_connection()
+    try:
+        conn = get_connection()
+    except Exception:
+        logger.debug("queue_status: could not connect to Redis for pipeline locks", exc_info=True)
+        return []
     locks: list[dict[str, Any]] = []
-    for key in conn.scan_iter(match=PIPELINE_LOCK_SCAN_PREFIX):
+    try:
+        key_iter = conn.scan_iter(match=PIPELINE_LOCK_SCAN_PREFIX)
+    except Exception:
+        logger.debug("queue_status: could not scan pipeline locks", exc_info=True)
+        return []
+    for key in key_iter:
         key_str = key.decode() if isinstance(key, bytes) else str(key)
         workspace = key_str.rsplit(":", 1)[-1]
         ttl = conn.ttl(key)
@@ -371,16 +380,113 @@ def _orphaned_chunk_count(*, workspace: str | None = None) -> int:
     )
 
 
+_BACKLOG_DOCUMENT_STATUSES = (
+    Status.PENDING,
+    Status.QUEUED,
+    Status.INPROGRESS,
+    Status.FAILED,
+    Status.INVALID,
+    Status.TERMINATED,
+)
+_VECTOR_BACKLOG_STATUSES = (Status.PENDING, Status.FAILED)
+
+
+def _workspace_names_with_db_backlog() -> set[str]:
+    """Workspace names that may still need preprocess (coarse DB signals)."""
+    names: set[str] = set()
+    names.update(
+        Document.objects.filter(status__in=_BACKLOG_DOCUMENT_STATUSES)
+        .values_list("workspace__name", flat=True)
+        .distinct()
+    )
+    doc_ids_with_chunks = DocumentChunk.objects.values("document_id").distinct()
+    names.update(
+        Document.objects.filter(status=Status.COMPLETED, content=True)
+        .exclude(id__in=doc_ids_with_chunks)
+        .values_list("workspace__name", flat=True)
+        .distinct()
+    )
+    names.update(
+        DocumentChunk.objects.exclude(status=Status.COMPLETED)
+        .values_list("document__workspace__name", flat=True)
+        .distinct()
+    )
+    for model in (KnowledgeEntity, KnowledgeRelation, DocumentChunk):
+        names.update(
+            model.objects.filter(vector__in=_VECTOR_BACKLOG_STATUSES)
+            .values_list("document__workspace__name", flat=True)
+            .distinct()
+        )
+    return names
+
+
+def _workspaces_from_rq_queue_jobs(
+    queue_names: tuple[str, ...], connection
+) -> set[str]:
+    names: set[str] = set()
+    for queue_name in queue_names:
+        if queue_name not in settings.RQ_QUEUES:
+            continue
+        try:
+            queue = django_rq.get_queue(queue_name)
+            job_ids = [job.id for job in queue.get_jobs()]
+            started = StartedJobRegistry(queue_name, connection=connection)
+            job_ids.extend(started.get_job_ids())
+            for job in _fetch_jobs(job_ids, connection):
+                summary = _parse_args_summary(
+                    job.func_name, job.args or (), job.kwargs or {}
+                )
+                if summary.get("workspace"):
+                    names.add(summary["workspace"])
+        except Exception:
+            logger.debug(
+                "queue_status: could not scan queue %s for workspaces",
+                queue_name,
+                exc_info=True,
+            )
+    return names
+
+
+def _collect_incomplete_workspace_candidate_names(
+    *,
+    active_pipelines: list[dict[str, Any]] | None = None,
+    pipeline_locks: list[dict[str, Any]] | None = None,
+) -> set[str]:
+    """
+    Names likely not preprocess-ready — avoids scanning every workspace.
+
+    Uses DB backlog queries, Redis locks, and RQ job args before per-workspace
+    rollup. The superset is verified with build_workspace_preprocess_overall.
+    """
+    names = _workspace_names_with_db_backlog()
+    connection = get_connection()
+    names |= _workspaces_from_orchestrator_jobs(connection)
+    names |= _workspaces_from_rq_queue_jobs(
+        (
+            getattr(settings, "RQ_QUEUE_CHUNK", "chunk"),
+            getattr(settings, "RQ_QUEUE_VECTOR", "vector"),
+        ),
+        connection,
+    )
+    for entry in active_pipelines or []:
+        if entry.get("workspace"):
+            names.add(entry["workspace"])
+    for lock in pipeline_locks or []:
+        if lock.get("workspace"):
+            names.add(lock["workspace"])
+    return names
+
+
 def _workspace_not_ready_row(
     ws: Workspace,
     *,
+    overall: dict[str, Any] | None = None,
     pipeline_active: bool = False,
     lock_held: bool = False,
     orchestrator_jobs: int = 0,
     phase_override: str | None = None,
 ) -> dict[str, Any]:
-    status = build_workspace_preprocess_status(ws)
-    overall = status["overall"]
+    overall = overall or build_workspace_preprocess_overall(ws)["overall"]
     phase = phase_override or overall["phase"]
     return {
         "workspace": ws.name,
@@ -397,6 +503,7 @@ def _workspace_not_ready_row(
 def _build_workspaces_incomplete_list(
     *,
     active_pipelines: list[dict[str, Any]] | None = None,
+    pipeline_locks: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Workspaces that are not preprocess-ready in Postgres and/or have an active
@@ -407,15 +514,20 @@ def _build_workspaces_incomplete_list(
     """
     active_pipelines = active_pipelines or []
     by_name: dict[str, dict[str, Any]] = {}
+    candidates = _collect_incomplete_workspace_candidate_names(
+        active_pipelines=active_pipelines,
+        pipeline_locks=pipeline_locks,
+    )
+    if not candidates:
+        return []
 
-    for ws in Workspace.objects.order_by("name"):
-        status = build_workspace_preprocess_status(ws)
-        overall = status["overall"]
+    for ws in Workspace.objects.filter(name__in=candidates).order_by("name"):
+        overall = build_workspace_preprocess_overall(ws)["overall"]
         if overall["documents_total"] == 0:
             continue
         if overall.get("ready"):
             continue
-        by_name[ws.name] = _workspace_not_ready_row(ws)
+        by_name[ws.name] = _workspace_not_ready_row(ws, overall=overall)
 
     for entry in active_pipelines:
         ws_name = entry["workspace"]
@@ -431,11 +543,11 @@ def _build_workspaces_incomplete_list(
             ws = Workspace.objects.get(name=ws_name)
         except Workspace.DoesNotExist:
             continue
-        status = build_workspace_preprocess_status(ws)
-        overall = status["overall"]
+        overall = build_workspace_preprocess_overall(ws)["overall"]
         phase = overall["phase"] if not overall.get("ready") else "running"
         by_name[ws_name] = _workspace_not_ready_row(
             ws,
+            overall=overall,
             pipeline_active=True,
             lock_held=lock_held,
             orchestrator_jobs=job_count,
@@ -453,10 +565,24 @@ def _build_workspaces_incomplete_list(
     return rows
 
 
+def build_workspaces_preprocess_summary() -> dict[str, Any]:
+    """Lightweight global list of not-ready workspaces (one HTTP round-trip)."""
+    locks = _scan_pipeline_locks()
+    active = build_active_pipelines(locks, workspace=None)
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "workspaces": _build_workspaces_incomplete_list(
+            active_pipelines=active,
+            pipeline_locks=locks,
+        ),
+    }
+
+
 def build_database_backlog(
     *,
     workspace: str | None = None,
     active_pipelines: list[dict[str, Any]] | None = None,
+    pipeline_locks: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     pending_failed = [Status.PENDING, Status.FAILED]
     result: dict[str, Any] = {
@@ -481,6 +607,7 @@ def build_database_backlog(
 
     result["workspaces_incomplete"] = _build_workspaces_incomplete_list(
         active_pipelines=active_pipelines,
+        pipeline_locks=pipeline_locks,
     )
     return result
 
@@ -502,17 +629,25 @@ def _orchestrator_jobs_for_workspace(workspace: str, connection) -> list[dict[st
 
 def _workspaces_from_orchestrator_jobs(connection) -> set[str]:
     names: set[str] = set()
-    for queue_name in _orchestrator_queue_names():
-        queue = django_rq.get_queue(queue_name)
-        job_ids: list[str] = []
-        for job in queue.get_jobs():
-            job_ids.append(job.id)
-        started = StartedJobRegistry(queue_name, connection=connection)
-        job_ids.extend(started.get_job_ids())
-        for job in _fetch_jobs(job_ids, connection):
-            summary = _parse_args_summary(job.func_name, job.args or (), job.kwargs or {})
-            if summary.get("workspace"):
-                names.add(summary["workspace"])
+    try:
+        for queue_name in _orchestrator_queue_names():
+            queue = django_rq.get_queue(queue_name)
+            job_ids: list[str] = []
+            for job in queue.get_jobs():
+                job_ids.append(job.id)
+            started = StartedJobRegistry(queue_name, connection=connection)
+            job_ids.extend(started.get_job_ids())
+            for job in _fetch_jobs(job_ids, connection):
+                summary = _parse_args_summary(
+                    job.func_name, job.args or (), job.kwargs or {}
+                )
+                if summary.get("workspace"):
+                    names.add(summary["workspace"])
+    except Exception:
+        logger.debug(
+            "queue_status: could not scan orchestrator queues for workspaces",
+            exc_info=True,
+        )
     return names
 
 
@@ -572,6 +707,7 @@ def build_queue_status(*, workspace: str | None = None) -> dict[str, Any]:
         "database": build_database_backlog(
             workspace=ws,
             active_pipelines=active if not ws else None,
+            pipeline_locks=locks if not ws else None,
         ),
         "active_pipelines": active,
     }
