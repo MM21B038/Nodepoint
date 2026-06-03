@@ -1,10 +1,17 @@
 from django_rq.management.commands.rqworker import Command as RQWorkerCommand
 
-from nodepoint.services.preprocess_recovery import maybe_run_startup_recovery
+from nodepoint.services.preprocess_recovery import (
+    has_orphaned_preprocess_work,
+    maybe_run_startup_recovery,
+)
 
 
 def should_run_startup_recovery(queues: tuple[str, ...]) -> bool:
-    return "orchestrator" in queues
+    if "orchestrator" in queues:
+        return True
+    if "chunk" in queues and has_orphaned_preprocess_work():
+        return True
+    return False
 
 
 class Command(RQWorkerCommand):

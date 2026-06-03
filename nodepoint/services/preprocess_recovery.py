@@ -22,6 +22,13 @@ RECOVERY_LOCK_KEY = "nodepoint:preprocess:recovery:startup"
 _RECOVERY_LOCK_TTL = int(os.getenv("PREPROCESS_RECOVERY_LOCK_TTL", "300"))
 
 
+def has_orphaned_preprocess_work(*, workspace: str | None = None) -> bool:
+    """True when Postgres shows in-flight chunk work but the chunk RQ queue is idle."""
+    from nodepoint.services.queue_status import _orphaned_chunk_count
+
+    return _orphaned_chunk_count(workspace=workspace) > 0
+
+
 def _recovery_enabled() -> bool:
     raw = os.getenv("PREPROCESS_RECOVERY_ON_STARTUP", "1")
     return str(raw).strip().lower() not in ("0", "false", "no", "off")
@@ -84,7 +91,14 @@ def maybe_run_startup_recovery(*, force: bool = False) -> dict[str, Any] | None:
         return None
 
     conn = get_connection()
-    if not force and not conn.set(RECOVERY_LOCK_KEY, "1", nx=True, ex=_RECOVERY_LOCK_TTL):
+    orphaned = has_orphaned_preprocess_work()
+
+    if force or orphaned:
+        conn.delete(RECOVERY_LOCK_KEY)
+        conn.set(RECOVERY_LOCK_KEY, "1", ex=_RECOVERY_LOCK_TTL)
+        if orphaned:
+            logger.info("maybe_run_startup_recovery: orphaned chunk work detected")
+    elif not conn.set(RECOVERY_LOCK_KEY, "1", nx=True, ex=_RECOVERY_LOCK_TTL):
         logger.info("maybe_run_startup_recovery: skipped (recovery lock held)")
         return None
 

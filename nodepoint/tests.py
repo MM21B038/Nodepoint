@@ -388,9 +388,12 @@ class PreprocessRecoveryTests(TestCase):
         mock_enqueue.assert_called_once_with()
         mock_vector.assert_called_once_with()
 
+    @patch("nodepoint.services.preprocess_recovery.has_orphaned_preprocess_work", return_value=False)
     @patch("nodepoint.services.preprocess_recovery.run_preprocess_recovery")
     @patch("nodepoint.services.preprocess_recovery.get_connection")
-    def test_maybe_run_startup_recovery_respects_lock(self, mock_conn, mock_run):
+    def test_maybe_run_startup_recovery_respects_lock(
+        self, mock_conn, mock_run, _mock_orphaned
+    ):
         from nodepoint.services.preprocess_recovery import maybe_run_startup_recovery
 
         mock_conn.return_value.set.return_value = False
@@ -398,10 +401,26 @@ class PreprocessRecoveryTests(TestCase):
         self.assertIsNone(result)
         mock_run.assert_not_called()
 
+    @patch("nodepoint.services.preprocess_recovery.has_orphaned_preprocess_work", return_value=True)
+    @patch("nodepoint.services.preprocess_recovery.run_preprocess_recovery")
+    @patch("nodepoint.services.preprocess_recovery.get_connection")
+    def test_maybe_run_startup_recovery_runs_when_orphaned_despite_lock(
+        self, mock_conn, mock_run, _mock_orphaned
+    ):
+        from nodepoint.services.preprocess_recovery import maybe_run_startup_recovery
+
+        mock_conn.return_value.set.return_value = False
+        mock_run.return_value = {"chunks_enqueued": 2}
+        result = maybe_run_startup_recovery()
+        self.assertEqual(result["chunks_enqueued"], 2)
+        mock_conn.return_value.delete.assert_called_once()
+        mock_run.assert_called_once()
+
+    @patch("nodepoint.services.preprocess_recovery.has_orphaned_preprocess_work", return_value=False)
     @patch("nodepoint.services.preprocess_recovery.run_preprocess_recovery")
     @patch("nodepoint.services.preprocess_recovery.get_connection")
     def test_maybe_run_startup_recovery_runs_when_lock_acquired(
-        self, mock_conn, mock_run
+        self, mock_conn, mock_run, _mock_orphaned
     ):
         from nodepoint.services.preprocess_recovery import maybe_run_startup_recovery
 
@@ -421,7 +440,7 @@ class PreprocessRecoveryTests(TestCase):
         mock_run.assert_not_called()
 
     @patch("django_rq.management.commands.rqworker.Command.handle")
-    @patch("nodepoint.services.preprocess_recovery.maybe_run_startup_recovery")
+    @patch("nodepoint.management.commands.rqworker.maybe_run_startup_recovery")
     def test_rqworker_runs_recovery_for_orchestrator_queues(
         self, mock_recovery, mock_super_handle
     ):
@@ -431,13 +450,28 @@ class PreprocessRecoveryTests(TestCase):
         mock_recovery.assert_called_once()
         mock_super_handle.assert_called_once_with("high", "orchestrator", "low")
 
+    @patch("nodepoint.management.commands.rqworker.has_orphaned_preprocess_work", return_value=False)
     @patch("django_rq.management.commands.rqworker.Command.handle")
-    @patch("nodepoint.services.preprocess_recovery.maybe_run_startup_recovery")
-    def test_rqworker_skips_recovery_for_chunk_queues(self, mock_recovery, mock_super_handle):
+    @patch("nodepoint.management.commands.rqworker.maybe_run_startup_recovery")
+    def test_rqworker_skips_recovery_for_chunk_queues(
+        self, mock_recovery, mock_super_handle, _mock_orphaned
+    ):
         from nodepoint.management.commands.rqworker import Command
 
         Command().handle("chunk", "vector")
         mock_recovery.assert_not_called()
+        mock_super_handle.assert_called_once_with("chunk", "vector")
+
+    @patch("nodepoint.management.commands.rqworker.has_orphaned_preprocess_work", return_value=True)
+    @patch("django_rq.management.commands.rqworker.Command.handle")
+    @patch("nodepoint.management.commands.rqworker.maybe_run_startup_recovery")
+    def test_rqworker_runs_recovery_for_chunk_queues_when_orphaned(
+        self, mock_recovery, mock_super_handle, _mock_orphaned
+    ):
+        from nodepoint.management.commands.rqworker import Command
+
+        Command().handle("chunk", "vector")
+        mock_recovery.assert_called_once()
         mock_super_handle.assert_called_once_with("chunk", "vector")
 
     @patch("nodepoint.services.queue_status._queue_counts")
