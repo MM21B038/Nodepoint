@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from django.conf import settings
 
-from nodepoint.services import chat_turn_redis
+from nodepoint.services import chat_turn_redis, chat_turn_slots
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +26,25 @@ class TurnAlreadyActive(Exception):
     """Raised when Redis already holds an active turn for this conversation."""
 
 
+class ChatTurnCapacityExceeded(Exception):
+    """Raised when the global parallel chat turn limit is reached."""
+
+
+class ChatTurnQueueTimeout(Exception):
+    """Raised when a turn could not acquire a slot before the queue timeout."""
+
+
+class ChatTurnQueueAborted(Exception):
+    """Raised when a queued turn wait is cancelled (e.g. chat.cancel)."""
+
+
 @dataclass
 class TurnState:
     task: asyncio.Task
     turn_id: uuid.UUID
     conversation_id: uuid.UUID
     started_at: datetime
+    global_slot_held: bool = False
 
 
 @dataclass(frozen=True)
@@ -66,6 +79,19 @@ async def register(
     if not acquired:
         raise TurnAlreadyActive(conversation_id)
 
+    slot_acquired = await asyncio.to_thread(
+        chat_turn_slots.try_acquire_turn_slot,
+        conversation_id,
+        turn_id,
+    )
+    if not slot_acquired:
+        await asyncio.to_thread(
+            chat_turn_redis.clear_active_turn,
+            conversation_id,
+            turn_id,
+        )
+        raise ChatTurnCapacityExceeded()
+
     async with _lock:
         existing = _turns.get(conversation_id)
         if existing is not None and not existing.task.done():
@@ -75,20 +101,30 @@ async def register(
             turn_id=turn_id,
             conversation_id=conversation_id,
             started_at=started_at,
+            global_slot_held=True,
         )
 
 
 async def unregister(conversation_id: uuid.UUID, turn_id: uuid.UUID | None = None) -> None:
+    global_slot_held = False
     async with _lock:
         state = _turns.pop(conversation_id, None)
-        if turn_id is None and state is not None:
-            turn_id = state.turn_id
+        if state is not None:
+            if turn_id is None:
+                turn_id = state.turn_id
+            global_slot_held = state.global_slot_held
     if turn_id is not None:
         await asyncio.to_thread(
             chat_turn_redis.clear_active_turn,
             conversation_id,
             turn_id,
         )
+        if global_slot_held:
+            await asyncio.to_thread(
+                chat_turn_slots.release_turn_slot,
+                conversation_id,
+                turn_id,
+            )
 
 
 async def get_state(conversation_id: uuid.UUID) -> TurnState | None:

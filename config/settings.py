@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
+from datetime import timedelta
 from pathlib import Path
 from dotenv import load_dotenv
 import os
@@ -32,6 +33,31 @@ SECRET_KEY = os.getenv(
     "SECRET_KEY",
     "django-insecure-yv6r(r4aruaityi#-stp%ahgu#^+a(6536_e*7zh(af52r5(5(",
 )
+
+ALLOW_OPEN_ADMIN_SIGNUP = os.getenv("ALLOW_OPEN_ADMIN_SIGNUP", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "nodepoint.auth.authentication.JWTAuthentication",
+        "nodepoint.auth.authentication.ApiKeyAuthentication",
+    ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+        "nodepoint.auth.permissions.ApiKeyScopePermission",
+    ],
+}
+
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    "ROTATE_REFRESH_TOKENS": False,
+    "SIGNING_KEY": SECRET_KEY,
+    "AUTH_HEADER_TYPES": ("Bearer",),
+}
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv("DEBUG", "True").lower() in ("1", "true", "yes")
@@ -65,6 +91,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'nodepoint.auth.middleware.ApiUsageLoggingMiddleware',
 ]
 
 ROOT_URLCONF = 'config.urls'
@@ -107,18 +134,18 @@ DATABASES = {
 
 AUTH_PASSWORD_VALIDATORS = [
     {
-        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
+        "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator",
     },
     {
-        'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
+        "NAME": "nodepoint.auth.password_validators.NodepointPasswordValidator",
     },
     {
-        'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
-    },
-    {
-        'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
+        "NAME": "django.contrib.auth.password_validation.CommonPasswordValidator",
     },
 ]
+
+ACCOUNT_DELETION_GRACE_DAYS = int(os.getenv("ACCOUNT_DELETION_GRACE_DAYS", "30"))
+API_USAGE_LOG_RETENTION_DAYS = int(os.getenv("API_USAGE_LOG_RETENTION_DAYS", "90"))
 
 
 # Internationalization
@@ -194,7 +221,10 @@ CHAT_COMPRESS_OMIT_REASONING = os.getenv("CHAT_COMPRESS_OMIT_REASONING", "true")
     "on",
 )
 CHAT_DEFAULT_SYSTEM = os.getenv("CHAT_DEFAULT_SYSTEM", Prompt["chat_system"])
+CHAT_MAX_CONCURRENT_TURNS = int(os.getenv("CHAT_MAX_CONCURRENT_TURNS", "8"))
 CHAT_MAX_CONCURRENT_SEARCHES = int(os.getenv("CHAT_MAX_CONCURRENT_SEARCHES", "8"))
+CHAT_TURN_QUEUE_TIMEOUT = float(os.getenv("CHAT_TURN_QUEUE_TIMEOUT", "300"))
+CHAT_TURN_QUEUE_POLL_INTERVAL = float(os.getenv("CHAT_TURN_QUEUE_POLL_INTERVAL", "0.5"))
 CHAT_TURN_REDIS_TTL = int(os.getenv("CHAT_TURN_REDIS_TTL", "3600"))
 WEB_WORKERS = int(os.getenv("WEB_WORKERS", "4"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -229,7 +259,7 @@ LOGGING = {
 _db_conn_max_age = os.getenv("DB_CONN_MAX_AGE", "60")
 DATABASES["default"]["CONN_MAX_AGE"] = int(_db_conn_max_age)
 
-if "test" in sys.argv:
+if "test" in sys.argv and not os.getenv("POSTGRES_HOST"):
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.sqlite3",

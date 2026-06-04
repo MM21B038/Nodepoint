@@ -3,14 +3,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from channels.layers import get_channel_layer
+from django.conf import settings
 
 from nodepoint.agent.agent import Agent
 from nodepoint.registry import Thread
 from nodepoint.services import chat_runner, chat_stream_format, chat_turn_registry
-from nodepoint.services.chat_turn_registry import TurnAlreadyActive
+from nodepoint.services.chat_turn_registry import (
+    ChatTurnCapacityExceeded,
+    ChatTurnQueueAborted,
+    ChatTurnQueueTimeout,
+    TurnAlreadyActive,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +57,7 @@ async def start_turn(
     group_name: str | None,
     tools: list[dict[str, Any]],
     exclude_servers: set[str],
+    persist: bool = True,
 ) -> uuid.UUID:
     turn_id = uuid.uuid4()
     task = asyncio.create_task(
@@ -62,12 +70,13 @@ async def start_turn(
             group_name=group_name,
             tools=tools,
             exclude_servers=exclude_servers,
+            persist=persist,
         ),
         name=f"chat-turn-{conversation_id}",
     )
     try:
         await chat_turn_registry.register(conversation_id, task, turn_id)
-    except TurnAlreadyActive:
+    except (TurnAlreadyActive, ChatTurnCapacityExceeded):
         task.cancel()
         try:
             await task
@@ -75,6 +84,59 @@ async def start_turn(
             pass
         raise
     return turn_id
+
+
+def _queue_timeout() -> float:
+    return float(getattr(settings, "CHAT_TURN_QUEUE_TIMEOUT", 300))
+
+
+def _queue_poll_interval() -> float:
+    return max(0.1, float(getattr(settings, "CHAT_TURN_QUEUE_POLL_INTERVAL", 0.5)))
+
+
+async def start_turn_queued(
+    *,
+    conversation_id: uuid.UUID,
+    branch_id: uuid.UUID,
+    thread: Thread,
+    workspace_name: str | None,
+    group_name: str | None,
+    tools: list[dict[str, Any]],
+    exclude_servers: set[str],
+    persist: bool = True,
+    on_queued: Callable[[], Awaitable[None]] | None = None,
+    should_abort: Callable[[], bool] | None = None,
+) -> uuid.UUID:
+    """
+    Start a turn, waiting in queue when the global parallel slot limit is reached.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _queue_timeout()
+    queued_notified = False
+
+    while True:
+        if should_abort is not None and should_abort():
+            raise ChatTurnQueueAborted()
+        try:
+            return await start_turn(
+                conversation_id=conversation_id,
+                branch_id=branch_id,
+                thread=thread,
+                workspace_name=workspace_name,
+                group_name=group_name,
+                tools=tools,
+                exclude_servers=exclude_servers,
+                persist=persist,
+            )
+        except TurnAlreadyActive:
+            raise
+        except ChatTurnCapacityExceeded:
+            if loop.time() >= deadline:
+                raise ChatTurnQueueTimeout()
+            if on_queued is not None and not queued_notified:
+                queued_notified = True
+                await on_queued()
+            await asyncio.sleep(_queue_poll_interval())
 
 
 async def _run_turn(
@@ -87,6 +149,7 @@ async def _run_turn(
     group_name: str | None,
     tools: list[dict[str, Any]],
     exclude_servers: set[str],
+    persist: bool = True,
 ) -> None:
     agent = Agent()
     formatter = chat_stream_format.ChatStreamFormatter()
@@ -96,7 +159,7 @@ async def _run_turn(
         await publish_frames(conversation_id, formatter.format(payload))
 
     try:
-        _, new_branch_id = await chat_runner.run_agent_stream(
+        thread, new_branch_id = await chat_runner.run_agent_stream(
             thread,
             agent,
             branch_id,
@@ -107,6 +170,7 @@ async def _run_turn(
             exclude_servers=exclude_servers,
             on_event=on_event,
             interrupt_state=interrupt_state,
+            persist=persist,
         )
         await publish_frames(conversation_id, formatter.close_sections())
         done_frame: dict[str, Any] = {"type": "chat.done", "turn_id": str(turn_id)}

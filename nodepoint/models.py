@@ -1,7 +1,137 @@
 import os
 import uuid
+
+from django.conf import settings
 from django.db import models
-from .enums import GroupTag, Status
+
+from .enums import AccountStatus, GroupTag, Status, UserRole
+
+
+# =========================
+# User profile & API keys
+# =========================
+
+
+class UserProfile(models.Model):
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="profile",
+    )
+    role = models.CharField(
+        max_length=20,
+        choices=UserRole.choices,
+        default=UserRole.USER,
+    )
+    managed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="managed_users",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_accounts",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=AccountStatus.choices,
+        default=AccountStatus.ACTIVE,
+    )
+    allowed_scopes = models.JSONField(null=True, blank=True)
+    deletion_requested_at = models.DateTimeField(null=True, blank=True)
+    purge_scheduled_at = models.DateTimeField(null=True, blank=True)
+    deletion_requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="deletions_requested",
+    )
+
+    def __str__(self):
+        return f"{self.user.username} ({self.role})"
+
+    @property
+    def is_superadmin(self) -> bool:
+        return self.role == UserRole.SUPERADMIN
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role == UserRole.ADMIN
+
+    @property
+    def is_end_user(self) -> bool:
+        return self.role == UserRole.USER
+
+
+class ApiKey(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="api_keys",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name="api_keys_created",
+    )
+    name = models.CharField(max_length=255, blank=True, default="")
+    prefix = models.CharField(max_length=16, db_index=True)
+    key_hash = models.CharField(max_length=64)
+    allowed_scopes = models.JSONField(default=list)
+    expires_at = models.DateTimeField()
+    is_active = models.BooleanField(default=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["prefix", "is_active"]),
+        ]
+
+    def __str__(self):
+        return f"{self.name or self.prefix} ({self.user.username})"
+
+
+class ApiUsageLog(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="api_usage_logs",
+        null=True,
+        blank=True,
+    )
+    api_key = models.ForeignKey(
+        ApiKey,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="usage_logs",
+    )
+    method = models.CharField(max_length=10)
+    path = models.CharField(max_length=500)
+    url_name = models.CharField(max_length=100, blank=True, default="")
+    scope = models.CharField(max_length=64, blank=True, default="")
+    status_code = models.PositiveSmallIntegerField()
+    duration_ms = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["user", "-created_at"], name="apiusage_user_created"),
+            models.Index(fields=["url_name", "-created_at"], name="apiusage_url_created"),
+        ]
+
+    def __str__(self):
+        return f"{self.method} {self.path} ({self.status_code})"
 
 
 # =========================
@@ -9,10 +139,23 @@ from .enums import GroupTag, Status
 # =========================
 
 class Workspace(models.Model):
-    name = models.CharField(max_length=255, unique=True)
+    name = models.CharField(max_length=255)
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="workspaces",
+    )
     tag = models.CharField(max_length=255, blank=True, default="")
     description = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["owner", "name"],
+                name="unique_workspace_name_per_owner",
+            )
+        ]
 
     def __str__(self):
         return self.name
@@ -23,7 +166,12 @@ class Workspace(models.Model):
 # =========================
 
 class WorkspaceGroup(models.Model):
-    name = models.CharField(max_length=255, unique=True)
+    name = models.CharField(max_length=255)
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="workspace_groups",
+    )
     tag = models.CharField(
         max_length=16,
         choices=GroupTag.choices,
@@ -31,6 +179,14 @@ class WorkspaceGroup(models.Model):
     )
     description = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["owner", "name"],
+                name="unique_group_name_per_owner",
+            )
+        ]
 
     def __str__(self):
         return self.name
@@ -140,11 +296,11 @@ class GroupRelationMembership(models.Model):
 # Document
 # =========================
 def workspace_upload_path(instance, filename):
-
     return os.path.join(
         "workspaces",
+        str(instance.workspace.owner_id),
         instance.workspace.name,
-        filename
+        filename,
     )
 
 class Document(models.Model):
@@ -378,10 +534,10 @@ class Conversation(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        constraints = [
-            models.UniqueConstraint(
-                fields=["workspace"],
-                name="unique_conversation_per_workspace",
+        indexes = [
+            models.Index(
+                fields=["workspace", "-updated_at"],
+                name="conversation_workspace_updated",
             ),
         ]
 

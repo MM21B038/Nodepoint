@@ -319,8 +319,12 @@ def search_group_workspaces_by_name(
     *,
     threshold: float,
     match_limit: int,
+    actor=None,
+    owner_id: int | None = None,
 ) -> dict[str, Any]:
-    scope = resolve_group_search_scope(group_name)
+    scope = resolve_group_search_scope(
+        group_name, actor=actor, owner_id=owner_id
+    )
     graph_filters_dict = graph_filters.as_response_dict()
     graph_filters_dict["threshold"] = threshold
     graph_filters_dict["match_limit"] = match_limit
@@ -328,7 +332,11 @@ def search_group_workspaces_by_name(
     results: list[dict[str, Any]] = []
 
     if scope.tag == GroupTag.WORKSPACE:
-        workspaces = list(get_group_workspaces_qs(group_name).order_by("name"))
+        workspaces = list(
+            get_group_workspaces_qs(
+                group_name, actor=actor, owner_id=owner_id
+            ).order_by("name")
+        )
         for ws in workspaces:
             results.append(
                 _group_search_result_row(
@@ -341,13 +349,17 @@ def search_group_workspaces_by_name(
             )
 
     elif scope.tag == GroupTag.FILES:
-        doc_ids_by_ws: dict[str, list[UUID]] = {}
+        doc_ids_by_ws_id: dict[int, list[UUID]] = {}
+        workspace_by_id: dict[int, Workspace] = {}
         for doc in Document.objects.filter(id__in=scope.document_ids).select_related(
             "workspace"
         ):
-            doc_ids_by_ws.setdefault(doc.workspace.name, []).append(doc.id)
-        for ws_name, doc_ids in sorted(doc_ids_by_ws.items()):
-            workspace = Workspace.objects.get(name=ws_name)
+            ws = doc.workspace
+            workspace_by_id[ws.pk] = ws
+            doc_ids_by_ws_id.setdefault(ws.pk, []).append(doc.id)
+        for ws_id in sorted(doc_ids_by_ws_id):
+            workspace = workspace_by_id[ws_id]
+            doc_ids = doc_ids_by_ws_id[ws_id]
             member_file_names = list(
                 Document.objects.filter(id__in=doc_ids).values_list(
                     "file_name", flat=True
@@ -371,15 +383,16 @@ def search_group_workspaces_by_name(
             )
 
     elif scope.tag == GroupTag.ENTITY:
-        entity_ids_by_ws: dict[str, list[UUID]] = {}
+        entity_ids_by_ws_id: dict[int, list[UUID]] = {}
+        workspace_by_id: dict[int, Workspace] = {}
         for entity in KnowledgeEntity.objects.filter(
             id__in=scope.entity_ids
         ).select_related("document__workspace"):
-            entity_ids_by_ws.setdefault(entity.document.workspace.name, []).append(
-                entity.id
-            )
-        for ws_name, ws_entity_ids in sorted(entity_ids_by_ws.items()):
-            workspace = Workspace.objects.get(name=ws_name)
+            ws = entity.document.workspace
+            workspace_by_id[ws.pk] = ws
+            entity_ids_by_ws_id.setdefault(ws.pk, []).append(entity.id)
+        for ws_id in sorted(entity_ids_by_ws_id):
+            workspace = workspace_by_id[ws_id]
             results.append(
                 _group_search_result_row(
                     workspace,
@@ -387,24 +400,26 @@ def search_group_workspaces_by_name(
                     graph_filters,
                     threshold=threshold,
                     match_limit=match_limit,
-                    entity_ids=ws_entity_ids,
+                    entity_ids=entity_ids_by_ws_id[ws_id],
                 )
             )
 
     else:
-        relation_ids_by_ws: dict[str, list[UUID]] = {}
-        endpoint_ids_by_ws: dict[str, list[UUID]] = {}
+        relation_ids_by_ws_id: dict[int, list[UUID]] = {}
+        endpoint_ids_by_ws_id: dict[int, list[UUID]] = {}
+        workspace_by_id: dict[int, Workspace] = {}
         for relation in KnowledgeRelation.objects.filter(
             id__in=scope.relation_ids
         ).select_related("document__workspace"):
-            ws_name = relation.document.workspace.name
-            relation_ids_by_ws.setdefault(ws_name, []).append(relation.id)
-            endpoint_ids_by_ws.setdefault(ws_name, []).extend(
+            ws = relation.document.workspace
+            workspace_by_id[ws.pk] = ws
+            relation_ids_by_ws_id.setdefault(ws.pk, []).append(relation.id)
+            endpoint_ids_by_ws_id.setdefault(ws.pk, []).extend(
                 [relation.source_id, relation.target_id]
             )
-        for ws_name, relation_ids in sorted(relation_ids_by_ws.items()):
-            workspace = Workspace.objects.get(name=ws_name)
-            endpoint_ids = list(set(endpoint_ids_by_ws.get(ws_name, [])))
+        for ws_id in sorted(relation_ids_by_ws_id):
+            workspace = workspace_by_id[ws_id]
+            endpoint_ids = list(set(endpoint_ids_by_ws_id.get(ws_id, [])))
             results.append(
                 _group_search_result_row(
                     workspace,

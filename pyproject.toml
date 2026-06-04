@@ -28,6 +28,7 @@ dependencies = [
     "rank-bm25>=0.2.2",
     "rapidfuzz>=3.13.0",
     "psycopg2-binary>=2.9.12",
+    "djangorestframework-simplejwt>=5.5.1",
 ]
 
 [dependency-groups]

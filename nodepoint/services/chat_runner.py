@@ -33,11 +33,10 @@ class SavedSegment:
     content: str
     reasoning_content: str | None
 
-    def as_saved_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "message_id": self.message_id,
-            "content": self.content,
-        }
+    def as_saved_dict(self, *, ephemeral: bool = False) -> dict[str, Any]:
+        payload: dict[str, Any] = {"content": self.content}
+        if not ephemeral and self.message_id:
+            payload["message_id"] = self.message_id
         if self.reasoning_content:
             payload["reasoning_content"] = self.reasoning_content
         return payload
@@ -55,10 +54,11 @@ async def run_agent_stream(
     exclude_servers: set[str] | None = None,
     on_event: Callable[[dict[str, Any]], Awaitable[None]],
     interrupt_state: dict[str, Any] | None = None,
+    persist: bool = True,
 ) -> tuple[Thread, uuid.UUID | None]:
     """
     Stream agent events to ``on_event`` (JSON-serializable dicts).
-    Mutates ``thread`` and persists messages to the DB.
+    Mutates ``thread``; persists messages when ``persist`` is True.
     Returns (thread, new_branch_id_if_compressed).
     """
     pending_calls = None
@@ -96,15 +96,18 @@ async def run_agent_stream(
         if not text and not reasoning:
             return None
         thread.addAssistant(text)
-        msg = await storage_async.append_message_visible(
-            conversation_id,
-            effective_branch_id,
-            role=ChatMessageRole.ASSISTANT,
-            content=text,
-            reasoning_content=reasoning,
-        )
+        message_id = ""
+        if persist:
+            msg = await storage_async.append_message_visible(
+                conversation_id,
+                effective_branch_id,
+                role=ChatMessageRole.ASSISTANT,
+                content=text,
+                reasoning_content=reasoning,
+            )
+            message_id = str(msg.id)
         saved = SavedSegment(
-            message_id=str(msg.id),
+            message_id=message_id,
             content=text,
             reasoning_content=reasoning,
         )
@@ -112,18 +115,25 @@ async def run_agent_stream(
         thinking_buf.clear()
         response_buf.clear()
         if interrupt_state is not None:
-            interrupt_state["saved"] = saved.as_saved_dict()
+            interrupt_state["saved"] = saved.as_saved_dict(ephemeral=not persist)
         if interrupted:
+            interrupt_msg = (
+                "Partial response available in saved."
+                if not persist
+                else "Response saved; merge saved content or refresh history."
+            )
             await on_event(
                 {
                     "type": "chat.interrupted",
-                    "message": "Response saved; merge saved content or refresh history.",
-                    "saved": saved.as_saved_dict(),
+                    "message": interrupt_msg,
+                    "saved": saved.as_saved_dict(ephemeral=not persist),
                 }
             )
         return saved
 
     async def maybe_compress() -> None:
+        if not persist:
+            return
         nonlocal thread, new_branch_id, effective_branch_id, segment_saved
         # Count the current active branch (not the root conversation), otherwise
         # compression can re-trigger immediately after switching to a compressed branch.
@@ -208,14 +218,15 @@ async def run_agent_stream(
                         "reasoning_content": ev.reasoning_content,
                     }
                 )
-                await storage_async.append_message_visible(
-                    conversation_id,
-                    effective_branch_id,
-                    role=ChatMessageRole.ASSISTANT,
-                    content=ev.content or "",
-                    reasoning_content=ev.reasoning_content,
-                    tool_calls=[tc.model_dump(mode="json") for tc in ev.tool_calls],
-                )
+                if persist:
+                    await storage_async.append_message_visible(
+                        conversation_id,
+                        effective_branch_id,
+                        role=ChatMessageRole.ASSISTANT,
+                        content=ev.content or "",
+                        reasoning_content=ev.reasoning_content,
+                        tool_calls=[tc.model_dump(mode="json") for tc in ev.tool_calls],
+                    )
                 segment_saved = True
                 pending_calls = tool_call_items_to_normalized(ev.tool_calls)
                 tools_remaining = len(ev.tool_calls)
@@ -239,14 +250,15 @@ async def run_agent_stream(
                     )
                 if call is not None:
                     thread.addTool(call, ev.result)
-                    await storage_async.append_message_visible(
-                        conversation_id,
-                        effective_branch_id,
-                        role=ChatMessageRole.TOOL,
-                        content=ev.result,
-                        tool_call_id=ev.tool_call_id or call.id,
-                        tool_name=ev.tool_name,
-                    )
+                    if persist:
+                        await storage_async.append_message_visible(
+                            conversation_id,
+                            effective_branch_id,
+                            role=ChatMessageRole.TOOL,
+                            content=ev.result,
+                            tool_call_id=ev.tool_call_id or call.id,
+                            tool_name=ev.tool_name,
+                        )
                 await on_event(
                     {
                         "type": "tool_completed",
@@ -260,13 +272,14 @@ async def run_agent_stream(
                 text = "".join(response_buf)
                 if text:
                     thread.addAssistant(text)
-                    await storage_async.append_message_visible(
-                        conversation_id,
-                        effective_branch_id,
-                        role=ChatMessageRole.ASSISTANT,
-                        content=text,
-                        reasoning_content="".join(thinking_buf) or None,
-                    )
+                    if persist:
+                        await storage_async.append_message_visible(
+                            conversation_id,
+                            effective_branch_id,
+                            role=ChatMessageRole.ASSISTANT,
+                            content=text,
+                            reasoning_content="".join(thinking_buf) or None,
+                        )
                     segment_saved = True
                 # Only compress after the final assistant response is complete and persisted,
                 # never mid-stream (avoids visible pauses / branch switches while streaming).

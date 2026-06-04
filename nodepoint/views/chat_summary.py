@@ -1,24 +1,30 @@
 from rest_framework import status
 from rest_framework.response import Response
-from rest_framework.views import APIView
+from nodepoint.auth.mixins import AuthenticatedAPIView
 
-from nodepoint.models import Workspace
 from nodepoint.services import chat_storage
-from nodepoint.views.kg_scope import resolve_kg_scope
+from nodepoint.views.kg_scope import resolve_kg_scope, resolve_kg_scope_targets
 
 
-class ChatSummaryAPIView(APIView):
+class ChatSummaryAPIView(AuthenticatedAPIView):
     def get(self, request):
         scope, error = resolve_kg_scope(request)
         if error:
             return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
 
-        if scope.is_group_scope:
-            return Response(chat_storage.list_chat_summary_for_group(scope.group_name))
+        _workspace, group, err = resolve_kg_scope_targets(
+            request, scope, actor=request.user
+        )
+        if err is not None:
+            return err
 
-        try:
-            workspace = Workspace.objects.get(name=scope.workspace_name)
-        except Workspace.DoesNotExist:
-            return Response({"error": "Workspace not found"}, status=status.HTTP_404_NOT_FOUND)
+        if group is not None:
+            return Response(
+                chat_storage.list_chat_summary_for_group(
+                    group.name,
+                    actor=request.user,
+                    owner_id=group.owner_id,
+                )
+            )
 
-        return Response(chat_storage.list_chat_summary_for_workspace(workspace))
+        return Response(chat_storage.list_chat_summary_for_workspace(_workspace))

@@ -122,10 +122,19 @@ def build_group_search_scope(group: WorkspaceGroup) -> GroupSearchScope:
     )
 
 
-def resolve_group_search_scope(group_name: str) -> GroupSearchScope:
-    from nodepoint.services import workspace_group as group_svc
+def resolve_group_search_scope(
+    group_name: str,
+    *,
+    actor=None,
+    owner_id: int | None = None,
+    group: WorkspaceGroup | None = None,
+) -> GroupSearchScope:
+    if group is None:
+        from nodepoint.services import workspace_group as group_svc
 
-    group = group_svc.get_group_by_name(group_name)
+        group = group_svc.get_group_by_name(
+            group_name, actor=actor, owner_id=owner_id
+        )
     return build_group_search_scope(group)
 
 

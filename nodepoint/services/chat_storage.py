@@ -17,6 +17,10 @@ from nodepoint.models import (
 from nodepoint.registry import Thread
 
 
+class SessionNotFoundError(Exception):
+    """Raised when a session id is missing or not owned by the workspace."""
+
+
 def _create_conversation_with_root(workspace: Workspace) -> tuple[Conversation, ChatBranch]:
     system_prompt = settings.CHAT_DEFAULT_SYSTEM
     conversation = Conversation.objects.create(
@@ -65,6 +69,113 @@ def create_conversation(workspace: Workspace) -> tuple[Conversation, ChatBranch]
     return get_or_create_workspace_chat(workspace)
 
 
+def _session_message_count(conversation_id: uuid.UUID) -> int:
+    try:
+        root = get_root_branch(conversation_id)
+    except ChatBranch.DoesNotExist:
+        return 0
+    return ChatMessage.objects.filter(branch=root).count()
+
+
+def serialize_session_summary(conversation: Conversation) -> dict[str, Any]:
+    return {
+        "session_id": str(conversation.id),
+        "title": conversation.title,
+        "created_at": conversation.created_at,
+        "updated_at": conversation.updated_at,
+        "message_count": _session_message_count(conversation.id),
+    }
+
+
+def list_sessions(workspace: Workspace) -> list[dict[str, Any]]:
+    conversations = Conversation.objects.filter(workspace=workspace).order_by(
+        "-updated_at"
+    )
+    return [serialize_session_summary(c) for c in conversations]
+
+
+def _create_session_with_title(
+    workspace: Workspace, title: str
+) -> tuple[Conversation, ChatBranch]:
+    system_prompt = settings.CHAT_DEFAULT_SYSTEM
+    conversation = Conversation.objects.create(
+        workspace=workspace,
+        title=title or "",
+        system_prompt=system_prompt,
+        compressions=[],
+    )
+    root = ChatBranch.objects.create(
+        conversation=conversation,
+        is_root=True,
+        label="root",
+    )
+    if system_prompt:
+        ChatMessage.objects.create(
+            branch=root,
+            sequence=0,
+            role=ChatMessageRole.SYSTEM,
+            content=system_prompt,
+        )
+    return conversation, root
+
+
+def create_session(
+    workspace: Workspace, *, title: str = ""
+) -> tuple[Conversation, ChatBranch]:
+    return _create_session_with_title(workspace, title)
+
+
+def get_session(workspace: Workspace, session_id: uuid.UUID) -> Conversation:
+    try:
+        return Conversation.objects.get(id=session_id, workspace=workspace)
+    except Conversation.DoesNotExist as exc:
+        raise SessionNotFoundError from exc
+
+
+def update_session_title(
+    workspace: Workspace, session_id: uuid.UUID, *, title: str
+) -> Conversation:
+    conversation = get_session(workspace, session_id)
+    conversation.title = title
+    conversation.save(update_fields=["title", "updated_at"])
+    return conversation
+
+
+def clear_session(session_id: uuid.UUID) -> tuple[Conversation, ChatBranch]:
+    conversation = Conversation.objects.select_related("workspace").get(id=session_id)
+    system_prompt = conversation.system_prompt or settings.CHAT_DEFAULT_SYSTEM
+    with transaction.atomic():
+        ChatBranch.objects.filter(conversation_id=session_id).delete()
+        conversation.compressions = []
+        conversation.system_prompt = system_prompt
+        conversation.save(update_fields=["compressions", "system_prompt", "updated_at"])
+        root = ChatBranch.objects.create(
+            conversation=conversation,
+            is_root=True,
+            label="root",
+        )
+        if system_prompt:
+            ChatMessage.objects.create(
+                branch=root,
+                sequence=0,
+                role=ChatMessageRole.SYSTEM,
+                content=system_prompt,
+            )
+    return conversation, root
+
+
+def delete_session(session_id: uuid.UUID) -> None:
+    Conversation.objects.filter(id=session_id).delete()
+
+
+def build_empty_thread(system_prompt: str | None = None) -> Thread:
+    thread = Thread()
+    prompt = system_prompt if system_prompt is not None else settings.CHAT_DEFAULT_SYSTEM
+    if prompt:
+        thread.addSystem(prompt)
+    return thread
+
+
 def get_root_branch(conversation_id: uuid.UUID) -> ChatBranch:
     return ChatBranch.objects.get(conversation_id=conversation_id, is_root=True)
 
@@ -92,22 +203,10 @@ def list_visible_branches(conversation_id: uuid.UUID) -> list[ChatBranch]:
 
 
 def workspace_chat_summary(workspace: Workspace) -> dict[str, Any]:
-    conversation = get_workspace_chat(workspace)
-    if conversation is None:
-        return {
-            "workspace": workspace.name,
-            "updated_at": None,
-            "message_count": 0,
-        }
-    try:
-        root = get_root_branch(conversation.id)
-        message_count = ChatMessage.objects.filter(branch=root).count()
-    except ChatBranch.DoesNotExist:
-        message_count = 0
+    sessions = list_sessions(workspace)
     return {
         "workspace": workspace.name,
-        "updated_at": conversation.updated_at,
-        "message_count": message_count,
+        "sessions": sessions,
     }
 
 
@@ -115,17 +214,27 @@ def list_chat_summary_for_workspace(workspace: Workspace) -> dict[str, Any]:
     return workspace_chat_summary(workspace)
 
 
-def list_chat_summary_for_group(group_name: str) -> dict[str, Any]:
+def list_chat_summary_for_group(
+    group_name: str,
+    *,
+    actor=None,
+    owner_id: int | None = None,
+) -> dict[str, Any]:
     from nodepoint.enums import GroupTag
     from nodepoint.services.group_scope import resolve_group_search_scope
     from nodepoint.services.workspace_group import (
         get_group_by_name,
         get_or_create_group_chat_workspace,
+        get_group_workspaces_qs,
     )
 
-    group = get_group_by_name(group_name)
-    scope = resolve_group_search_scope(group_name)
-    chat_workspace = get_or_create_group_chat_workspace(group_name)
+    group = get_group_by_name(group_name, actor=actor, owner_id=owner_id)
+    scope = resolve_group_search_scope(
+        group_name, actor=actor, owner_id=owner_id, group=group
+    )
+    chat_workspace = get_or_create_group_chat_workspace(
+        group_name, actor=actor, owner_id=owner_id
+    )
     payload: dict[str, Any] = {
         "group": group_name,
         "tag": group.tag,
@@ -136,12 +245,15 @@ def list_chat_summary_for_group(group_name: str) -> dict[str, Any]:
         else len(scope.relation_ids)
         if group.tag == GroupTag.RELATION
         else len(scope.workspace_names),
-        "group_chat": workspace_chat_summary(chat_workspace),
+        "group_chat": {
+            "workspace": chat_workspace.name,
+            "sessions": list_sessions(chat_workspace),
+        },
     }
     if group.tag == GroupTag.WORKSPACE:
-        from nodepoint.services.workspace_group import get_group_workspaces_qs
-
-        workspaces = get_group_workspaces_qs(group_name).order_by("name")
+        workspaces = get_group_workspaces_qs(
+            group_name, actor=actor, owner_id=owner_id
+        ).order_by("name")
         payload["workspaces"] = [workspace_chat_summary(ws) for ws in workspaces]
     return payload
 

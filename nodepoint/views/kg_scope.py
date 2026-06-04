@@ -2,9 +2,28 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from django.contrib.auth.models import AbstractBaseUser
+from rest_framework import status
 from rest_framework.request import Request
+from rest_framework.response import Response
 
+from nodepoint.models import Workspace, WorkspaceGroup
 from nodepoint.services import kg_graph
+from nodepoint.services.owner_scope import (
+    OwnerNotAccessibleError,
+    OwnerScopeError,
+    parse_owner_id_from_request,
+)
+from nodepoint.services.workspace import (
+    AmbiguousWorkspaceError,
+    WorkspaceNotFoundError,
+    get_workspace_by_name,
+)
+from nodepoint.services.workspace_group import (
+    AmbiguousGroupError,
+    GroupNotFoundError,
+    get_group_by_name,
+)
 
 
 @dataclass(frozen=True)
@@ -38,16 +57,62 @@ def resolve_kg_scope(request: Request) -> tuple[KgScope | None, str | None]:
     return KgScope(workspace_name=workspace_name, group_name=group_name), None
 
 
-def validate_kg_group_exists(scope: KgScope) -> str | None:
-    if not scope.is_group_scope:
-        return None
-    from nodepoint.services.workspace_group import GroupNotFoundError, get_group_by_name
+def _owner_scope_response(exc: OwnerScopeError | OwnerNotAccessibleError) -> Response:
+    code = (
+        status.HTTP_403_FORBIDDEN
+        if isinstance(exc, OwnerNotAccessibleError)
+        else status.HTTP_400_BAD_REQUEST
+    )
+    return Response({"error": str(exc)}, status=code)
+
+
+def resolve_kg_scope_targets(
+    request: Request,
+    scope: KgScope,
+    *,
+    actor: AbstractBaseUser,
+) -> tuple[Workspace | None, WorkspaceGroup | None, Response | None]:
+    """
+    Resolve workspace or group for shared-scope endpoints.
+    Returns (workspace, group, error_response); exactly one of workspace/group is set on success.
+    """
+    try:
+        owner_id = parse_owner_id_from_request(request)
+    except (OwnerScopeError, OwnerNotAccessibleError) as exc:
+        return None, None, _owner_scope_response(exc)
+
+    if scope.is_group_scope:
+        try:
+            group = get_group_by_name(
+                scope.group_name, actor=actor, owner_id=owner_id
+            )
+        except AmbiguousGroupError as exc:
+            return None, None, Response(
+                {"error": str(exc), "candidates": exc.candidates},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except GroupNotFoundError:
+            return None, None, Response(
+                {"error": f"Group not found: {scope.group_name}"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return None, group, None
 
     try:
-        get_group_by_name(scope.group_name)
-    except GroupNotFoundError:
-        return f"Group not found: {scope.group_name}"
-    return None
+        workspace = get_workspace_by_name(
+            scope.workspace_name, actor=actor, owner_id=owner_id
+        )
+    except AmbiguousWorkspaceError as exc:
+        return None, None, Response(
+            {"error": str(exc), "candidates": exc.candidates},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    except WorkspaceNotFoundError:
+        return None, None, Response(
+            {"error": "Workspace not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    return workspace, None, None
 
 
 def parse_graph_filters_from_request(

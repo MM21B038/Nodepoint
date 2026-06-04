@@ -376,9 +376,17 @@ def enqueue_preprocess_pipeline(
     )
 
 
-def _other_workspaces_needing_preprocess(exclude: str) -> list[str]:
+def _other_workspaces_needing_preprocess(
+    exclude: str, *, actor=None
+) -> list[str]:
+    from nodepoint.services.queue_status import _allowed_workspace_names_for_actor
+
+    allowed = _allowed_workspace_names_for_actor(actor)
     names: list[str] = []
-    for ws in Workspace.objects.order_by("name"):
+    qs = Workspace.objects.order_by("name")
+    if allowed is not None:
+        qs = qs.filter(name__in=allowed)
+    for ws in qs:
         if ws.name == exclude:
             continue
         if workspace_needs_preprocess(ws):
@@ -391,6 +399,7 @@ def enqueue_priority_workspace_preprocess(
     *,
     priority: bool = False,
     include_other_workspaces: bool = False,
+    actor=None,
 ) -> dict[str, Any]:
     """
     POST preprocess: prioritize one workspace and optionally queue the rest.
@@ -408,7 +417,9 @@ def enqueue_priority_workspace_preprocess(
 
     other_workspaces: list[dict[str, Any]] = []
     if include_other_workspaces:
-        for other_name in _other_workspaces_needing_preprocess(workspace_name):
+        for other_name in _other_workspaces_needing_preprocess(
+            workspace_name, actor=actor
+        ):
             result = _enqueue_workspace_preprocess(
                 other_name,
                 orchestrator_queue_name=background_queue,

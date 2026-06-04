@@ -1,33 +1,30 @@
 from rest_framework import status
 from rest_framework.response import Response
-from rest_framework.views import APIView
+from nodepoint.auth.mixins import AuthenticatedAPIView
 
-from nodepoint.models import Workspace
 from nodepoint.services import kg_graph
-from nodepoint.views.kg_scope import resolve_kg_scope, validate_kg_group_exists
+from nodepoint.views.kg_scope import resolve_kg_scope, resolve_kg_scope_targets
 
 
-class KnowledgeGraphEntityTypesAPIView(APIView):
+class KnowledgeGraphEntityTypesAPIView(AuthenticatedAPIView):
     def get(self, request):
         scope, error = resolve_kg_scope(request)
         if error:
             return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
 
-        group_error = validate_kg_group_exists(scope)
-        if group_error:
-            return Response({"error": group_error}, status=status.HTTP_404_NOT_FOUND)
+        _workspace, group, err = resolve_kg_scope_targets(
+            request, scope, actor=request.user
+        )
+        if err is not None:
+            return err
 
-        if scope.is_group_scope:
-            return Response(kg_graph.list_entity_types_for_group(scope.group_name))
-
-        try:
-            payload = kg_graph.list_entity_types_for_workspace_name(
-                scope.workspace_name
-            )
-        except Workspace.DoesNotExist:
+        if group is not None:
             return Response(
-                {"error": "Workspace not found"},
-                status=status.HTTP_404_NOT_FOUND,
+                kg_graph.list_entity_types_for_group(
+                    group.name,
+                    actor=request.user,
+                    owner_id=group.owner_id,
+                )
             )
 
-        return Response(payload)
+        return Response(kg_graph.list_entity_types_for_workspace(_workspace))

@@ -54,3 +54,42 @@ def create_branch_from_compression(
     summary: str,
 ) -> ChatBranch:
     return chat_storage.create_branch_from_compression(conversation, parent_branch, summary)
+
+
+@database_sync_to_async
+def list_sessions(workspace: Workspace) -> list[dict[str, Any]]:
+    return chat_storage.list_sessions(workspace)
+
+
+@database_sync_to_async
+def create_session(
+    workspace: Workspace, *, title: str = ""
+) -> tuple[Conversation, ChatBranch]:
+    return chat_storage.create_session(workspace, title=title)
+
+
+@database_sync_to_async
+def get_session(workspace: Workspace, session_id: uuid.UUID) -> Conversation:
+    return chat_storage.get_session(workspace, session_id)
+
+
+@database_sync_to_async
+def update_session_title(
+    workspace: Workspace, session_id: uuid.UUID, *, title: str
+) -> Conversation:
+    return chat_storage.update_session_title(workspace, session_id, title=title)
+
+
+@database_sync_to_async
+def clear_session(session_id: uuid.UUID) -> tuple[Conversation, ChatBranch]:
+    return chat_storage.clear_session(session_id)
+
+
+@database_sync_to_async
+def delete_session(session_id: uuid.UUID) -> None:
+    return chat_storage.delete_session(session_id)
+
+
+@database_sync_to_async
+def load_root_messages(conversation_id: uuid.UUID) -> list[ChatMessage]:
+    return chat_storage.load_root_messages(conversation_id)

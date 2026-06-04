@@ -128,10 +128,19 @@ def list_entity_types_for_workspace_name(name: str) -> dict:
     return list_entity_types_for_workspace(workspace)
 
 
-def list_entity_types_for_group(group_name: str) -> dict:
-    scope = resolve_group_search_scope(group_name)
+def list_entity_types_for_group(
+    group_name: str,
+    *,
+    actor=None,
+    owner_id: int | None = None,
+) -> dict:
+    scope = resolve_group_search_scope(
+        group_name, actor=actor, owner_id=owner_id
+    )
     workspaces = (
-        get_group_workspaces_qs(group_name).order_by("name")
+        get_group_workspaces_qs(group_name, actor=actor, owner_id=owner_id).order_by(
+            "name"
+        )
         if scope.workspace_names
         else Workspace.objects.none()
     )
@@ -389,24 +398,35 @@ def build_filtered_graph_for_workspace_name(
 def build_filtered_graphs_for_group(
     group_name: str,
     filters: GraphFilters,
+    *,
+    actor=None,
+    owner_id: int | None = None,
 ) -> list[dict]:
-    scope = resolve_group_search_scope(group_name)
+    scope = resolve_group_search_scope(
+        group_name, actor=actor, owner_id=owner_id
+    )
     if scope.is_empty:
         return []
 
     if scope.tag == GroupTag.WORKSPACE:
-        workspaces = get_group_workspaces_qs(group_name).order_by("name")
+        workspaces = get_group_workspaces_qs(
+            group_name, actor=actor, owner_id=owner_id
+        ).order_by("name")
         return [build_filtered_workspace_graph(ws, filters) for ws in workspaces]
 
     if scope.tag == GroupTag.FILES:
         graphs = []
-        doc_ids_by_ws: dict[str, list[UUID]] = {}
+        doc_ids_by_ws_id: dict[int, list[UUID]] = {}
+        workspace_by_id: dict[int, Workspace] = {}
         for doc in Document.objects.filter(id__in=scope.document_ids).select_related(
             "workspace"
         ):
-            doc_ids_by_ws.setdefault(doc.workspace.name, []).append(doc.id)
-        for ws_name, doc_ids in sorted(doc_ids_by_ws.items()):
-            workspace = Workspace.objects.get(name=ws_name)
+            ws = doc.workspace
+            workspace_by_id[ws.pk] = ws
+            doc_ids_by_ws_id.setdefault(ws.pk, []).append(doc.id)
+        for ws_id in sorted(doc_ids_by_ws_id):
+            workspace = workspace_by_id[ws_id]
+            doc_ids = doc_ids_by_ws_id[ws_id]
             file_names = list(
                 Document.objects.filter(id__in=doc_ids).values_list("file_name", flat=True)
             )
@@ -421,19 +441,20 @@ def build_filtered_graphs_for_group(
 
     if scope.tag == GroupTag.ENTITY:
         graphs = []
-        entity_ids_by_ws: dict[str, list[UUID]] = {}
+        entity_ids_by_ws_id: dict[int, list[UUID]] = {}
+        workspace_by_id: dict[int, Workspace] = {}
         for entity in KnowledgeEntity.objects.filter(id__in=scope.entity_ids).select_related(
             "document__workspace"
         ):
-            entity_ids_by_ws.setdefault(entity.document.workspace.name, []).append(
-                entity.id
-            )
-        for ws_name, entity_ids in sorted(entity_ids_by_ws.items()):
-            workspace = Workspace.objects.get(name=ws_name)
+            ws = entity.document.workspace
+            workspace_by_id[ws.pk] = ws
+            entity_ids_by_ws_id.setdefault(ws.pk, []).append(entity.id)
+        for ws_id in sorted(entity_ids_by_ws_id):
+            workspace = workspace_by_id[ws_id]
             graphs.append(
                 build_graph_from_seed_ids(
                     workspace,
-                    entity_ids,
+                    entity_ids_by_ws_id[ws_id],
                     depth=filters.depth,
                     limit=filters.limit,
                     entity_types=filters.entity_types,
@@ -444,19 +465,20 @@ def build_filtered_graphs_for_group(
         return graphs
 
     graphs = []
-    relation_ids_by_ws: dict[str, list[UUID]] = {}
+    relation_ids_by_ws_id: dict[int, list[UUID]] = {}
+    workspace_by_id: dict[int, Workspace] = {}
     for relation in KnowledgeRelation.objects.filter(
         id__in=scope.relation_ids
     ).select_related("document__workspace"):
-        relation_ids_by_ws.setdefault(relation.document.workspace.name, []).append(
-            relation.id
-        )
-    for ws_name, relation_ids in sorted(relation_ids_by_ws.items()):
-        workspace = Workspace.objects.get(name=ws_name)
+        ws = relation.document.workspace
+        workspace_by_id[ws.pk] = ws
+        relation_ids_by_ws_id.setdefault(ws.pk, []).append(relation.id)
+    for ws_id in sorted(relation_ids_by_ws_id):
+        workspace = workspace_by_id[ws_id]
         graphs.append(
             build_graph_from_relation_ids(
                 workspace,
-                relation_ids,
+                relation_ids_by_ws_id[ws_id],
                 depth=filters.depth,
                 limit=filters.limit,
                 filters=filters,

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from django.db.models import Count, QuerySet
 
+from django.contrib.auth import get_user_model
+
 from nodepoint.models import (
     Document,
     DocumentChunk,
@@ -9,6 +11,8 @@ from nodepoint.models import (
     KnowledgeRelation,
     Workspace,
 )
+
+User = get_user_model()
 from nodepoint.services import optional_fields as opt
 from nodepoint.services.workspace_group import user_workspaces_qs
 
@@ -18,8 +22,8 @@ MAX_PAGE_SIZE = 100
 _EMPTY_COUNTS = {"files": 0, "chunks": 0, "entities": 0, "relations": 0}
 
 
-def get_workspace_count_stats() -> dict:
-    base = user_workspaces_qs()
+def get_workspace_count_stats(*, actor: User) -> dict:
+    base = user_workspaces_qs(actor)
     total = base.count()
     in_group = (
         base.filter(group_memberships__isnull=False)
@@ -40,17 +44,31 @@ def parse_group_filter(raw: str | None) -> str | None:
 
 
 def filter_workspaces_by_group(
-    qs: QuerySet[Workspace], group_name: str | None
+    qs: QuerySet[Workspace],
+    group_name: str | None,
+    *,
+    group_owner_id: int | None = None,
 ) -> QuerySet[Workspace]:
     if not group_name:
         return qs
-    return qs.filter(group_memberships__group__name=group_name).distinct()
+    qs = qs.filter(group_memberships__group__name=group_name)
+    if group_owner_id is not None:
+        qs = qs.filter(group_memberships__group__owner_id=group_owner_id)
+    return qs.distinct()
 
 
-def workspaces_base_qs(group_name: str | None = None) -> QuerySet[Workspace]:
+def workspaces_base_qs(
+    actor: User,
+    group_name: str | None = None,
+    *,
+    group_owner_id: int | None = None,
+) -> QuerySet[Workspace]:
     return filter_workspaces_by_group(
-        user_workspaces_qs().order_by("-created_at", "name"),
+        user_workspaces_qs(actor)
+        .select_related("owner")
+        .order_by("-created_at", "name"),
         group_name,
+        group_owner_id=group_owner_id,
     )
 
 
@@ -103,7 +121,10 @@ def serialize_workspace_row(
 ) -> dict:
     groups = sorted(m.group.name for m in ws.group_memberships.all())
     row = {
+        "id": ws.pk,
         "name": ws.name,
+        "owner_id": ws.owner_id,
+        "owner_username": ws.owner.username,
         "tag": opt.optional_field_for_api(ws.tag),
         "description": opt.optional_field_for_api(ws.description),
         "groups": groups,
@@ -173,12 +194,16 @@ def paginate_queryset(
 
 def list_workspaces_paginated(
     *,
+    actor: User,
     group_name: str | None = None,
+    group_owner_id: int | None = None,
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     include_counts: bool = True,
 ) -> dict:
-    base = workspaces_base_qs(group_name).prefetch_related(
+    base = workspaces_base_qs(
+        actor, group_name, group_owner_id=group_owner_id
+    ).prefetch_related(
         "group_memberships__group"
     )
     page_list, pagination = paginate_queryset(

@@ -29,6 +29,21 @@ from nodepoint.models import (
 )
 from nodepoint.services.preprocess_status import build_workspace_preprocess_overall
 
+
+def _allowed_workspace_names_for_actor(actor) -> set[str] | None:
+    """None = no name filter (legacy); with actor, restrict to visible workspaces."""
+    if actor is None:
+        return None
+    from nodepoint.auth.visibility import visible_workspaces_qs
+
+    return set(visible_workspaces_qs(actor).values_list("name", flat=True))
+
+
+def _apply_workspace_name_filter(names: set[str], allowed_names: set[str] | None) -> set[str]:
+    if allowed_names is None:
+        return names
+    return names & allowed_names
+
 logger = logging.getLogger(__name__)
 
 PIPELINE_LOCK_SCAN_PREFIX = "nodepoint:preprocess:pipeline:*"
@@ -108,6 +123,22 @@ def _job_matches_workspace(job: Job, workspace: str) -> bool:
     return False
 
 
+def _job_in_allowed_workspaces(job: Job, allowed_names: set[str]) -> bool:
+    summary = _parse_args_summary(job.func_name, job.args or (), job.kwargs or {})
+    ws = summary.get("workspace")
+    if ws:
+        return ws in allowed_names
+    doc_id = summary.get("document_id")
+    if doc_id:
+        try:
+            doc = Document.objects.filter(pk=doc_id).select_related("workspace").first()
+            if doc and doc.workspace.name in allowed_names:
+                return True
+        except (ValueError, TypeError):
+            pass
+    return False
+
+
 def _serialize_job(job: Job, *, origin_queue: str | None = None) -> dict[str, Any]:
     origin = origin_queue or getattr(job, "origin", None) or job.origin
     return {
@@ -147,7 +178,13 @@ def _queue_counts(queue_name: str, connection) -> dict[str, int]:
     }
 
 
-def _queue_jobs(queue_name: str, connection, *, workspace: str | None) -> list[dict[str, Any]]:
+def _queue_jobs(
+    queue_name: str,
+    connection,
+    *,
+    workspace: str | None,
+    allowed_names: set[str] | None = None,
+) -> list[dict[str, Any]]:
     queue = django_rq.get_queue(queue_name)
     seen: set[str] = set()
     serialized: list[dict[str, Any]] = []
@@ -156,6 +193,10 @@ def _queue_jobs(queue_name: str, connection, *, workspace: str | None) -> list[d
         if job.id in seen:
             return
         if workspace and not _job_matches_workspace(job, workspace):
+            return
+        if not workspace and allowed_names is not None and not _job_in_allowed_workspaces(
+            job, allowed_names
+        ):
             return
         seen.add(job.id)
         serialized.append(_serialize_job(job, origin_queue=origin or queue_name))
@@ -176,18 +217,32 @@ def _queue_jobs(queue_name: str, connection, *, workspace: str | None) -> list[d
     return serialized[:MAX_JOBS_LISTED]
 
 
-def _failed_sample(queue_name: str, connection) -> list[dict[str, Any]]:
+def _failed_sample(
+    queue_name: str,
+    connection,
+    *,
+    workspace: str | None = None,
+    allowed_names: set[str] | None = None,
+) -> list[dict[str, Any]]:
     registry = FailedJobRegistry(queue_name, connection=connection)
     sample: list[dict[str, Any]] = []
     for job_id in registry.get_job_ids()[:MAX_FAILED_SAMPLE]:
         for job in _fetch_jobs([job_id], connection):
+            if workspace and not _job_matches_workspace(job, workspace):
+                continue
+            if not workspace and allowed_names is not None and not _job_in_allowed_workspaces(
+                job, allowed_names
+            ):
+                continue
             entry = _serialize_job(job, origin_queue=queue_name)
             entry["error"] = _truncate(job.exc_info or str(job.latest_result() or ""))
             sample.append(entry)
     return sample
 
 
-def build_rq_snapshot(*, workspace: str | None = None) -> dict[str, Any]:
+def build_rq_snapshot(
+    *, workspace: str | None = None, allowed_names: set[str] | None = None
+) -> dict[str, Any]:
     connection = get_connection()
     queues: dict[str, Any] = {}
     for name in MONITORED_QUEUES:
@@ -196,8 +251,15 @@ def build_rq_snapshot(*, workspace: str | None = None) -> dict[str, Any]:
         try:
             queues[name] = {
                 "counts": _queue_counts(name, connection),
-                "jobs": _queue_jobs(name, connection, workspace=workspace),
-                "failed_sample": _failed_sample(name, connection),
+                "jobs": _queue_jobs(
+                    name, connection, workspace=workspace, allowed_names=allowed_names
+                ),
+                "failed_sample": _failed_sample(
+                    name,
+                    connection,
+                    workspace=workspace,
+                    allowed_names=allowed_names,
+                ),
             }
         except Exception:
             logger.exception("queue_status: failed to read queue %s", name)
@@ -283,31 +345,67 @@ def _vector_backlog_counts(qs) -> dict[str, int]:
     }
 
 
-def _document_qs(workspace: str | None):
+def _document_qs(
+    workspace: str | None,
+    allowed_names: set[str] | None = None,
+    *,
+    workspace_id: int | None = None,
+):
     qs = Document.objects.all()
-    if workspace:
+    if workspace_id is not None:
+        qs = qs.filter(workspace_id=workspace_id)
+    elif workspace:
         qs = qs.filter(workspace__name=workspace)
+    elif allowed_names is not None:
+        qs = qs.filter(workspace__name__in=allowed_names)
     return qs
 
 
-def _chunk_qs(workspace: str | None):
+def _chunk_qs(
+    workspace: str | None,
+    allowed_names: set[str] | None = None,
+    *,
+    workspace_id: int | None = None,
+):
     qs = DocumentChunk.objects.all()
-    if workspace:
+    if workspace_id is not None:
+        qs = qs.filter(document__workspace_id=workspace_id)
+    elif workspace:
         qs = qs.filter(document__workspace__name=workspace)
+    elif allowed_names is not None:
+        qs = qs.filter(document__workspace__name__in=allowed_names)
     return qs
 
 
-def _entity_qs(workspace: str | None):
+def _entity_qs(
+    workspace: str | None,
+    allowed_names: set[str] | None = None,
+    *,
+    workspace_id: int | None = None,
+):
     qs = KnowledgeEntity.objects.all()
-    if workspace:
+    if workspace_id is not None:
+        qs = qs.filter(document__workspace_id=workspace_id)
+    elif workspace:
         qs = qs.filter(document__workspace__name=workspace)
+    elif allowed_names is not None:
+        qs = qs.filter(document__workspace__name__in=allowed_names)
     return qs
 
 
-def _relation_qs(workspace: str | None):
+def _relation_qs(
+    workspace: str | None,
+    allowed_names: set[str] | None = None,
+    *,
+    workspace_id: int | None = None,
+):
     qs = KnowledgeRelation.objects.all()
-    if workspace:
+    if workspace_id is not None:
+        qs = qs.filter(document__workspace_id=workspace_id)
+    elif workspace:
         qs = qs.filter(document__workspace__name=workspace)
+    elif allowed_names is not None:
+        qs = qs.filter(document__workspace__name__in=allowed_names)
     return qs
 
 
@@ -364,7 +462,12 @@ def _chunk_queue_busy(connection) -> bool:
     return False
 
 
-def _orphaned_chunk_count(*, workspace: str | None = None) -> int:
+def _orphaned_chunk_count(
+    *,
+    workspace: str | None = None,
+    allowed_names: set[str] | None = None,
+    workspace_id: int | None = None,
+) -> int:
     """
     Chunks marked QUEUED/INPROGRESS in Postgres with no live process_chunk RQ job.
 
@@ -373,7 +476,7 @@ def _orphaned_chunk_count(*, workspace: str | None = None) -> int:
     """
     live = _chunk_ids_with_live_rq_jobs()
     return (
-        _chunk_qs(workspace)
+        _chunk_qs(workspace, allowed_names, workspace_id=workspace_id)
         .filter(status__in=[Status.QUEUED, Status.INPROGRESS])
         .exclude(id__in=live)
         .count()
@@ -391,7 +494,9 @@ _BACKLOG_DOCUMENT_STATUSES = (
 _VECTOR_BACKLOG_STATUSES = (Status.PENDING, Status.FAILED)
 
 
-def _workspace_names_with_db_backlog() -> set[str]:
+def _workspace_names_with_db_backlog(
+    allowed_names: set[str] | None = None,
+) -> set[str]:
     """Workspace names that may still need preprocess (coarse DB signals)."""
     names: set[str] = set()
     names.update(
@@ -417,11 +522,11 @@ def _workspace_names_with_db_backlog() -> set[str]:
             .values_list("document__workspace__name", flat=True)
             .distinct()
         )
-    return names
+    return _apply_workspace_name_filter(names, allowed_names)
 
 
 def _workspaces_from_rq_queue_jobs(
-    queue_names: tuple[str, ...], connection
+    queue_names: tuple[str, ...], connection, *, allowed_names: set[str] | None = None
 ) -> set[str]:
     names: set[str] = set()
     for queue_name in queue_names:
@@ -444,13 +549,14 @@ def _workspaces_from_rq_queue_jobs(
                 queue_name,
                 exc_info=True,
             )
-    return names
+    return _apply_workspace_name_filter(names, allowed_names)
 
 
 def _collect_incomplete_workspace_candidate_names(
     *,
     active_pipelines: list[dict[str, Any]] | None = None,
     pipeline_locks: list[dict[str, Any]] | None = None,
+    allowed_names: set[str] | None = None,
 ) -> set[str]:
     """
     Names likely not preprocess-ready — avoids scanning every workspace.
@@ -458,23 +564,26 @@ def _collect_incomplete_workspace_candidate_names(
     Uses DB backlog queries, Redis locks, and RQ job args before per-workspace
     rollup. The superset is verified with build_workspace_preprocess_overall.
     """
-    names = _workspace_names_with_db_backlog()
+    names = _workspace_names_with_db_backlog(allowed_names)
     connection = get_connection()
-    names |= _workspaces_from_orchestrator_jobs(connection)
+    names |= _workspaces_from_orchestrator_jobs(connection, allowed_names=allowed_names)
     names |= _workspaces_from_rq_queue_jobs(
         (
             getattr(settings, "RQ_QUEUE_CHUNK", "chunk"),
             getattr(settings, "RQ_QUEUE_VECTOR", "vector"),
         ),
         connection,
+        allowed_names=allowed_names,
     )
     for entry in active_pipelines or []:
-        if entry.get("workspace"):
-            names.add(entry["workspace"])
+        ws = entry.get("workspace")
+        if ws and (allowed_names is None or ws in allowed_names):
+            names.add(ws)
     for lock in pipeline_locks or []:
-        if lock.get("workspace"):
-            names.add(lock["workspace"])
-    return names
+        ws = lock.get("workspace")
+        if ws and (allowed_names is None or ws in allowed_names):
+            names.add(ws)
+    return _apply_workspace_name_filter(names, allowed_names)
 
 
 def _workspace_not_ready_row(
@@ -504,6 +613,7 @@ def _build_workspaces_incomplete_list(
     *,
     active_pipelines: list[dict[str, Any]] | None = None,
     pipeline_locks: list[dict[str, Any]] | None = None,
+    allowed_names: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Workspaces that are not preprocess-ready in Postgres and/or have an active
@@ -517,6 +627,7 @@ def _build_workspaces_incomplete_list(
     candidates = _collect_incomplete_workspace_candidate_names(
         active_pipelines=active_pipelines,
         pipeline_locks=pipeline_locks,
+        allowed_names=allowed_names,
     )
     if not candidates:
         return []
@@ -531,6 +642,8 @@ def _build_workspaces_incomplete_list(
 
     for entry in active_pipelines:
         ws_name = entry["workspace"]
+        if allowed_names is not None and ws_name not in allowed_names:
+            continue
         job_count = len(entry.get("orchestrator_jobs") or [])
         lock_held = bool(entry.get("lock_held"))
         if ws_name in by_name:
@@ -565,15 +678,19 @@ def _build_workspaces_incomplete_list(
     return rows
 
 
-def build_workspaces_preprocess_summary() -> dict[str, Any]:
-    """Lightweight global list of not-ready workspaces (one HTTP round-trip)."""
+def build_workspaces_preprocess_summary(*, actor=None) -> dict[str, Any]:
+    """Lightweight list of not-ready workspaces visible to actor."""
+    allowed = _allowed_workspace_names_for_actor(actor)
     locks = _scan_pipeline_locks()
-    active = build_active_pipelines(locks, workspace=None)
+    if allowed is not None:
+        locks = [lock for lock in locks if lock["workspace"] in allowed]
+    active = build_active_pipelines(locks, workspace=None, allowed_names=allowed)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "workspaces": _build_workspaces_incomplete_list(
             active_pipelines=active,
             pipeline_locks=locks,
+            allowed_names=allowed,
         ),
     }
 
@@ -581,33 +698,51 @@ def build_workspaces_preprocess_summary() -> dict[str, Any]:
 def build_database_backlog(
     *,
     workspace: str | None = None,
+    workspace_id: int | None = None,
     active_pipelines: list[dict[str, Any]] | None = None,
     pipeline_locks: list[dict[str, Any]] | None = None,
+    allowed_names: set[str] | None = None,
 ) -> dict[str, Any]:
     pending_failed = [Status.PENDING, Status.FAILED]
+    scoped = workspace_id is not None or bool(workspace)
     result: dict[str, Any] = {
-        "documents": _status_counts(_document_qs(workspace)),
-        "chunks": _status_counts(_chunk_qs(workspace)),
-        "chunks_orphaned": _orphaned_chunk_count(workspace=workspace),
+        "documents": _status_counts(
+            _document_qs(workspace, allowed_names, workspace_id=workspace_id)
+        ),
+        "chunks": _status_counts(
+            _chunk_qs(workspace, allowed_names, workspace_id=workspace_id)
+        ),
+        "chunks_orphaned": _orphaned_chunk_count(
+            workspace=workspace,
+            allowed_names=allowed_names,
+            workspace_id=workspace_id,
+        ),
         "vectors": {
             "entities": _vector_backlog_counts(
-                _entity_qs(workspace).filter(vector__in=pending_failed)
+                _entity_qs(workspace, allowed_names, workspace_id=workspace_id).filter(
+                    vector__in=pending_failed
+                )
             ),
             "relations": _vector_backlog_counts(
-                _relation_qs(workspace).filter(vector__in=pending_failed)
+                _relation_qs(workspace, allowed_names, workspace_id=workspace_id).filter(
+                    vector__in=pending_failed
+                )
             ),
             "chunks": _vector_backlog_counts(
-                _chunk_qs(workspace).filter(vector__in=pending_failed)
+                _chunk_qs(workspace, allowed_names, workspace_id=workspace_id).filter(
+                    vector__in=pending_failed
+                )
             ),
         },
     }
 
-    if workspace:
+    if scoped:
         return result
 
     result["workspaces_incomplete"] = _build_workspaces_incomplete_list(
         active_pipelines=active_pipelines,
         pipeline_locks=pipeline_locks,
+        allowed_names=allowed_names,
     )
     return result
 
@@ -627,7 +762,9 @@ def _orchestrator_jobs_for_workspace(workspace: str, connection) -> list[dict[st
     return jobs
 
 
-def _workspaces_from_orchestrator_jobs(connection) -> set[str]:
+def _workspaces_from_orchestrator_jobs(
+    connection, *, allowed_names: set[str] | None = None
+) -> set[str]:
     names: set[str] = set()
     try:
         for queue_name in _orchestrator_queue_names():
@@ -648,22 +785,29 @@ def _workspaces_from_orchestrator_jobs(connection) -> set[str]:
             "queue_status: could not scan orchestrator queues for workspaces",
             exc_info=True,
         )
-    return names
+    return _apply_workspace_name_filter(names, allowed_names)
 
 
 def build_active_pipelines(
-    locks: list[dict[str, Any]], *, workspace: str | None = None
+    locks: list[dict[str, Any]],
+    *,
+    workspace: str | None = None,
+    allowed_names: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     connection = get_connection()
     lock_by_ws = {item["workspace"]: item for item in locks}
     try:
-        workspaces = set(lock_by_ws) | _workspaces_from_orchestrator_jobs(connection)
+        workspaces = set(lock_by_ws) | _workspaces_from_orchestrator_jobs(
+            connection, allowed_names=allowed_names
+        )
     except Exception:
         logger.exception("queue_status: failed to scan orchestrator for active pipelines")
         workspaces = set(lock_by_ws)
 
     if workspace:
         workspaces = {workspace} if workspace in workspaces else set()
+    elif allowed_names is not None:
+        workspaces &= allowed_names
 
     active: list[dict[str, Any]] = []
     for ws_name in sorted(workspaces):
@@ -688,26 +832,51 @@ def build_active_pipelines(
     return active
 
 
-def build_queue_status(*, workspace: str | None = None) -> dict[str, Any]:
+def build_queue_status(
+    *,
+    workspace: str | None = None,
+    workspace_id: int | None = None,
+    actor=None,
+) -> dict[str, Any]:
     """
-    Full operational snapshot. Optional workspace filters job lists and DB scope;
-    global lock scan still returns all locks (use active_pipelines for focus).
+    Operational snapshot scoped to workspaces visible to actor when provided.
+    When workspace_id is set, DB counts use that pk (disambiguates duplicate names).
     """
     ws = (workspace or "").strip() or None
+    allowed = _allowed_workspace_names_for_actor(actor)
+    if workspace_id is not None:
+        if actor is not None:
+            from nodepoint.auth.visibility import visible_workspaces_qs
+
+            if not visible_workspaces_qs(actor).filter(pk=workspace_id).exists():
+                raise PermissionError(f"Workspace not accessible: id={workspace_id}")
+        if not ws:
+            ws = (
+                Workspace.objects.filter(pk=workspace_id)
+                .values_list("name", flat=True)
+                .first()
+            )
+    elif ws and allowed is not None and ws not in allowed:
+        raise PermissionError(f"Workspace not accessible: {ws}")
+
     locks = _scan_pipeline_locks()
     if ws:
         locks = [lock for lock in locks if lock["workspace"] == ws]
+    elif allowed is not None:
+        locks = [lock for lock in locks if lock["workspace"] in allowed]
 
-    active = build_active_pipelines(locks, workspace=ws)
+    active = build_active_pipelines(locks, workspace=ws, allowed_names=allowed)
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "workspace_filter": ws,
-        "rq": build_rq_snapshot(workspace=ws),
+        "rq": build_rq_snapshot(workspace=ws, allowed_names=allowed),
         "redis": {"pipeline_locks": locks},
         "database": build_database_backlog(
             workspace=ws,
+            workspace_id=workspace_id,
             active_pipelines=active if not ws else None,
             pipeline_locks=locks if not ws else None,
+            allowed_names=allowed,
         ),
         "active_pipelines": active,
     }

@@ -1,5 +1,5 @@
 [agent]
-model = "GLM5"
+model = "coder"
 parser = "DeepSeek"
 vector = "Qwen3-Embedding-8B"
 dim = 256

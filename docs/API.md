@@ -48,20 +48,66 @@ Group-scope (cross-workspace)                      Per-workspace
 
 Create named groups and assign workspaces (many-to-many). Use **`group=<name>`** on KG, entity search, chat summary, and group chat.
 
+Group **names are unique per owner** (same rules as workspaces). List rows include `id`, `owner_id`, `owner_username`. Any URL with `/api/group/<name>/` accepts `?owner_id=` or `?owner_username=` when admin/superadmin see duplicate names — see [per-owner naming](#workspace--per-owner-naming).
+
 | Use | API |
 |-----|-----|
-| Create group | `POST /api/group/create/` body `{ "name": "research", "tag": "workspace", "description": "..." }` (`tag` optional, default `workspace`) |
-| List groups | `GET /api/group/list/` (`?tag=`, `?page=`, `?page_size=`) |
-| Group detail | `GET /api/group/<name>/` (`?page=`, `?page_size=` — paginated members) |
-| List group members | `GET /api/group/<name>/members/` (`?page=`, `?page_size=`) — all tag types |
+| Create group | `POST /api/group/create/` body `{ "name": "research", "tag": "workspace", "description": "..." }` (`tag` optional, default `workspace`) — owned by caller |
+| List groups | `GET /api/group/list/` (`?tag=`, `?owner_id=`, `?owner_username=`, `?page=`, `?page_size=`) — rows include `owner_id`, `owner_username` |
+| Resolve group owner | `GET /api/group/lookup/?name=<name>` (`?owner_id=`, `?owner_username=`, optional `?tag=`) — returns `matches[]` with owner per row; `ambiguous: true` when more than one |
+| Group detail | `GET /api/group/<name>/` (`?page=`, `?page_size=`, optional `?owner_id=`) |
+| List group members | `GET /api/group/<name>/members/` (`?page=`, `?page_size=`, optional `?owner_id=`) |
 | Update group | `PATCH /api/group/<name>/` body `{ "name", "description" }` only (`tag` immutable) |
-| Add / remove workspace | `POST` / `DELETE` `/api/group/<name>/workspaces/` (tag must be `workspace`) |
+| Add / remove workspace | `POST` / `DELETE` `/api/group/<name>/workspaces/` (tag must be `workspace`; `?owner_id=` on group + `workspace_name` in body if needed) |
 | Add / remove file | `POST` / `DELETE` `/api/group/<name>/files/` (tag must be `files`) |
 | Add / remove entity | `POST` / `DELETE` `/api/group/<name>/entities/` (tag must be `entity`) |
 | Add / remove relation | `POST` / `DELETE` `/api/group/<name>/relations/` (tag must be `relation`) |
+| Eligible members (picker) | `GET /api/group/<name>/add-options/` (`?page=`, `?page_size=`, optional `?search=`, optional `?candidate_owner_id=` to narrow candidates) |
+| Eligible groups for workspace | `GET /api/workspace/<name>/group-options/` (`?page=`, `?page_size=`, optional `?search=`, optional `?owner_id=` on workspace) |
 | Delete group | `DELETE /api/group/<name>/` |
 | KG / search across group | `?group=<name>` |
-| Group chat | `GET/DELETE /api/chat/group/<name>/`, `ws://.../ws/chat/group/<name>/` |
+| Group chat | Session REST under `/api/chat/group/<name>/sessions/`, `ws://.../ws/chat/group/<name>/?session_id=<uuid>` |
+
+**Membership ownership rules** — enforced on all add endpoints and reflected in picker APIs:
+
+| Actor | Group owner | Resource owner | Add allowed? |
+|-------|-------------|----------------|--------------|
+| `user` | self | self | yes |
+| `user` | self | other | no (`403`) |
+| `admin` | **self** | self or managed user | **yes** (aggregate collection) |
+| `admin` | managed user | that user only | yes |
+| `admin` | managed user | different managed user | **no** (`403`) |
+| `superadmin` | self | any visible | yes |
+| `superadmin` | other user | that user only | yes |
+
+The actor must also **see** the resource being added; invisible resources return **`404`**. Policy violations return **`403`** with `Cannot add another user's resource to this group`.
+
+**Picker examples**
+
+```bash
+# Workspaces eligible for admin-owned aggregate group (excludes already members)
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/group/research/add-options/?owner_id=3&page=1&page_size=20"
+
+# Narrow file/entity candidates to one managed user
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/group/docs/add-options/?owner_id=3&candidate_owner_id=7"
+
+# Which user owns "research" when the name is ambiguous (picker before calling /api/group/research/)
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/group/lookup/?name=research"
+
+# Workspace-tagged groups where this workspace can be added (already_member for UI disable)
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/workspace/PRAJNA/group-options/?owner_id=3"
+```
+
+| Group tag | `GET .../add-options/` item fields |
+|-----------|-----------------------------------|
+| `workspace` | `id`, `name`, `owner_id`, `owner_username`, `tag`, `description` |
+| `files` | `document_id`, `workspace`, `workspace_owner_id`, `owner_id`, `owner_username`, `file_name` |
+| `entity` | `entity_id`, `name`, `entity_type`, `workspace`, `document_id`, `owner_id`, `owner_username` |
+| `relation` | `relation_id`, `source_name`, `target_name`, `workspace`, `owner_id`, `owner_username` |
 
 | Use | API |
 |-----|-----|
@@ -71,12 +117,23 @@ Create named groups and assign workspaces (many-to-many). Use **`group=<name>`**
 
 **Group `limit` / `depth`:** applied **per workspace** in group responses.
 
-### Two chat modes (separate threads)
+### Chat sessions and incognito
 
-| Mode | REST | WebSocket | Message storage |
-|------|------|-----------|-----------------|
-| **Group-scope** | `GET/DELETE /api/chat/group/<name>/` | `/ws/chat/group/<name>/` | Internal `__group_chat__<name>` |
-| **Per-workspace** | `GET/DELETE /api/chat/<workspace_name>/` | `/ws/chat/<workspace_name>/` | That workspace’s conversation |
+Each workspace (and each group’s internal `__group_chat__<name>` workspace) supports **multiple saved sessions**. Clients must create or select a `session_id` before chatting.
+
+| Mode | REST | WebSocket query | Persistence |
+|------|------|-----------------|-------------|
+| **Saved session** | `/api/chat/.../sessions/` CRUD | `?session_id=<uuid>` | Postgres |
+| **Incognito** | Not available | `?incognito=true` | None (in-memory only) |
+
+Legacy `GET/DELETE /api/chat/<workspace>/` and `/api/chat/group/<name>/` return **`400`** with a hint to use the sessions API.
+
+### Two chat scopes (separate session lists)
+
+| Scope | Session REST base | WebSocket |
+|-------|-------------------|-----------|
+| **Group-scope** | `/api/chat/group/<name>/sessions/` | `/ws/chat/group/<name>/` |
+| **Per-workspace** | `/api/chat/<workspace_name>/sessions/` | `/ws/chat/<workspace_name>/` |
 
 Per-workspace chat searches **only** that workspace (not other group members).
 
@@ -88,7 +145,266 @@ If `workspace_name` is omitted on upload, the file goes to the **oldest** user w
 
 Names starting with `__group_chat__` and legacy `__flagged_chat__` are reserved.
 
-**Authentication — None on these endpoints (add at the gateway if needed).
+### Authentication
+
+All `/api/` endpoints except auth registration and token exchange require authentication.
+
+| Method | Header / body |
+|--------|----------------|
+| JWT (interactive) | `Authorization: Bearer <access_token>` from `POST /api/auth/token/` |
+| API key (automation) | `Authorization: Api-Key np_<prefix>_<secret>` or `X-Api-Key: ...` |
+
+**Auth endpoints (summary)**
+
+| Method | Path | Who |
+|--------|------|-----|
+| POST | `/api/auth/register/` | Public |
+| POST | `/api/auth/token/` | Public — JWT login |
+| POST | `/api/auth/token/refresh/` | Public |
+| GET | `/api/auth/me/` | Authenticated |
+| POST | `/api/auth/me/password/` | Self — change password |
+| GET | `/api/auth/me/allowed-scopes/` | Self — JWT allowlist |
+| POST | `/api/auth/account/delete/` | Self — schedule deletion (30-day grace) |
+| POST | `/api/auth/account/recover/` | Public — recover pending deletion |
+| GET | `/api/auth/account/deletion-status/` | Self |
+| GET/POST | `/api/auth/users/` | Admin+ — list (filtered) / create |
+| GET/PATCH/DELETE | `/api/auth/users/<id>/` | Admin+ — detail / update / schedule deletion |
+| POST | `/api/auth/users/<id>/purge/` | Admin+ — **permanent** delete (no recovery) |
+| GET/PATCH | `/api/auth/users/<id>/allowed-scopes/` | Admin+ — JWT allowlist |
+| GET/POST | `/api/auth/api-keys/` | Self or admin — list (filtered) / create |
+| PATCH/DELETE | `/api/auth/api-keys/<id>/` | Owner or admin — activate/deactivate / remove |
+| GET | `/api/auth/scopes/` | Scope codes + expiry presets |
+| GET | `/api/auth/usage/me/` | Self |
+| GET | `/api/auth/usage/` | Superadmin |
+| GET | `/api/auth/usage/users/<id>/` | Admin+ |
+
+**Password policy:** minimum 8 characters with uppercase, lowercase, digit, and special character.
+
+**Roles:** `superadmin`, `admin`, `user`. Admins manage users they created (`managed_by`). Superadmin sees all users and platform usage.
+
+Set `ALLOW_OPEN_ADMIN_SIGNUP=false` to block public admin registration.
+
+---
+
+#### Account states (users)
+
+Three concepts appear in list/detail responses:
+
+| Field | Meaning |
+|-------|---------|
+| `status` | DB lifecycle: `active`, `pending_deletion`, `purged` (purged users no longer exist) |
+| `is_active` | Login/API gate: `false` = disabled by admin (inactive) |
+| `account_state` | **UI summary** — `active`, `inactive`, or `pending_deletion` |
+
+| `account_state` | Login | Data | Recover? |
+|-----------------|-------|------|----------|
+| `active` | Yes | Kept | N/A |
+| `inactive` | No | Kept until purged | **No** — use permanent purge |
+| `pending_deletion` | No | Kept until purge date | **Yes** — `POST /api/auth/account/recover/` within grace period |
+
+**Admin workflows**
+
+1. **Disable without deleting** — `PATCH /api/auth/users/<id>/` with `{ "is_active": false }`. Revokes all API keys (sets `is_active: false`). User cannot log in.
+2. **Re-enable** — `PATCH` with `{ "is_active": true }` (only when `account_state` is not `pending_deletion`).
+3. **Soft delete (recoverable)** — `DELETE /api/auth/users/<id>/` or self `POST /api/auth/account/delete/`. Sets `pending_deletion`, 30-day grace (`ACCOUNT_DELETION_GRACE_DAYS`), then `manage.py purge_deleted_users` removes account + data.
+4. **Permanent purge (not recoverable)** — `POST /api/auth/users/<id>/purge/` when `can_purge_permanently` is `true` (inactive admin-disabled account, or `pending_deletion`). Deletes user row, workspaces, groups, documents, API keys, and workspace media on disk. **Cannot be undone.**
+
+List/detail flags: `can_activate`, `can_deactivate`, `can_purge_permanently`, `can_recover`.
+
+---
+
+#### `GET /api/auth/users/` — list users (admin+)
+
+**Query filters**
+
+| Param | Values | Effect |
+|-------|--------|--------|
+| `role` | `user`, `admin`, `superadmin` | Filter by role |
+| `account_state` | `active`, `inactive`, `pending_deletion` | Recommended UI filter |
+| `status` | `active`, `pending_deletion` | Raw profile status |
+| `is_active` | `true` / `false` | Django `is_active` flag |
+| `search` | substring | Username contains (case-insensitive) |
+| `page`, `page_size` | integers | Pagination (default page size 20, max 100) |
+
+**Response `200`**
+
+```json
+{
+  "users": [
+    {
+      "id": 3,
+      "username": "alice",
+      "role": "user",
+      "status": "active",
+      "account_state": "active",
+      "is_active": true,
+      "purge_scheduled_at": null,
+      "allowed_scopes": ["workspace:read", "document:read"],
+      "managed_by": 2,
+      "managed_by_username": "admin1",
+      "date_joined": "2026-06-01T10:00:00Z",
+      "api_keys_total": 2,
+      "api_keys_active": 1,
+      "workspaces_total": 4,
+      "can_activate": false,
+      "can_deactivate": true,
+      "can_purge_permanently": false,
+      "can_recover": false
+    }
+  ],
+  "pagination": { "page": 1, "page_size": 20, "total_items": 1, "total_pages": 1, "has_next": false, "has_previous": false },
+  "filters": { "role": "user", "account_state": null, "status": null, "is_active": null, "search": null }
+}
+```
+
+---
+
+#### `GET /api/auth/users/<id>/` — user detail
+
+Same object shape as one element of `users[]` above.
+
+#### `POST /api/auth/users/` — create user
+
+Body:
+
+```json
+{
+  "username": "alice",
+  "password": "SecurePass123!",
+  "role": "user",
+  "allowed_scopes": ["workspace:read", "document:read"]
+}
+```
+
+- Admin may only create `role: "user"` (auto `managed_by` = that admin).
+- Superadmin may create `user` or `admin`; optional `managed_by_id` for users.
+- Alias: `access` instead of `allowed_scopes`.
+- New users are `account_state: "active"`, `is_active: true`.
+
+#### `PATCH /api/auth/users/<id>/`
+
+| Field | Effect |
+|-------|--------|
+| `password` | Set new password (no current password required for admin) |
+| `is_active` | `false` → deactivate + revoke API keys; `true` → activate |
+| `allowed_scopes` / `access` | JWT scope allowlist |
+
+Cannot set `is_active: true` on `pending_deletion` accounts (use recover endpoint).
+
+#### `DELETE /api/auth/users/<id>/`
+
+Schedules **recoverable** deletion (`pending_deletion`, 30-day grace). Not a permanent delete.
+
+#### `POST /api/auth/users/<id>/purge/`
+
+**Permanent** removal. Response example:
+
+```json
+{
+  "user_id": 3,
+  "username": "alice",
+  "workspaces_removed": 4,
+  "purged": true,
+  "recoverable": false
+}
+```
+
+Requires prior deactivation (`inactive`) or `pending_deletion`. Superadmin accounts cannot be purged.
+
+---
+
+#### API keys — list, create, lifecycle
+
+**`GET /api/auth/api-keys/`**
+
+| Param | Effect |
+|-------|--------|
+| `user_id` | Keys for one user |
+| `role` | Keys whose owner has this role |
+| `is_active` | `true` / `false` |
+| `include_expired` | Default `true`; set `false` to hide expired keys |
+| `page`, `page_size` | Pagination |
+
+**Response `200`**
+
+```json
+{
+  "api_keys": [
+    {
+      "id": "uuid",
+      "name": "CI pipeline",
+      "user_id": 3,
+      "user_username": "alice",
+      "user_role": "user",
+      "allowed_scopes": ["workspace:read"],
+      "expires_at": "2027-06-01T00:00:00Z",
+      "is_active": true,
+      "key_status": "active",
+      "is_expired": false,
+      "last_used_at": "2026-06-03T12:00:00Z",
+      "created_at": "2026-06-01T10:00:00Z"
+    }
+  ],
+  "pagination": { "...": "..." },
+  "filters": { "user_id": null, "role": "user", "is_active": "true", "include_expired": null }
+}
+```
+
+`key_status`: `active` (usable), `inactive` (revoked), `expired` (past `expires_at`).
+
+**`POST /api/auth/api-keys/`** — body `{ "user_id", "scopes", "expiry_preset", "name?" }`. Returns one-time `key` field (full secret). Target user must be `account_state: active`. Presets: `3_months`, `6_months`, `12_months`, `2_years`.
+
+**`PATCH /api/auth/api-keys/<id>/`** — `{ "is_active": false, "name": "..." }`. Cannot activate a key if the owning user account is inactive.
+
+**`DELETE /api/auth/api-keys/<id>/`** — **Hard-deletes** the row from the database. Key must be deactivated first (`PATCH is_active: false`); otherwise `400`.
+
+---
+
+#### JWT scopes (`allowed_scopes`)
+
+| Profile `allowed_scopes` | JWT access |
+|--------------------------|------------|
+| `null` (omit on create) | Role default (admin/superadmin: unrestricted; user: read + preprocess write) |
+| `["workspace:read", …]` | Explicit allowlist |
+| `[]` | No scoped endpoints |
+
+`PATCH /api/auth/users/<id>/allowed-scopes/` or include on user `PATCH`. List codes: `GET /api/auth/scopes/`.
+
+**Assignable scope codes (no `kg:write`)**
+
+| Code | Purpose |
+|------|---------|
+| `workspace:read` / `workspace:write` | Workspaces |
+| `document:read` / `document:write` | Documents |
+| `chat:read` / `chat:write` | Chat |
+| `group:read` / `group:write` | Groups (membership changes) |
+| `kg:read` | Knowledge graph reads only (all KG routes are GET) |
+| `preprocess:read` / `preprocess:write` | Preprocess status and triggers |
+
+There is **no `kg:write`** in the API. Use `group:write` to add entities/files/relations to groups.
+
+**Scope validation errors (`400`)**
+
+| Situation | Example |
+|-----------|---------|
+| Unknown scope | `{ "allowed_scopes": ["Unknown scopes: ['foo']"] }` |
+| Assigner lacks scope | `{ "allowed_scopes": ["Cannot assign scopes you do not hold: [...]"] }` |
+
+---
+
+#### Password & self-service deletion
+
+| Action | Endpoint |
+|--------|----------|
+| Change own password | `POST /api/auth/me/password/` — `{ "current_password", "new_password" }` |
+| Schedule own deletion | `POST /api/auth/account/delete/` — `{ "confirm_password" }` |
+| Recover | `POST /api/auth/account/recover/` — `{ "username", "password", "role" }` |
+
+---
+
+#### Per-owner workspace / group names
+
+See [Workspace — per-owner naming](#workspace--per-owner-naming) for full rules, list fields, and query parameters.
 
 ---
 
@@ -138,13 +454,15 @@ Base path: `/api/`. All paths below are relative to that prefix.
 |--------|------|---------|
 | POST | `workspace/create/` | Create workspace + media folder |
 | PATCH | `workspace/update/<name>/` | Update workspace name, tag, description |
-| GET | `workspace/list/` | List user workspaces (`groups`, excludes `__flagged_chat__`) |
+| GET | `workspace/list/` | Paginated workspaces (`id`, `owner_id`, `owner_username`, `groups`) |
+| GET | `workspace/lookup/` | Resolve workspace name → owner(s) (`matches`, `ambiguous`) |
 | GET | `workspace/stats/` | Totals: all, in_group, ungrouped workspace counts |
-| GET | `workspace/page/` | Paginated workspaces with file/chunk/entity/relation counts |
-| DELETE | `workspace/delete/<name>/` | Delete workspace and files |
-| POST | `group/create/` | Create workspace group (`tag`: `workspace` \| `files` \| `entity` \| `relation`) |
-| GET | `group/list/` | Paginated groups (`?tag=` filter optional) |
-| GET | `group/<name>/members/` | Paginated typed members (all tags) |
+| GET | `workspace/page/` | Paginated workspaces with counts (`id`, owner fields) |
+| DELETE | `workspace/delete/<name>/` | Delete workspace (`?owner_id=` if ambiguous) |
+| POST | `group/create/` | Create group (name unique per owner) |
+| GET | `group/list/` | Paginated groups (`id`, `owner_id`, `owner_username`; optional `?owner_id=`) |
+| GET | `group/lookup/` | Resolve group name → owner(s) (`matches`, `ambiguous`) |
+| GET | `group/<name>/members/` | Paginated members (`?owner_id=` if ambiguous) |
 | GET | `group/<name>/` | Group detail + paginated members |
 | PATCH | `group/<name>/` | Update group name/description |
 | POST | `group/<name>/workspaces/` | Add workspace (workspace tag only) |
@@ -156,8 +474,14 @@ Base path: `/api/`. All paths below are relative to that prefix.
 | POST | `group/<name>/relations/` | Add relation (relation tag only) |
 | DELETE | `group/<name>/relations/<relation_id>/` | Remove relation |
 | DELETE | `group/<name>/` | Delete group |
-| GET | `chat/group/<name>/` | Group-scoped chat history |
-| DELETE | `chat/group/<name>/` | Clear group-scoped chat |
+| GET | `chat/group/<name>/sessions/` | List group-scoped sessions |
+| POST | `chat/group/<name>/sessions/` | Create group-scoped session |
+| GET | `chat/group/<name>/sessions/<uuid>/` | Session history |
+| PATCH | `chat/group/<name>/sessions/<uuid>/` | Rename session |
+| DELETE | `chat/group/<name>/sessions/<uuid>/` | Delete session |
+| POST | `chat/group/<name>/sessions/<uuid>/clear/` | Clear session messages |
+| GET | `chat/group/<name>/` | **Deprecated** — returns `400` |
+| DELETE | `chat/group/<name>/` | **Deprecated** — returns `400` |
 | POST | `document/upload/` | Upload `.txt`/`.md`; queue preprocess pipeline |
 | GET | `document/<workspace_name>/` | List documents in workspace |
 | DELETE | `document/delete/<workspace_name>/<file_name>/` | Delete one document |
@@ -172,11 +496,17 @@ Base path: `/api/`. All paths below are relative to that prefix.
 | GET | `knowledge/relation/<uuid>/` | Relation record JSON |
 | GET | `knowledge/chunk/<uuid>/` | Chunk record JSON (Mongo text) |
 | GET | `knowledge/document/<uuid>/` | Document text JSON |
-| GET | `chat/<workspace_name>/` | Per-workspace chat history |
-| DELETE | `chat/<workspace_name>/` | Clear per-workspace chat |
-| GET | `chat/summary/` | Message counts / `updated_at` |
+| GET | `chat/<workspace_name>/sessions/` | List workspace sessions |
+| POST | `chat/<workspace_name>/sessions/` | Create workspace session |
+| GET | `chat/<workspace_name>/sessions/<uuid>/` | Session history |
+| PATCH | `chat/<workspace_name>/sessions/<uuid>/` | Rename session |
+| DELETE | `chat/<workspace_name>/sessions/<uuid>/` | Delete session |
+| POST | `chat/<workspace_name>/sessions/<uuid>/clear/` | Clear session messages |
+| GET | `chat/<workspace_name>/` | **Deprecated** — returns `400` |
+| DELETE | `chat/<workspace_name>/` | **Deprecated** — returns `400` |
+| GET | `chat/summary/` | Per-session metadata (`sessions` array) |
 
-WebSocket (not under `/api/`): `ws://<host>/ws/chat/group/<name>/`, `ws://<host>/ws/chat/<workspace_name>/`.
+WebSocket (not under `/api/`): `ws://<host>/ws/chat/group/<name>/?session_id=<uuid>` or `?incognito=true`; same for `/ws/chat/<workspace_name>/`.
 
 ---
 
@@ -188,6 +518,8 @@ Several endpoints require **exactly one** scope (not both, not neither):
 |-------|-------|---------|
 | Single workspace | `workspace_name=PRAJNA` | Data from that workspace only |
 | Group | `group=<name>` | One result object **per** group member workspace, excluding internal `__group_chat__*` workspaces |
+
+When your role can see **more than one** workspace or group with the same name, add **`owner_id`** or **`owner_username`** on the same request (see [per-owner naming](#workspace--per-owner-naming)). Omitting owner hints when ambiguous returns **`400`** with `candidates`.
 
 Applies to:
 
@@ -202,22 +534,78 @@ Applies to:
 # Single workspace
 curl "http://localhost:8000/api/knowledge-graph/?workspace_name=PRAJNA&depth=1&limit=100"
 
+# Disambiguate when multiple visible workspaces share a name
+curl "http://localhost:8000/api/knowledge-graph/?workspace_name=PRAJNA&owner_id=3&depth=1"
+
 # All group member workspaces (per-workspace graphs in arrays)
-curl "http://localhost:8000/api/knowledge-graph/?group=<name>&entity_type=PER"
+curl "http://localhost:8000/api/knowledge-graph/?group=research&entity_type=PER"
+curl "http://localhost:8000/api/knowledge-graph/?group=research&owner_id=3&entity_type=PER"
 
-curl "http://localhost:8000/api/knowledge/entities/search/?q=Alice&group=<name>&threshold=0.6"
+curl "http://localhost:8000/api/knowledge/entities/search/?q=Alice&group=research&threshold=0.6"
+curl "http://localhost:8000/api/chat/summary/?group=research&owner_id=3"
 
-curl "http://localhost:8000/api/group/<name>/"
+curl "http://localhost:8000/api/group/research/?owner_id=3"
 ```
 
 | Status | Condition |
 |--------|-----------|
-| `400` | Both `workspace_name` and `group=<name>`, or neither |
-| `404` | Unknown `workspace_name` (single-workspace mode only) |
+| `400` | Both `workspace_name` and `group`, or neither; invalid filters; or ambiguous name (`candidates`) |
+| `404` | Unknown workspace or group (not visible to you) |
 
 ---
 
 ## Workspace
+
+### Workspace — per-owner naming
+
+Workspace and group **names are unique per owner** (`owner` + `name`), not globally. User **alice** and user **bob** can each have a workspace named `PRAJNA`. Files stay unique **per workspace** (`workspace` + `file_name`).
+
+**Who sees what**
+
+| Role | Workspaces / groups in lists |
+|------|------------------------------|
+| `user` | Own resources only |
+| `admin` | Own + resources owned by users they manage (`managed_by`) |
+| `superadmin` | All users’ resources |
+
+**List row fields (always present)**
+
+| Field | Use in UI |
+|-------|-----------|
+| `id` | Stable primary key for the workspace or group row |
+| `name` | Display name (may repeat across owners) |
+| `owner_id` | Owner user id — use for API disambiguation |
+| `owner_username` | Show as tag/label, e.g. `PRAJNA · alice` |
+| `tag` | Optional user-defined label on the workspace (not the owner) |
+
+**Name-based URLs** (`/api/workspace/update/<name>/`, `/api/group/<name>/`, `/api/document/<workspace_name>/`, preprocess, chat scope, etc.):
+
+| Query param | When to use |
+|-------------|-------------|
+| `owner_id` | Required when your role can see **more than one** workspace/group with the same `name` |
+| `owner_username` | Alternative to `owner_id` (must be a user you are allowed to see) |
+
+If the name matches multiple visible resources and you omit owner hints:
+
+**Response `400`**
+
+```json
+{
+  "error": "Multiple workspaces named 'PRAJNA'; specify owner_id or owner_username",
+  "candidates": [
+    { "owner_id": 3, "owner_username": "alice", "workspace_id": 12 },
+    { "owner_id": 7, "owner_username": "bob", "workspace_id": 41 }
+  ]
+}
+```
+
+(Group routes return `group_id` in `candidates` instead of `workspace_id`.)
+
+**Media on disk:** `media/workspaces/<owner_id>/<workspace_name>/` (not a single global folder per name).
+
+**Create / rename:** Duplicate-name errors are **per owner** — `Workspace already exists for this owner: PRAJNA`, not “already exists globally”.
+
+---
 
 ### `POST /api/workspace/create/`
 
@@ -241,7 +629,10 @@ Create a workspace and its media directory.
 {
   "message": "Workspace created successfully",
   "workspace": {
+    "id": 12,
     "name": "PRAJNA",
+    "owner_id": 3,
+    "owner_username": "alice",
     "tag": "notes",
     "description": "Primary knowledge base",
     "created_at": "2026-05-15T12:00:00.123456Z"
@@ -249,9 +640,11 @@ Create a workspace and its media directory.
 }
 ```
 
+New workspaces are owned by the authenticated user.
+
 | Status | Condition |
 |--------|-----------|
-| `400` | `name` missing or reserved |
+| `400` | `name` missing, reserved, or **already exists for this owner** |
 
 ---
 
@@ -259,7 +652,9 @@ Create a workspace and its media directory.
 
 Update workspace metadata. Include **one or more** of `name`, `tag`, `description`. Omitted fields are unchanged; `null` clears `tag` or `description`.
 
-Renaming updates the media folder and Qdrant vector payloads for that workspace.
+**Query (when needed):** `?owner_id=` or `?owner_username=` — see [per-owner naming](#workspace--per-owner-naming).
+
+Renaming updates the media folder under `media/workspaces/<owner_id>/` and Qdrant vector payloads for that workspace.
 
 **Body**
 
@@ -277,7 +672,10 @@ Renaming updates the media folder and Qdrant vector payloads for that workspace.
 {
   "message": "Workspace updated successfully",
   "workspace": {
+    "id": 12,
     "name": "PRAJNA-v2",
+    "owner_id": 3,
+    "owner_username": "alice",
     "tag": "notes",
     "description": "Updated description",
     "created_at": "2026-05-15T12:00:00.123456Z"
@@ -290,28 +688,106 @@ Renaming updates the media folder and Qdrant vector payloads for that workspace.
 
 | Status | Condition |
 |--------|-----------|
-| `400` | No fields to update, reserved name, duplicate name, or invalid tag/description |
-| `404` | Unknown workspace |
+| `400` | No fields to update, reserved name, duplicate name **for this owner**, ambiguous name (see `candidates`), or invalid tag/description |
+| `404` | Unknown workspace (or not visible to you) |
 
 ---
 
 ### `GET /api/workspace/list/`
 
-Lightweight paginated list (name, tag, description, groups, `created_at` only — **no** file/entity counts). Same pagination query params as `GET /api/workspace/page/`. For counts use `/api/workspace/page/`.
+Lightweight paginated list: `id`, `name`, `owner_id`, `owner_username`, `tag`, `description`, `groups`, `created_at` — **no** file/entity counts. Same pagination query params as `GET /api/workspace/page/`. For counts use `/api/workspace/page/`.
 
-**Response `200`** — object with `workspaces`, `pagination`, `include_counts` (always `false`). Internal chat workspaces omitted.
+### `GET /api/workspace/lookup/`
+
+Resolve a workspace **name** to owner(s) without calling a mutating route. Use in UI pickers when the same name may exist for multiple users (admin/superadmin).
+
+**Query:** `name` (required), optional `owner_id` / `owner_username` to narrow to one match, optional `tag` (not used on workspaces — reserved).
+
+**Response `200`**
 
 ```json
 {
-  "include_counts": false,
-  "pagination": { "page": 1, "page_size": 20, "total_items": 522, "total_pages": 27, "has_next": true, "has_previous": false },
-  "workspaces": [
-    { "name": "PRAJNA", "tag": "notes", "description": "Primary knowledge base", "groups": ["research"], "created_at": "2026-05-15T12:00:00.123456Z" }
+  "name": "PRAJNA",
+  "ambiguous": true,
+  "matches": [
+    {
+      "id": 12,
+      "name": "PRAJNA",
+      "owner_id": 3,
+      "owner_username": "alice",
+      "tag": "notes",
+      "description": null,
+      "created_at": "2026-05-15T12:00:00.123456Z"
+    },
+    {
+      "id": 41,
+      "name": "PRAJNA",
+      "owner_id": 7,
+      "owner_username": "bob",
+      "tag": null,
+      "description": null,
+      "created_at": "2026-06-01T08:00:00.123456Z"
+    }
   ]
 }
 ```
 
-`tag` and `description` are `null` when not set.
+| Status | Condition |
+|--------|-----------|
+| `400` | Missing or invalid `name` |
+| `404` | No visible workspace with that name (for this owner filter, if any) |
+
+---
+
+**Query parameters**
+
+| Param | Description |
+|-------|-------------|
+| `page`, `page_size` | Pagination (default page size 20, max 100) |
+
+For filtering by group name use `GET /api/workspace/page/?group=…` (supports `owner_id` / `owner_username`).
+
+Internal chat workspaces (`__group_chat__…`) are omitted.
+
+**Response `200`**
+
+```json
+{
+  "include_counts": false,
+  "pagination": {
+    "page": 1,
+    "page_size": 20,
+    "total_items": 522,
+    "total_pages": 27,
+    "has_next": true,
+    "has_previous": false
+  },
+  "workspaces": [
+    {
+      "id": 12,
+      "name": "PRAJNA",
+      "owner_id": 3,
+      "owner_username": "alice",
+      "tag": "notes",
+      "description": "Primary knowledge base",
+      "groups": ["research"],
+      "created_at": "2026-05-15T12:00:00.123456Z"
+    },
+    {
+      "id": 41,
+      "name": "PRAJNA",
+      "owner_id": 7,
+      "owner_username": "bob",
+      "tag": null,
+      "description": null,
+      "groups": [],
+      "created_at": "2026-06-01T08:00:00.123456Z"
+    }
+  ]
+}
+```
+
+`tag` and `description` are `null` when not set. For admin/superadmin UIs, prefer displaying **`name · owner_username`** when the same `name` appears more than once on a page.
 
 ---
 
@@ -355,7 +831,8 @@ Paginated workspace list with per-workspace resource counts.
 |-------|---------|-----|-------------|
 | `page` | `1` | — | Page number (1-based); out-of-range pages clamp to last page |
 | `page_size` | `20` | `100` | Items per page |
-| `group` | — | — | Optional: filter to workspaces in this group name |
+| `group` | — | — | Optional: filter to workspaces in this group name (workspace-tagged group only) |
+| `owner_id`, `owner_username` | — | — | When filtering by `group`, disambiguate group name if needed (same as [per-owner naming](#workspace--per-owner-naming)) |
 | `include_counts` | `true` | — | Set `false` for a faster directory view (omits `counts` on each row) |
 
 Counts are computed **only for the current page** (not all workspaces). With 500+ workspaces, use `include_counts=false` when browsing and load counts on demand.
@@ -365,6 +842,7 @@ Counts are computed **only for the current page** (not all workspaces). With 500
 ```bash
 curl "http://localhost:8000/api/workspace/page/?page=1&page_size=20&include_counts=false"
 curl "http://localhost:8000/api/workspace/page/?page=1&page_size=10&group=research"
+curl "http://localhost:8000/api/workspace/page/?group=research&owner_id=3"
 ```
 
 **Response `200`**
@@ -382,7 +860,10 @@ curl "http://localhost:8000/api/workspace/page/?page=1&page_size=10&group=resear
   },
   "workspaces": [
     {
+      "id": 12,
       "name": "PRAJNA",
+      "owner_id": 3,
+      "owner_username": "alice",
       "tag": "notes",
       "description": "Primary knowledge base",
       "groups": ["research"],
@@ -400,6 +881,7 @@ curl "http://localhost:8000/api/workspace/page/?page=1&page_size=10&group=resear
 
 | Field | Meaning |
 |-------|---------|
+| `id`, `owner_id`, `owner_username` | Identify workspace when names repeat across owners |
 | `counts.files` | Documents in the workspace |
 | `counts.chunks` | `DocumentChunk` rows |
 | `counts.entities` | `KnowledgeEntity` rows (KG nodes) |
@@ -409,13 +891,57 @@ Sorted by `created_at` descending, then `name` ascending.
 
 | Status | Condition |
 |--------|-----------|
-| `400` | Invalid `page`, `page_size`, or `flag` |
+| `400` | Invalid `page`, `page_size`, or `flag`; ambiguous `group` name (`candidates`) |
+
+---
+
+### `POST /api/group/create/`
+
+Create a workspace group owned by the authenticated user. Group **names are unique per owner** (same rules as [per-owner naming](#workspace--per-owner-naming)).
+
+**Body**
+
+```json
+{
+  "name": "research",
+  "tag": "workspace",
+  "description": "Cross-workspace collection"
+}
+```
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `name` | yes | Validated group name |
+| `tag` | no | Default `workspace`; also `files`, `entity`, `relation` |
+| `description` | no | Optional text |
+
+**Response `201`**
+
+```json
+{
+  "message": "Group created successfully",
+  "group": {
+    "id": 5,
+    "name": "research",
+    "owner_id": 3,
+    "owner_username": "alice",
+    "tag": "workspace",
+    "description": "Cross-workspace collection",
+    "member_count": 0,
+    "created_at": "2026-05-15T12:00:00.123456Z"
+  }
+}
+```
+
+| Status | Condition |
+|--------|-----------|
+| `400` | Invalid or missing `name`, invalid `tag`, or **group already exists for this owner** |
 
 ---
 
 ### `GET /api/group/list/`
 
-Paginated list of workspace groups. Each row includes `tag`, `member_count`, and `description`.
+Paginated list of workspace groups. Each row includes `id`, `name`, `owner_id`, `owner_username`, `tag`, `member_count`, and `description`.
 
 **Query parameters**
 
@@ -424,6 +950,7 @@ Paginated list of workspace groups. Each row includes `tag`, `member_count`, and
 | `page` | `1` | — | Page number (1-based) |
 | `page_size` | `20` | `100` | Groups per page |
 | `tag` | — | — | Optional filter: `workspace`, `files`, `entity`, or `relation` |
+| `owner_id`, `owner_username` | — | — | Optional filter: groups owned by that user (must be visible to you) |
 
 **Response `200`**
 
@@ -431,17 +958,30 @@ Paginated list of workspace groups. Each row includes `tag`, `member_count`, and
 {
   "groups": [
     {
+      "id": 5,
       "name": "research",
+      "owner_id": 3,
+      "owner_username": "alice",
       "tag": "workspace",
       "description": null,
       "member_count": 12,
       "created_at": "2026-05-15T12:00:00.123456Z"
+    },
+    {
+      "id": 9,
+      "name": "research",
+      "owner_id": 7,
+      "owner_username": "bob",
+      "tag": "files",
+      "description": "Bob's papers",
+      "member_count": 4,
+      "created_at": "2026-06-02T10:00:00.123456Z"
     }
   ],
   "pagination": {
     "page": 1,
     "page_size": 20,
-    "total_items": 1,
+    "total_items": 2,
     "total_pages": 1,
     "has_next": false,
     "has_previous": false
@@ -449,13 +989,63 @@ Paginated list of workspace groups. Each row includes `tag`, `member_count`, and
 }
 ```
 
+Display **`name · owner_username`** when the same group `name` appears for different owners.
+
+---
+
+### `GET /api/group/lookup/`
+
+Resolve a group **name** to owner(s) without calling a path-based group route (avoids `400` + `candidates` on mutations). Same disambiguation data as ambiguous errors, but read-only and always returns **`200`** with a `matches` array when any visible group exists.
+
+**Query:** `name` (required), optional `owner_id` / `owner_username`, optional `tag`.
+
+**Response `200`**
+
+```json
+{
+  "name": "research",
+  "ambiguous": true,
+  "matches": [
+    {
+      "id": 5,
+      "name": "research",
+      "owner_id": 3,
+      "owner_username": "alice",
+      "tag": "workspace",
+      "description": null,
+      "member_count": 12,
+      "created_at": "2026-05-15T12:00:00.123456Z"
+    },
+    {
+      "id": 9,
+      "name": "research",
+      "owner_id": 7,
+      "owner_username": "bob",
+      "tag": "files",
+      "description": "Bob's papers",
+      "member_count": 4,
+      "created_at": "2026-06-02T10:00:00.123456Z"
+    }
+  ]
+}
+```
+
+When `ambiguous` is `false`, `matches` has one row — use its `owner_id` on subsequent `/api/group/<name>/…` calls.
+
+| Status | Condition |
+|--------|-----------|
+| `400` | Missing or invalid `name` / `tag` |
+| `404` | No visible group with that name |
+
 ---
 
 ### `GET /api/group/<name>/members/`
 
 Paginated typed member list for any group tag. Use this when browsing large memberships without reloading group metadata on each page.
 
-**Query parameters:** same as group detail — `page` (default `1`), `page_size` (default `20`, max `100`).
+**Query:** `?owner_id=` or `?owner_username=` when the group name is ambiguous — see [per-owner naming](#workspace--per-owner-naming).
+
+**Query parameters:** `page` (default `1`), `page_size` (default `20`, max `100`), plus owner disambiguation when needed.
 
 **Response `200` (tag=files)**
 
@@ -482,8 +1072,8 @@ Member object shape depends on `tag` (same as group detail). `member_count` is t
 
 | Status | Condition |
 |--------|-----------|
-| `400` | Invalid `page` or `page_size` |
-| `404` | Group not found |
+| `400` | Invalid `page` or `page_size`, or ambiguous group name (`candidates`) |
+| `404` | Group not found (or not visible) |
 
 ---
 
@@ -491,13 +1081,18 @@ Member object shape depends on `tag` (same as group detail). `member_count` is t
 
 Group detail with **paginated** typed member list (`page`, `page_size`; default page size 20, max 100). `member_count` is the full membership total; `members` is only the current page.
 
+**Query:** `?owner_id=` or `?owner_username=` when needed — see [per-owner naming](#workspace--per-owner-naming).
+
 **Group `tag` values:** `workspace` (default) | `files` | `entity` | `relation`
 
 **Response `200` (tag=workspace)**
 
 ```json
 {
+  "id": 5,
   "name": "research",
+  "owner_id": 3,
+  "owner_username": "alice",
   "tag": "workspace",
   "description": "Research workspace collection",
   "member_count": 2,
@@ -550,7 +1145,9 @@ Group detail with **paginated** typed member list (`page`, `page_size`; default 
 
 Update group metadata. Include **one or more** of `name`, `description`. **`tag` cannot be changed** after create.
 
-Renaming also renames the internal group chat workspace (`__group_chat__<name>`).
+**Query:** `?owner_id=` or `?owner_username=` when needed.
+
+Renaming also renames the internal group chat workspace (`__group_chat__<owner_id>__<name>`).
 
 **Body**
 
@@ -567,7 +1164,10 @@ Renaming also renames the internal group chat workspace (`__group_chat__<name>`)
 {
   "message": "Group updated successfully",
   "group": {
+    "id": 5,
     "name": "research-v2",
+    "owner_id": 3,
+    "owner_username": "alice",
     "tag": "workspace",
     "description": "Updated group description",
     "member_count": 2,
@@ -579,14 +1179,16 @@ Renaming also renames the internal group chat workspace (`__group_chat__<name>`)
 
 | Status | Condition |
 |--------|-----------|
-| `400` | No fields to update, attempt to change `tag`, invalid name, duplicate name, or invalid description |
+| `400` | No fields to update, attempt to change `tag`, invalid name, duplicate name **for this owner**, ambiguous name, or invalid description |
 | `404` | Unknown group |
 
 ---
 
 ### `DELETE /api/workspace/delete/<name>/`
 
-Deletes workspace row and `media/workspaces/<name>/`.
+Deletes workspace row and `media/workspaces/<owner_id>/<name>/`.
+
+**Query:** `?owner_id=` or `?owner_username=` when needed.
 
 **Response `200`**
 
@@ -596,6 +1198,7 @@ Deletes workspace row and `media/workspaces/<name>/`.
 
 | Status | Condition |
 |--------|-----------|
+| `400` | Ambiguous workspace name (`candidates`) |
 | `404` | Unknown workspace |
 
 ---
@@ -615,6 +1218,8 @@ Upload triggers a **4-step global preprocess pipeline** (see [Preprocess](#prepr
 |-------|----------|---------|
 | `workspace_name` | no | oldest user workspace (`created_at` ascending) |
 | `file` | yes | — |
+
+Optional query/body: `owner_id` or `owner_username` when `workspace_name` is ambiguous for your role.
 
 **Response `200`**
 
@@ -638,8 +1243,8 @@ Upload triggers a **4-step global preprocess pipeline** (see [Preprocess](#prepr
   },
   "id": "550e8400-e29b-41d4-a716-446655440000",
   "file_name": "notes.md",
-  "file_path": "/path/to/media/workspaces/PRAJNA/notes.md",
-  "file_url": "/media/workspaces/PRAJNA/notes.md",
+  "file_path": "/path/to/media/workspaces/3/PRAJNA/notes.md",
+  "file_url": "/media/workspaces/3/PRAJNA/notes.md",
   "status": "PENDING",
   "replaced": false
 }
@@ -652,6 +1257,7 @@ Upload triggers a **4-step global preprocess pipeline** (see [Preprocess](#prepr
 | Status | Condition |
 |--------|-----------|
 | `400` | Missing file, bad extension, or no group member workspace when `workspace_name` omitted |
+| `400` | Ambiguous `workspace_name` (`candidates`) |
 | `404` | Workspace not found |
 
 Duplicate filename in the same workspace returns **`200`** (replace file, reset status, re-queue pipeline) — not `500`.
@@ -659,6 +1265,8 @@ Duplicate filename in the same workspace returns **`200`** (replace file, reset 
 ---
 
 ### `GET /api/document/<workspace_name>/`
+
+**Query:** `?owner_id=` or `?owner_username=` when needed.
 
 **Response `200`**
 
@@ -670,7 +1278,7 @@ Duplicate filename in the same workspace returns **`200`** (replace file, reset 
     {
       "id": "550e8400-e29b-41d4-a716-446655440000",
       "file_name": "notes.md",
-      "file_url": "/media/workspaces/PRAJNA/notes.md",
+      "file_url": "/media/workspaces/3/PRAJNA/notes.md",
       "status": "COMPLETED",
       "content": true,
       "uploaded_at": "2026-05-15T12:00:00.123456Z"
@@ -690,8 +1298,10 @@ Duplicate filename in the same workspace returns **`200`** (replace file, reset 
 **Example**
 
 ```bash
-curl -X DELETE "http://localhost:8000/api/document/delete/PRAJNA/notes.md"
+curl -X DELETE "http://localhost:8000/api/document/delete/PRAJNA/notes.md?owner_id=3"
 ```
+
+**Query:** `?owner_id=` or `?owner_username=` when needed.
 
 **Response `200`**
 
@@ -703,6 +1313,7 @@ Deletes the Postgres row, related KG rows (cascade), and the file on disk when p
 
 | Status | Condition |
 |--------|-----------|
+| `400` | Ambiguous workspace name |
 | `404` | Workspace or document not found |
 
 ---
@@ -712,6 +1323,10 @@ Deletes the Postgres row, related KG rows (cascade), and the file on disk when p
 ### `POST /api/workspace/preprocess/<workspace_name>/`
 
 Queues the **full workspace preprocess pipeline** for the named workspace (no single-document upload). One call runs **prepare legacy → chunk KG (parallel workers) → embeddings → mongo repair** — no separate manual preprocess needed to migrate old documents.
+
+**Auth:** JWT or API key with scope `preprocess:write`. Caller must have access to the named workspace (`404` if missing or not visible). With `include_other_workspaces=true`, only **other workspaces visible to the caller** are considered for background enqueue (not every workspace in the system).
+
+**Query:** `?owner_id=` or `?owner_username=` on the URL when the workspace name is ambiguous.
 
 By default only the **named workspace** is queued on the standard RQ **`orchestrator`** queue (no `high` / `low` routing). Per-workspace Redis coalescing locks are unchanged (a workspace already running or queued is skipped, not double-started).
 
@@ -786,11 +1401,16 @@ Read-only **operations snapshot** for preprocess workers: RQ queue depths and jo
 
 Use this to debug idle workers, stuck `nodepoint:preprocess:pipeline:{workspace}` locks, jobs on the wrong queue, or DB work waiting behind empty queues.
 
+**Auth:** JWT or API key. Requires scope `preprocess:read` (included in default user JWT/API read sets). Data is limited to **workspaces visible to the caller** (same ownership tree as `GET /api/workspace/list/`): regular users see owned workspaces; admins see their own plus managed users; superadmin sees all. Optional `?workspace=` must name a workspace you can access (`404` if missing; `400` with `candidates` if ambiguous). RQ job samples and failed-job excerpts omit jobs tied to other tenants.
+
 **Query**
 
 | Param | Meaning |
 |-------|---------|
 | `workspace` | Optional. Filters RQ job lists and database counts to one workspace; `active_pipelines` only includes that workspace when it has a lock and/or orchestrator jobs. Pipeline lock scan is also limited to that workspace. |
+| `owner_id`, `owner_username` | Use with `workspace` when multiple visible workspaces share the same name. The server resolves to a single workspace **primary key** before counting Postgres rows, so duplicate names under different owners do not merge in `database.*` stats. |
+
+When `?workspace=` is ambiguous and owner hints are omitted → **`400`** with `candidates` (same as other name-based routes).
 
 **Response `200`**
 
@@ -900,6 +1520,8 @@ Lightweight list of workspaces that are not preprocess-ready and/or have an acti
 
 Use this instead of paginating `GET /api/workspace/list/` and calling `preprocess-status` per workspace.
 
+**Auth:** Same as queue-status (`preprocess:read`, visibility-scoped workspace list).
+
 **Response `200`**
 
 ```json
@@ -933,7 +1555,16 @@ Poll with `GET /api/preprocess/queue-status/` when you also need queue counts an
 
 Read-only pipeline status for a workspace: upload queue → document processing → KG in Postgres → Qdrant embeddings.
 
+**Auth:** JWT or API key with scope `preprocess:read`. Workspace must be visible to the caller (`404` otherwise).
+
+**Query:** `?owner_id=` or `?owner_username=` when needed — see [per-owner naming](#workspace--per-owner-naming).
+
 Poll after upload until `overall.ready` is `true` and `overall.phase` is `ready`.
+
+| Status | Condition |
+|--------|-----------|
+| `400` | Ambiguous workspace name (`candidates`) |
+| `404` | Workspace not found |
 
 **Response `200`**
 
@@ -1081,10 +1712,17 @@ curl "http://localhost:8000/api/knowledge-graph/entity-types/?workspace_name=PRA
 
 Empty `workspaces: []` when no workspace exists.
 
+**Group — request**
+
+```bash
+curl "http://localhost:8000/api/knowledge-graph/entity-types/?group=research"
+curl "http://localhost:8000/api/knowledge-graph/entity-types/?group=research&owner_id=3"
+```
+
 | Status | Condition |
 |--------|-----------|
-| `400` | Both or neither scope param |
-| `404` | Unknown `workspace_name` (single-workspace mode) |
+| `400` | Both or neither scope param; ambiguous `workspace_name` or `group` (`candidates`) |
+| `404` | Unknown `workspace_name` or unknown `group` (not visible) |
 
 ---
 
@@ -1145,8 +1783,11 @@ curl "http://localhost:8000/api/knowledge-graph/?workspace_name=PRAJNA&entity_ty
 **Group `200`**
 
 ```bash
-curl "http://localhost:8000/api/knowledge-graph/?group=<name>&entity_type=PER&limit=100"
+curl "http://localhost:8000/api/knowledge-graph/?group=research&entity_type=PER&limit=100"
+curl "http://localhost:8000/api/knowledge-graph/?group=research&owner_id=3&entity_type=PER&limit=100"
 ```
+
+**Query:** `owner_id` / `owner_username` when the group name is ambiguous — see [per-owner naming](#workspace--per-owner-naming).
 
 Response includes `group`, `tag` (`workspace` | `files` | `entity` | `relation`), and `graphs` (one subgraph per workspace that has scoped members):
 
@@ -1194,8 +1835,8 @@ Response includes `group`, `tag` (`workspace` | `files` | `entity` | `relation`)
 
 | Status | Condition |
 |--------|-----------|
-| `400` | Both or neither scope; invalid `depth`/`limit`; empty `entity_type` after parse |
-| `404` | Unknown `workspace_name` or unknown `group` |
+| `400` | Both or neither scope; invalid `depth`/`limit`; empty `entity_type` after parse; ambiguous `workspace_name` or `group` (`candidates`) |
+| `404` | Unknown `workspace_name` or unknown `group` (not visible) |
 
 ---
 
@@ -1478,8 +2119,8 @@ Assembled document text: joined chunk bodies, legacy Mongo `Content`, or file on
 
 ## Chat (REST)
 
-One implicit chat per **workspace name**. No conversation UUID in the API.  
-REST returns **persisted** user-visible messages (root branch only). **Live streaming** is WebSocket only. Compression branches are server-internal (no branch REST API).
+Multiple **sessions** per workspace or group chat workspace. Each session has a UUID `session_id`.  
+REST returns **persisted** user-visible messages (root branch only). **Live streaming** is WebSocket only (requires `session_id` or incognito). Compression branches are server-internal.
 
 **Agent behavior (WebSocket):**
 
@@ -1490,21 +2131,69 @@ REST returns **persisted** user-visible messages (root branch only). **Live stre
 
 | Concern | REST | WebSocket |
 |---------|------|-----------|
-| History | Root messages via GET | N/A (use GET after turn) |
+| History | `GET .../sessions/<session_id>/` | N/A (use GET after turn) |
 | Live reply | No | Token-by-token stream |
-| Tools | Not in GET response | `tool_calls` / `tool_completed` events |
+| Incognito | Not available | `?incognito=true` (no DB writes) |
 
+### Parallel chats (sessions and workspaces)
 
-### `GET /api/chat/<workspace_name>/`
+- **Per session:** at most **one** active turn (`agent_busy` on that `session_id`).
+- **Globally:** at most **`CHAT_MAX_CONCURRENT_TURNS`** (default **8**) active turns across all sessions, workspaces, and group chats — enforced in **Redis** on the `web` service so it is consistent across uvicorn workers.
+- **Different sessions** (and different workspaces) can stream in parallel until the global cap is reached.
+- **Preprocess** runs on separate RQ **`worker`** queues; the chat turn cap does not limit document upload, chunk KG, or embedding jobs.
 
-Lazy-creates that workspace's chat on first access. Unknown or reserved name → `404`.
+When all slots are busy, `chat.send` **waits in queue** (same WebSocket) instead of failing immediately:
+
+1. `{ "type": "chat.queued", "message": "Waiting for a free chat slot …" }` — once, when entering the queue
+2. When a slot opens → `{ "type": "chat.turn_started", "turn_id": "..." }` → stream as usual
+
+Send `{ "type": "chat.cancel" }` while queued to abort the wait (`chat.cancelled`). Disconnect also aborts the queue wait.
+
+If no slot opens within `CHAT_TURN_QUEUE_TIMEOUT` (default **300s**):
+
+```json
+{
+  "type": "error",
+  "code": "chat_queue_timeout",
+  "message": "Timed out waiting for a free chat slot. Try again shortly."
+}
+```
+
+### Session endpoints (workspace)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/chat/<workspace_name>/sessions/` | List sessions |
+| POST | `/api/chat/<workspace_name>/sessions/` | Create session (`{ "title": "..." }` optional) → `201` |
+| GET | `/api/chat/<workspace_name>/sessions/<uuid>/` | History |
+| PATCH | `/api/chat/<workspace_name>/sessions/<uuid>/` | Rename (`{ "title": "..." }` required) |
+| DELETE | `/api/chat/<workspace_name>/sessions/<uuid>/` | Delete session |
+| POST | `/api/chat/<workspace_name>/sessions/<uuid>/clear/` | Clear messages (keep session) |
+
+Group-scoped sessions use the same shape under `/api/chat/group/<name>/sessions/`.
+
+### `POST /api/chat/<workspace_name>/sessions/`
+
+**Response `201`**
+
+```json
+{
+  "workspace": "main",
+  "session_id": "660e8400-e29b-41d4-a716-446655440000",
+  "title": "Research notes",
+  "created_at": "2026-05-15T12:00:00Z"
+}
+```
+
+### `GET /api/chat/<workspace_name>/sessions/<session_id>/`
 
 **Response `200`**
 
 ```json
 {
   "workspace": "main",
-  
+  "session_id": "660e8400-e29b-41d4-a716-446655440000",
+  "title": "",
   "messages": []
 }
 ```
@@ -1532,24 +2221,16 @@ Lazy-creates that workspace's chat on first access. Unknown or reserved name →
 | `assistant` | May include `tool_calls`, `reasoning_content` |
 | `tool` | Tool result; `tool_call_id`, `tool_name` set |
 
----
+### Legacy `GET` / `DELETE /api/chat/<workspace_name>/`
 
-### `DELETE /api/chat/<workspace_name>/`
-
-Full reset: clears messages, compression history, and internal branches; recreates a fresh chat with the system prompt only.
-
-**Response `200`**
+Returns **`400`**:
 
 ```json
 {
-  "message": "Chat cleared",
-  "workspace": "main"
+  "error": "session_id required",
+  "hint": "Use GET/POST /api/chat/<workspace>/sessions/ ..."
 }
 ```
-
-| Status | Condition |
-|--------|-----------|
-| `404` | Unknown or reserved workspace name |
 
 ---
 
@@ -1557,7 +2238,7 @@ Full reset: clears messages, compression history, and internal branches; recreat
 
 Same query rules as [Shared scope](#shared-scope-workspace_name-vs-group): `workspace_name` **or** `group=<name>`.
 
-Does not include internal `__flagged_chat__` in group lists. Counts **root-branch** messages only (same as GET chat history).
+Does not include internal `__flagged_chat__` in group lists. Returns a **`sessions`** array per workspace (root-branch message counts).
 
 **Single workspace — request**
 
@@ -1570,34 +2251,49 @@ curl "http://localhost:8000/api/chat/summary/?workspace_name=PRAJNA"
 ```json
 {
   "workspace": "PRAJNA",
-  
-  "updated_at": "2026-05-15T12:30:00Z",
-  "message_count": 12
+  "sessions": [
+    {
+      "session_id": "660e8400-e29b-41d4-a716-446655440000",
+      "title": "",
+      "created_at": "2026-05-15T12:00:00Z",
+      "updated_at": "2026-05-15T12:30:00Z",
+      "message_count": 12
+    }
+  ]
 }
 ```
 
-**Flagged — request**
+**Group — request**
 
 ```bash
-curl "http://localhost:8000/api/chat/summary/?group=<name>"
+curl "http://localhost:8000/api/chat/summary/?group=research"
+curl "http://localhost:8000/api/chat/summary/?group=research&owner_id=3"
 ```
 
-**Flagged — response `200`**
+Add `owner_id` or `owner_username` when multiple visible groups share the same name — see [per-owner naming](#workspace--per-owner-naming).
+
+**Group — response `200`** (workspace tag includes member workspaces)
 
 ```json
 {
+  "group": "research",
+  "tag": "workspace",
+  "member_count": 2,
+  "group_chat": {
+    "workspace": "__group_chat__research",
+    "sessions": []
+  },
   "workspaces": [
     {
       "workspace": "PRAJNA",
-      
-      "updated_at": "2026-05-15T12:30:00Z",
-      "message_count": 12
-    },
-    {
-      "workspace": "research",
-      
-      "updated_at": null,
-      "message_count": 0
+      "sessions": [
+        {
+          "session_id": "...",
+          "title": "",
+          "updated_at": "2026-05-15T12:30:00Z",
+          "message_count": 12
+        }
+      ]
     }
   ]
 }
@@ -1605,7 +2301,8 @@ curl "http://localhost:8000/api/chat/summary/?group=<name>"
 
 | Field | Meaning |
 |-------|---------|
-| `updated_at` | Last message timestamp on root branch, or `null` if only system prompt |
+| `session_id` | Conversation UUID for WebSocket `?session_id=` |
+| `updated_at` | Last activity on session, or from `created_at` if empty |
 | `message_count` | Messages on root branch (includes system) |
 
 | Status | Condition |
@@ -1619,27 +2316,33 @@ curl "http://localhost:8000/api/chat/summary/?group=<name>"
 
 **Requires:** ASGI server (`uvicorn config.asgi:application`) and Redis (Channels layer).
 
-| URL | Chat mode |
-|-----|-----------|
-| `ws://<host>/ws/chat/group/<name>/` | Group-scope (cross-workspace search) |
-| `ws://<host>/ws/chat/<workspace_name>/` | Single workspace |
+| URL | Query | Mode |
+|-----|-------|------|
+| `ws://<host>/ws/chat/group/<name>/` | `?session_id=<uuid>` | Saved group session |
+| `ws://<host>/ws/chat/<workspace_name>/` | `?session_id=<uuid>` | Saved workspace session |
+| Either | `?incognito=true` | Ephemeral (no Postgres writes) |
+
+`session_id` and `incognito=true` are **mutually exclusive**. Omitting both returns an error on connect.
 
 Reserved: names starting with `__group_chat__` is not a user workspace name.
 
+### Typical client flow (per-workspace, saved session)
+
+1. `POST /api/chat/PRAJNA/sessions/` → `session_id`
+2. `GET /api/chat/PRAJNA/sessions/<session_id>/` → load history
+3. Connect `ws://<host>/ws/chat/PRAJNA/?session_id=<session_id>` → `chat.ready`
+4. Send `chat.send` → stream → `chat.done`
+5. `GET /api/chat/PRAJNA/sessions/<session_id>/` again — refresh messages
+
+### Incognito flow
+
+1. Connect `ws://<host>/ws/chat/PRAJNA/?incognito=true` → `chat.ready` with `"incognito": true`
+2. Send `chat.send` → stream → `chat.done` (nothing written to Postgres)
+3. No REST history endpoint for incognito threads
+
 ### Typical client flow (group-scope)
 
-1. Create a group and add workspaces: `POST /api/group/create/`, `POST /api/group/<name>/workspaces/`
-2. `GET /api/knowledge-graph/entity-types/?group=<name>` and `GET /api/knowledge-graph/?group=<name>&entity_type=...` — optional KG UI data
-3. `GET /api/chat/group/<name>/` — load group chat history
-4. Connect `ws://<host>/ws/chat/group/<name>/` → `chat.ready` (if `agent_busy`, turn still running — live stream auto-attaches)
-5. Send `chat.send` → `chat.turn_started` → stream → `chat.done`
-6. `GET /api/chat/?group=<name>` again — refresh messages
-
-### Typical client flow (per-workspace)
-
-1. `GET /api/chat/PRAJNA/` → load history
-2. Connect `ws://<host>/ws/chat/PRAJNA/` → `chat.ready`
-3. Same send/stream/refresh pattern
+Same as per-workspace, using `/api/chat/group/<name>/sessions/` and `/ws/chat/group/<name>/`.
 
 ---
 
@@ -1704,7 +2407,7 @@ Use after a drop **or** rely on auto-attach: `chat.ready` always includes **`age
 
 **Response (idle):** `{ "type": "chat.reconnected", "agent_busy": false }`
 
-While offline, call `GET /api/chat/<workspace>/` or `GET /api/chat/group/<name>/` once to fill the gap; live tokens resume on the WebSocket from reconnect onward (no token replay).
+While offline, call `GET /api/chat/<workspace>/sessions/<session_id>/` (or group equivalent) once to fill the gap; live tokens resume on the WebSocket from reconnect onward (no token replay). Reconnect must use the same `session_id` query param.
 
 #### Turn status
 
@@ -1875,39 +2578,52 @@ Tools and control events are **single frames** (full payload per event):
 
 #### `chat.ready` (on connect)
 
-**Per-workspace** (`/ws/chat/PRAJNA/`):
+Requires `?session_id=<uuid>` or `?incognito=true` on the WebSocket URL.
+
+**Per-workspace** (`/ws/chat/PRAJNA/?session_id=...`):
 
 ```json
 {
   "type": "chat.ready",
   "workspace": "PRAJNA",
+  "session_id": "...",
   "conversation_id": "...",
+  "incognito": false,
   "active_branch_id": "...",
   "agent_busy": false
 }
 ```
 
-**Group-scope** (`/ws/chat/group/<name>/`):
+**Incognito** (`?incognito=true`): `incognito` is `true`; `active_branch_id` may be omitted.
+
+**Group-scope** (`/ws/chat/group/<name>/?session_id=...`):
 
 ```json
 {
   "type": "chat.ready",
   "group": "research",
+  "session_id": "...",
+  "conversation_id": "...",
+  "incognito": false,
+  "active_branch_id": "...",
+  "agent_busy": false,
   "workspaces": ["main", "research"]
 }
 ```
 
 | Field | Meaning |
 |-------|---------|
+| `session_id` | Session UUID (ephemeral UUID in incognito mode) |
+| `conversation_id` | Same as `session_id` (backward-compatible alias) |
+| `incognito` | `true` when nothing is persisted |
 | `workspace` | Per-workspace mode only |
 | `group` | Group-scope mode only |
 | `workspaces` | Workspaces included in `Knowledge.search_graph` for this connection |
-| `conversation_id` | Chat thread UUID |
-| `active_branch_id` | Current branch for compression / agent context |
-| `agent_busy` | Always present: `true` if a turn is in progress (Redis-backed; consistent across uvicorn workers) |
+| `active_branch_id` | Current branch for compression / agent context (persisted only) |
+| `agent_busy` | Always present: `true` if a turn is in progress (Redis-backed) |
 | `turn_id`, `turn_started_at`, `reconnect_hint` | Present when `agent_busy` is `true` |
 
-Close codes: `4000` invalid URL; `4004` unknown workspace (per-workspace mode).
+Close codes: `4000` invalid URL or query; `4004` unknown workspace or session.
 
 #### `chat.done` (after each `chat.send` turn)
 
@@ -2025,7 +2741,10 @@ Returns matches with `score` (fuzzy mode), outgoing/incoming relations (relation
 | `CHAT_COMPRESS_MAX_OUTPUT_TOKENS` | `4000` | Max tokens in handoff report |
 | `CHAT_COMPRESS_TEMPERATURE` | `0.2` | Compression LLM temperature |
 | `CHAT_COMPRESS_MAX_MESSAGES` | `30` | Max thread messages sent to compression |
-| `CHAT_MAX_CONCURRENT_SEARCHES` | `8` | Max parallel Knowledge tool runs per web worker |
+| `CHAT_MAX_CONCURRENT_TURNS` | `8` | Max parallel agent chat turns globally (all sessions/workspaces; Redis) |
+| `CHAT_TURN_QUEUE_TIMEOUT` | `300` | Seconds to wait for a slot before `chat_queue_timeout` |
+| `CHAT_TURN_QUEUE_POLL_INTERVAL` | `0.5` | Seconds between slot acquire retries while queued |
+| `CHAT_MAX_CONCURRENT_SEARCHES` | `8` | Max parallel Knowledge tool runs per web worker (within active turns) |
 | `CHAT_TURN_REDIS_TTL` | `3600` | Active chat turn metadata TTL in Redis (crash safety) |
 | `WEB_WORKERS` | `4` | Uvicorn worker processes for ASGI |
 | `DB_CONN_MAX_AGE` | `60` | Postgres connection reuse (seconds) |
@@ -2061,11 +2780,14 @@ Alphabetical by path segment. See sections above for full request/response bodie
 | POST | `/api/workspace/create/` | [Workspace](#post-apiworkspacecreate) |
 | PATCH | `/api/workspace/update/<name>/` | [Workspace](#patch-apiworkspaceupdatename) |
 | DELETE | `/api/workspace/delete/<name>/` | [Workspace](#delete-apiworkspacedeletename) |
+| POST | `/api/group/create/` | [Groups](#post-apigroupcreate) |
 | GET | `/api/group/list/` | [Groups](#get-apigrouplist) |
+| GET | `/api/group/lookup/` | [Groups](#get-apigrouplookup) |
 | GET | `/api/group/<name>/members/` | [Groups](#get-apigroupnamemembers) |
 | GET | `/api/group/<name>/` | [Groups](#get-apigroupname) |
 | PATCH | `/api/group/<name>/` | [Groups](#patch-apigroupname) |
 | GET | `/api/workspace/list/` | [Workspace](#get-apiworkspacelist) |
+| GET | `/api/workspace/lookup/` | [Workspace](#get-apiworkspacelookup) |
 | GET | `/api/workspace/page/` | [Workspace](#get-apiworkspacepage) |
 | GET | `/api/workspace/stats/` | [Workspace](#get-apiworkspacestats) |
 | GET | `/api/preprocess/queue-status/` | [Preprocess](#get-apipreprocessqueue-status) |

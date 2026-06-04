@@ -147,9 +147,11 @@ def serialize_document(document: Document, *, full_content: bool = True) -> dict
     }
 
 
-def _check_workspace(record_workspace: str, allowed_workspaces: list[str] | None) -> None:
-    if allowed_workspaces is not None and record_workspace not in allowed_workspaces:
-        raise RecordAccessError(f"Record is not in allowed workspaces: {allowed_workspaces}")
+def _check_workspace_id(
+    workspace_id: int, allowed_workspace_ids: list[int] | None
+) -> None:
+    if allowed_workspace_ids is not None and workspace_id not in allowed_workspace_ids:
+        raise RecordAccessError("Record is not in an allowed workspace")
 
 
 def _check_scope(rec: dict[str, Any], scope) -> None:
@@ -166,7 +168,7 @@ def _check_scope(rec: dict[str, Any], scope) -> None:
 def get_entity(
     entity_id: uuid.UUID | str,
     *,
-    allowed_workspaces: list[str] | None = None,
+    allowed_workspace_ids: list[int] | None = None,
     scope=None,
 ) -> dict[str, Any]:
     try:
@@ -179,7 +181,7 @@ def get_entity(
         ).get(id=uid)
     except KnowledgeEntity.DoesNotExist as exc:
         raise RecordNotFoundError(f"Entity not found: {entity_id}") from exc
-    _check_workspace(entity.document.workspace.name, allowed_workspaces)
+    _check_workspace_id(entity.document.workspace_id, allowed_workspace_ids)
     rec = serialize_entity(entity)
     _check_scope(rec, scope)
     return rec
@@ -188,7 +190,7 @@ def get_entity(
 def get_relation(
     relation_id: uuid.UUID | str,
     *,
-    allowed_workspaces: list[str] | None = None,
+    allowed_workspace_ids: list[int] | None = None,
     scope=None,
 ) -> dict[str, Any]:
     try:
@@ -205,7 +207,7 @@ def get_relation(
         ).get(id=uid)
     except KnowledgeRelation.DoesNotExist as exc:
         raise RecordNotFoundError(f"Relation not found: {relation_id}") from exc
-    _check_workspace(relation.document.workspace.name, allowed_workspaces)
+    _check_workspace_id(relation.document.workspace_id, allowed_workspace_ids)
     rec = serialize_relation(relation)
     _check_scope(rec, scope)
     return rec
@@ -214,7 +216,7 @@ def get_relation(
 def get_chunk(
     chunk_id: uuid.UUID | str,
     *,
-    allowed_workspaces: list[str] | None = None,
+    allowed_workspace_ids: list[int] | None = None,
     scope=None,
 ) -> dict[str, Any]:
     try:
@@ -227,7 +229,7 @@ def get_chunk(
         )
     except DocumentChunk.DoesNotExist as exc:
         raise RecordNotFoundError(f"Chunk not found: {chunk_id}") from exc
-    _check_workspace(chunk.document.workspace.name, allowed_workspaces)
+    _check_workspace_id(chunk.document.workspace_id, allowed_workspace_ids)
     rec = serialize_chunk(chunk, full_content=True)
     _check_scope(rec, scope)
     return rec
@@ -236,7 +238,7 @@ def get_chunk(
 def get_document(
     document_id: uuid.UUID | str,
     *,
-    allowed_workspaces: list[str] | None = None,
+    allowed_workspace_ids: list[int] | None = None,
     scope=None,
 ) -> dict[str, Any]:
     try:
@@ -247,7 +249,7 @@ def get_document(
         document = Document.objects.select_related("workspace").get(id=uid)
     except Document.DoesNotExist as exc:
         raise RecordNotFoundError(f"Document not found: {document_id}") from exc
-    _check_workspace(document.workspace.name, allowed_workspaces)
+    _check_workspace_id(document.workspace_id, allowed_workspace_ids)
     rec = serialize_document(document, full_content=True)
     _check_scope(rec, scope)
     return rec
