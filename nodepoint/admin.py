@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from nodepoint.models import ApiKey, ApiUsageLog, UserProfile
+from nodepoint.models import ApiKey, ApiUsageLog, UserProfile, Workspace, WorkspaceGroup
 
 
 @admin.register(UserProfile)
@@ -21,3 +21,13 @@ class ApiUsageLogAdmin(admin.ModelAdmin):
 class ApiKeyAdmin(admin.ModelAdmin):
     list_display = ("prefix", "user", "name", "expires_at", "is_active", "created_at")
     readonly_fields = ("key_hash", "prefix", "created_at", "last_used_at")
+
+@admin.register(Workspace)
+class WorkspaceAdmin(admin.ModelAdmin):
+    list_display = ("name", "owner", "tag", "created_at")
+    list_filter = ("owner", "tag")
+
+@admin.register(WorkspaceGroup)
+class WorkspaceGroupAdmin(admin.ModelAdmin):
+    list_display = ("name", "owner", "tag", "created_at")
+    list_filter = ("owner", "tag")

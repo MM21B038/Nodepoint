@@ -2,7 +2,7 @@ from rest_framework import status
 from rest_framework.response import Response
 from nodepoint.auth.mixins import AuthenticatedAPIView
 
-from nodepoint.models import Document, KnowledgeEntity, KnowledgeRelation
+from nodepoint.models import Document
 from nodepoint.services import workspace as workspace_svc
 from nodepoint.services import workspace_group as group_svc
 from nodepoint.views.resource_lookup import resolve_group_response, resolve_workspace_response
@@ -22,6 +22,7 @@ class CreateGroupAPIView(AuthenticatedAPIView):
         tag = request.data.get("tag")
         description = request.data.get("description")
         try:
+            tag = group_svc.validate_user_group_tag(tag)
             group = group_svc.create_group(
                 name, owner=request.user, tag=tag, description=description
             )
@@ -347,129 +348,6 @@ class RemoveFileFromGroupAPIView(AuthenticatedAPIView):
         )
 
 
-class AddEntityToGroupAPIView(AuthenticatedAPIView):
-    def post(self, request, name):
-        entity_id = request.data.get("entity_id")
-        if not entity_id:
-            return Response(
-                {"error": "entity_id is required"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        group, err = resolve_group_response(request, name)
-        if err is not None:
-            return err
-        try:
-            entity = KnowledgeEntity.objects.select_related(
-                "document", "document__workspace"
-            ).get(id=entity_id)
-        except KnowledgeEntity.DoesNotExist:
-            return Response(
-                {"error": "Entity not found"},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-        try:
-            group_svc.add_entity_to_group(
-                group.name,
-                entity,
-                actor=request.user,
-                owner_id=group.owner_id,
-            )
-        except group_svc.GroupError as exc:
-            return _group_mutation_error_response(exc)
-        return Response(
-            {
-                "message": "Entity added to group",
-                "group": group.name,
-                "entity_id": str(entity.id),
-                "name": entity.name,
-            }
-        )
-
-
-class RemoveEntityFromGroupAPIView(AuthenticatedAPIView):
-    def delete(self, request, name, entity_id):
-        group, err = resolve_group_response(request, name)
-        if err is not None:
-            return err
-        try:
-            group_svc.remove_entity_from_group(
-                group.name,
-                entity_id,
-                actor=request.user,
-                owner_id=group.owner_id,
-            )
-        except group_svc.GroupError as exc:
-            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(
-            {
-                "message": "Entity removed from group",
-                "group": group.name,
-                "entity_id": str(entity_id),
-            }
-        )
-
-
-class AddRelationToGroupAPIView(AuthenticatedAPIView):
-    def post(self, request, name):
-        relation_id = request.data.get("relation_id")
-        if not relation_id:
-            return Response(
-                {"error": "relation_id is required"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        try:
-            relation = KnowledgeRelation.objects.select_related(
-                "document", "document__workspace", "source", "target"
-            ).get(id=relation_id)
-        except KnowledgeRelation.DoesNotExist:
-            return Response(
-                {"error": "Relation not found"},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-        group, err = resolve_group_response(request, name)
-        if err is not None:
-            return err
-        try:
-            group_svc.add_relation_to_group(
-                group.name,
-                relation,
-                actor=request.user,
-                owner_id=group.owner_id,
-            )
-        except group_svc.GroupError as exc:
-            return _group_mutation_error_response(exc)
-        return Response(
-            {
-                "message": "Relation added to group",
-                "group": group.name,
-                "relation_id": str(relation.id),
-            }
-        )
-
-
-class RemoveRelationFromGroupAPIView(AuthenticatedAPIView):
-    def delete(self, request, name, relation_id):
-        group, err = resolve_group_response(request, name)
-        if err is not None:
-            return err
-        try:
-            group_svc.remove_relation_from_group(
-                group.name,
-                relation_id,
-                actor=request.user,
-                owner_id=group.owner_id,
-            )
-        except group_svc.GroupError as exc:
-            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(
-            {
-                "message": "Relation removed from group",
-                "group": group.name,
-                "relation_id": str(relation_id),
-            }
-        )
-
-
 class GroupAddOptionsAPIView(AuthenticatedAPIView):
     def get(self, request, name):
         from nodepoint.services import workspace_catalog
@@ -507,8 +385,8 @@ class GroupAddOptionsAPIView(AuthenticatedAPIView):
                     ),
                 )
         search = request.query_params.get("search")
-        return Response(
-            group_svc.list_group_add_options(
+        try:
+            payload = group_svc.list_group_add_options(
                 group,
                 actor=request.user,
                 page=page,
@@ -516,7 +394,9 @@ class GroupAddOptionsAPIView(AuthenticatedAPIView):
                 search=search,
                 candidate_owner_id=candidate_owner_id,
             )
-        )
+        except group_svc.GroupError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(payload)
 
 
 class WorkspaceGroupOptionsAPIView(AuthenticatedAPIView):

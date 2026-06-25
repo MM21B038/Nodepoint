@@ -109,10 +109,6 @@ SCOPE_DEFINITIONS: tuple[ScopeDefinition, ...] = (
                 "group-remove-workspace",
                 "group-add-file",
                 "group-remove-file",
-                "group-add-entity",
-                "group-remove-entity",
-                "group-add-relation",
-                "group-remove-relation",
             }
         ),
         frozenset({"POST", "PATCH", "DELETE"}),

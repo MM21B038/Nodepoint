@@ -56,9 +56,7 @@ from nodepoint.views.chat_sessions import (
     WorkspaceChatSessionsAPIView,
 )
 from nodepoint.views.workspace_group import (
-    AddEntityToGroupAPIView,
     AddFileToGroupAPIView,
-    AddRelationToGroupAPIView,
     AddWorkspaceToGroupAPIView,
     CreateGroupAPIView,
     GroupAddOptionsAPIView,
@@ -66,9 +64,7 @@ from nodepoint.views.workspace_group import (
     GroupLookupAPIView,
     GroupMembersAPIView,
     ListGroupsAPIView,
-    RemoveEntityFromGroupAPIView,
     RemoveFileFromGroupAPIView,
-    RemoveRelationFromGroupAPIView,
     RemoveWorkspaceFromGroupAPIView,
     WorkspaceGroupOptionsAPIView,
 )
@@ -188,26 +184,6 @@ urlpatterns = [
         "group/<str:name>/files/<uuid:document_id>/",
         RemoveFileFromGroupAPIView.as_view(),
         name="group-remove-file",
-    ),
-    path(
-        "group/<str:name>/entities/",
-        AddEntityToGroupAPIView.as_view(),
-        name="group-add-entity",
-    ),
-    path(
-        "group/<str:name>/entities/<uuid:entity_id>/",
-        RemoveEntityFromGroupAPIView.as_view(),
-        name="group-remove-entity",
-    ),
-    path(
-        "group/<str:name>/relations/",
-        AddRelationToGroupAPIView.as_view(),
-        name="group-add-relation",
-    ),
-    path(
-        "group/<str:name>/relations/<uuid:relation_id>/",
-        RemoveRelationFromGroupAPIView.as_view(),
-        name="group-remove-relation",
     ),
     path(
         "chat/group/<str:name>/sessions/<uuid:session_id>/clear/",

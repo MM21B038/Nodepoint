@@ -21,6 +21,8 @@ RUN uv sync --frozen --no-dev
 
 COPY . .
 
+RUN SECRET_KEY=build-only /app/.venv/bin/python manage.py collectstatic --noinput
+
 RUN chmod +x docker/entrypoint.sh
 
 EXPOSE 8000

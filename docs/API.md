@@ -46,13 +46,15 @@ Group-scope (cross-workspace)                      Per-workspace
 
 ### Workspace groups
 
-Create named groups and assign workspaces (many-to-many). Use **`group=<name>`** on KG, entity search, chat summary, and group chat.
+Create named groups and assign workspaces or files. Use **`group=<name>`** on KG, entity search, chat summary, and group chat.
+
+**`entity` and `relation` groups** are created and populated **internally** by the system (not via `POST /api/group/create/` or membership APIs). You can still **list**, **read**, and **query** them (KG, entity search, chat) when they exist.
 
 Group **names are unique per owner** (same rules as workspaces). List rows include `id`, `owner_id`, `owner_username`. Any URL with `/api/group/<name>/` accepts `?owner_id=` or `?owner_username=` when admin/superadmin see duplicate names — see [per-owner naming](#workspace--per-owner-naming).
 
 | Use | API |
 |-----|-----|
-| Create group | `POST /api/group/create/` body `{ "name": "research", "tag": "workspace", "description": "..." }` (`tag` optional, default `workspace`) — owned by caller |
+| Create group | `POST /api/group/create/` body `{ "name": "research", "tag": "workspace", "description": "..." }` (`tag` optional: `workspace` or `files` only) — owned by caller |
 | List groups | `GET /api/group/list/` (`?tag=`, `?owner_id=`, `?owner_username=`, `?page=`, `?page_size=`) — rows include `owner_id`, `owner_username` |
 | Resolve group owner | `GET /api/group/lookup/?name=<name>` (`?owner_id=`, `?owner_username=`, optional `?tag=`) — returns `matches[]` with owner per row; `ambiguous: true` when more than one |
 | Group detail | `GET /api/group/<name>/` (`?page=`, `?page_size=`, optional `?owner_id=`) |
@@ -60,9 +62,7 @@ Group **names are unique per owner** (same rules as workspaces). List rows inclu
 | Update group | `PATCH /api/group/<name>/` body `{ "name", "description" }` only (`tag` immutable) |
 | Add / remove workspace | `POST` / `DELETE` `/api/group/<name>/workspaces/` (tag must be `workspace`; `?owner_id=` on group + `workspace_name` in body if needed) |
 | Add / remove file | `POST` / `DELETE` `/api/group/<name>/files/` (tag must be `files`) |
-| Add / remove entity | `POST` / `DELETE` `/api/group/<name>/entities/` (tag must be `entity`) |
-| Add / remove relation | `POST` / `DELETE` `/api/group/<name>/relations/` (tag must be `relation`) |
-| Eligible members (picker) | `GET /api/group/<name>/add-options/` (`?page=`, `?page_size=`, optional `?search=`, optional `?candidate_owner_id=` to narrow candidates) |
+| Eligible members (picker) | `GET /api/group/<name>/add-options/` (`workspace` and `files` tags only; `?page=`, `?page_size=`, optional `?search=`, optional `?candidate_owner_id=`) |
 | Eligible groups for workspace | `GET /api/workspace/<name>/group-options/` (`?page=`, `?page_size=`, optional `?search=`, optional `?owner_id=` on workspace) |
 | Delete group | `DELETE /api/group/<name>/` |
 | KG / search across group | `?group=<name>` |
@@ -89,7 +89,7 @@ The actor must also **see** the resource being added; invisible resources return
 curl -H "Authorization: Bearer $TOKEN" \
   "http://localhost:8000/api/group/research/add-options/?owner_id=3&page=1&page_size=20"
 
-# Narrow file/entity candidates to one managed user
+# Narrow file candidates to one managed user
 curl -H "Authorization: Bearer $TOKEN" \
   "http://localhost:8000/api/group/docs/add-options/?owner_id=3&candidate_owner_id=7"
 
@@ -106,8 +106,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 |-----------|-----------------------------------|
 | `workspace` | `id`, `name`, `owner_id`, `owner_username`, `tag`, `description` |
 | `files` | `document_id`, `workspace`, `workspace_owner_id`, `owner_id`, `owner_username`, `file_name` |
-| `entity` | `entity_id`, `name`, `entity_type`, `workspace`, `document_id`, `owner_id`, `owner_username` |
-| `relation` | `relation_id`, `source_name`, `target_name`, `workspace`, `owner_id`, `owner_username` |
+| `entity`, `relation` | Not available — returns **`400`** (members managed internally) |
 
 | Use | API |
 |-----|-----|
@@ -377,11 +376,11 @@ Requires prior deactivation (`inactive`) or `pending_deletion`. Superadmin accou
 | `workspace:read` / `workspace:write` | Workspaces |
 | `document:read` / `document:write` | Documents |
 | `chat:read` / `chat:write` | Chat |
-| `group:read` / `group:write` | Groups (membership changes) |
+| `group:read` / `group:write` | Groups (create/update; workspace and file membership) |
 | `kg:read` | Knowledge graph reads only (all KG routes are GET) |
 | `preprocess:read` / `preprocess:write` | Preprocess status and triggers |
 
-There is **no `kg:write`** in the API. Use `group:write` to add entities/files/relations to groups.
+There is **no `kg:write`** in the API. Use `group:write` to add workspaces or files to groups.
 
 **Scope validation errors (`400`)**
 
@@ -459,7 +458,7 @@ Base path: `/api/`. All paths below are relative to that prefix.
 | GET | `workspace/stats/` | Totals: all, in_group, ungrouped workspace counts |
 | GET | `workspace/page/` | Paginated workspaces with counts (`id`, owner fields) |
 | DELETE | `workspace/delete/<name>/` | Delete workspace (`?owner_id=` if ambiguous) |
-| POST | `group/create/` | Create group (name unique per owner) |
+| POST | `group/create/` | Create group (`workspace` or `files` tag; name unique per owner) |
 | GET | `group/list/` | Paginated groups (`id`, `owner_id`, `owner_username`; optional `?owner_id=`) |
 | GET | `group/lookup/` | Resolve group name → owner(s) (`matches`, `ambiguous`) |
 | GET | `group/<name>/members/` | Paginated members (`?owner_id=` if ambiguous) |
@@ -469,10 +468,6 @@ Base path: `/api/`. All paths below are relative to that prefix.
 | DELETE | `group/<name>/workspaces/<workspace_name>/` | Remove workspace |
 | POST | `group/<name>/files/` | Add file/document (files tag only) |
 | DELETE | `group/<name>/files/<document_id>/` | Remove file |
-| POST | `group/<name>/entities/` | Add entity (entity tag only) |
-| DELETE | `group/<name>/entities/<entity_id>/` | Remove entity |
-| POST | `group/<name>/relations/` | Add relation (relation tag only) |
-| DELETE | `group/<name>/relations/<relation_id>/` | Remove relation |
 | DELETE | `group/<name>/` | Delete group |
 | GET | `chat/group/<name>/sessions/` | List group-scoped sessions |
 | POST | `chat/group/<name>/sessions/` | Create group-scoped session |
@@ -912,7 +907,7 @@ Create a workspace group owned by the authenticated user. Group **names are uniq
 | Field | Required | Notes |
 |-------|----------|-------|
 | `name` | yes | Validated group name |
-| `tag` | no | Default `workspace`; also `files`, `entity`, `relation` |
+| `tag` | no | Default `workspace`; also `files`. **`entity` and `relation` cannot be created via API** (reserved for internal groups) |
 | `description` | no | Optional text |
 
 **Response `201`**
@@ -935,7 +930,7 @@ Create a workspace group owned by the authenticated user. Group **names are uniq
 
 | Status | Condition |
 |--------|-----------|
-| `400` | Invalid or missing `name`, invalid `tag`, or **group already exists for this owner** |
+| `400` | Invalid or missing `name`, invalid `tag`, **`entity` / `relation` tag requested**, or **group already exists for this owner** |
 
 ---
 
@@ -1085,6 +1080,8 @@ Group detail with **paginated** typed member list (`page`, `page_size`; default 
 
 **Group `tag` values:** `workspace` (default) | `files` | `entity` | `relation`
 
+`entity` and `relation` groups are **system-managed** (created and populated internally). Clients may **read** them via list/detail/members and use them in KG/search/chat scope (`?group=`), but cannot create them or change membership via API.
+
 **Response `200` (tag=workspace)**
 
 ```json
@@ -1113,7 +1110,7 @@ Group detail with **paginated** typed member list (`page`, `page_size`; default 
 }
 ```
 
-**Response `200` (tag=entity)**
+**Response `200` (tag=entity)** — internal group; read-only via API
 
 ```json
 {
@@ -1125,7 +1122,7 @@ Group detail with **paginated** typed member list (`page`, `page_size`; default 
 }
 ```
 
-**Response `200` (tag=relation)**
+**Response `200` (tag=relation)** — internal group; read-only via API
 
 ```json
 {

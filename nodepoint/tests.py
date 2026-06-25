@@ -2664,17 +2664,17 @@ class WorkspaceGroupAPITests(TestCase):
             "/api/group/create/",
             {
                 "name": "research",
-                "tag": "entity",
+                "tag": "workspace",
                 "description": "Research workspace collection",
             },
             format="json",
         )
         self.assertEqual(resp.status_code, 201)
-        self.assertEqual(resp.json()["group"]["tag"], "entity")
+        self.assertEqual(resp.json()["group"]["tag"], "workspace")
         self.assertEqual(
             resp.json()["group"]["description"], "Research workspace collection"
         )
-        resp = self.client.get("/api/group/list/", {"tag": "entity"})
+        resp = self.client.get("/api/group/list/", {"tag": "workspace"})
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertIn("pagination", body)
@@ -2682,17 +2682,27 @@ class WorkspaceGroupAPITests(TestCase):
         names = [g["name"] for g in groups]
         self.assertIn("research", names)
         research = next(g for g in groups if g["name"] == "research")
-        self.assertEqual(research["tag"], "entity")
+        self.assertEqual(research["tag"], "workspace")
         self.assertEqual(research["description"], "Research workspace collection")
+
+    def test_create_entity_or_relation_group_rejected(self):
+        for tag in ("entity", "relation"):
+            resp = self.client.post(
+                "/api/group/create/",
+                {"name": f"internal-{tag}", "tag": tag},
+                format="json",
+            )
+            self.assertEqual(resp.status_code, 400, tag)
+            self.assertIn("cannot be created via API", resp.json()["error"])
 
     def test_list_groups_pagination(self):
         from nodepoint.services import workspace_group as group_svc
 
         for i in range(5):
-            group_svc.create_group(f"pag-group-{i}", owner=self.user, tag="relation")
+            group_svc.create_group(f"pag-group-{i}", owner=self.user, tag="files")
         resp = self.client.get(
             "/api/group/list/",
-            {"page": "1", "page_size": "2", "tag": "relation"},
+            {"page": "1", "page_size": "2", "tag": "files"},
         )
         self.assertEqual(resp.status_code, 200)
         body = resp.json()

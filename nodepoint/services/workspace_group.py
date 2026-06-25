@@ -32,6 +32,7 @@ LEGACY_FLAGGED_CHAT_WORKSPACE_NAME = "__flagged_chat__"
 
 _GROUP_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,254}$")
 _VALID_GROUP_TAGS = frozenset(GroupTag.values)
+_USER_CREATABLE_GROUP_TAGS = frozenset({GroupTag.WORKSPACE, GroupTag.FILES})
 
 
 class GroupError(ValueError):
@@ -89,6 +90,16 @@ def validate_group_tag(tag: str | None) -> str:
         raise GroupError(
             f"Invalid group tag: {cleaned}. "
             f"Must be one of: {', '.join(sorted(_VALID_GROUP_TAGS))}"
+        )
+    return cleaned
+
+
+def validate_user_group_tag(tag: str | None) -> str:
+    cleaned = validate_group_tag(tag)
+    if cleaned not in _USER_CREATABLE_GROUP_TAGS:
+        raise GroupError(
+            f"Group tag '{cleaned}' cannot be created via API. "
+            f"Use one of: {', '.join(sorted(_USER_CREATABLE_GROUP_TAGS))}"
         )
     return cleaned
 
@@ -911,6 +922,12 @@ def list_group_add_options(
     candidate_owner_id: int | None = None,
 ) -> dict:
     from nodepoint.services.workspace_catalog import paginate_queryset
+
+    if group.tag in (GroupTag.ENTITY, GroupTag.RELATION):
+        raise GroupError(
+            f"Group tag '{group.tag}' is managed internally; "
+            "members cannot be added via API"
+        )
 
     owner_ids = eligible_resource_owner_ids(actor, group)
     ws_base = user_workspaces_qs(actor).select_related("owner")

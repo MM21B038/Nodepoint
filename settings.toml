@@ -1,8 +1,8 @@
 [agent]
-model = "coder"
-parser = "DeepSeek"
-vector = "Qwen3-Embedding-8B"
-dim = 256
+model = "openrouter/free"
+parser = "openrouter/free"
+vector = "nvidia/llama-nemotron-embed-vl-1b-v2:free"
+dim = 1024
 
 [postgresql]
 name = "nodepoint"
