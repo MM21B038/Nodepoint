@@ -56,9 +56,23 @@ venvPath = "."
 venv = ".venv"
 pythonVersion = "3.14"
 pythonPlatform = "Windows"
+include = ["nodepoint", "config", "manage.py", "main.py"]
+exclude = [
+    "**/__pycache__",
+    "**/.ipynb_checkpoints",
+    "old_data.py",
+    ".venv",
+]
 
 [tool.basedpyright]
 venvPath = "."
 venv = ".venv"
 pythonVersion = "3.14"
 pythonPlatform = "Windows"
+include = ["nodepoint", "config", "manage.py", "main.py"]
+exclude = [
+    "**/__pycache__",
+    "**/.ipynb_checkpoints",
+    "old_data.py",
+    ".venv",
+]
