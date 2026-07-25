@@ -56,8 +56,9 @@ def get_accumulated_search_ids() -> Set[str]:
 def record_search_ids(ids: List[str]) -> None:
     current = _search_ids.get()
     if current is None:
-        current = set()
-        _search_ids.set(current)
+        accumulated: Set[str] = set()
+        _search_ids.set(accumulated)
+        current = accumulated
     for rid in ids:
         if rid:
             current.add(rid)
