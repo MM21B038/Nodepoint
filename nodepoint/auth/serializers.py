@@ -1,18 +1,16 @@
 from __future__ import annotations
 
 from django.conf import settings
-from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 
 from nodepoint.auth.api_keys import EXPIRY_PRESETS
 from nodepoint.auth.api_scopes import SCOPE_CODES, list_scopes_for_api
 from nodepoint.auth.scopes import effective_allowed_scopes, validate_scopes_subset
-from nodepoint.auth.users import create_account, ensure_profile, user_role
+from nodepoint.auth.users import User, create_account, ensure_profile, user_role
 from nodepoint.enums import AccountStatus, UserRole
 from nodepoint.models import ApiKey
-
-User = get_user_model()
+from typing import Any, List, Mapping
 
 
 def _normalize_allowed_scopes_payload(data: object) -> object:
@@ -25,7 +23,9 @@ def _normalize_allowed_scopes_payload(data: object) -> object:
     return data
 
 
-def _validate_allowed_scopes_for_assigner(value, *, context: dict) -> list[str] | None:
+def _validate_allowed_scopes_for_assigner(
+    value, *, context: Mapping[str, Any]
+) -> List[str] | None:
     if value is None:
         return value
     request = context.get("request")
@@ -90,7 +90,7 @@ class UserSerializer(serializers.ModelSerializer):
     can_purge_permanently = serializers.SerializerMethodField()
     can_recover = serializers.SerializerMethodField()
 
-    class Meta:
+    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
         model = User
         fields = (
             "id",
@@ -187,7 +187,7 @@ class AllowedScopesSerializer(serializers.Serializer):
         raw = self.initial_data
         if isinstance(raw, dict) and raw:
             normalized = _normalize_allowed_scopes_payload(raw)
-            if "allowed_scopes" not in normalized:
+            if isinstance(normalized, dict) and "allowed_scopes" not in normalized:
                 raise serializers.ValidationError(
                     "Provide allowed_scopes (scope code array). "
                     "The field access is accepted as an alias for allowed_scopes."
@@ -256,7 +256,7 @@ class ApiKeySerializer(serializers.ModelSerializer):
     key_status = serializers.SerializerMethodField()
     is_expired = serializers.SerializerMethodField()
 
-    class Meta:
+    class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
         model = ApiKey
         fields = (
             "id",

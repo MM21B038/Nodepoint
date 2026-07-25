@@ -9,7 +9,7 @@ import urllib3
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Type, Union, cast
+from typing import Any, Dict, List, Optional, Type, Union, cast, Set, Tuple
 import requests
 from dotenv import load_dotenv
 from pydantic import BaseModel
@@ -49,7 +49,7 @@ SETTINGS = Path(__file__).resolve().parent
 load_dotenv()
 
 
-def _parse_function_arguments(raw: str) -> dict[str, Any]:
+def _parse_function_arguments(raw: str) -> Dict[str, Any]:
     if not raw or not str(raw).strip():
         return {}
     try:
@@ -63,9 +63,9 @@ def _parse_function_arguments(raw: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def tool_calls_to_chat_items(tcn: list[ToolCallNormalized]) -> list[ChatCompletionToolCallItem]:
+def tool_calls_to_chat_items(tcn: List[ToolCallNormalized]) -> List[ChatCompletionToolCallItem]:
     """Build OpenAI-shaped tool call items for :class:`AssistantToolCallsMessageEvent`."""
-    out: list[ChatCompletionToolCallItem] = []
+    out: List[ChatCompletionToolCallItem] = []
     for t in tcn:
         arguments = json.dumps(t.args, ensure_ascii=False) if t.args else "{}"
         out.append(
@@ -78,9 +78,9 @@ def tool_calls_to_chat_items(tcn: list[ToolCallNormalized]) -> list[ChatCompleti
     return out
 
 
-def tool_call_items_to_normalized(items: list[ChatCompletionToolCallItem]) -> list[ToolCallNormalized]:
+def tool_call_items_to_normalized(items: List[ChatCompletionToolCallItem]) -> List[ToolCallNormalized]:
     """Inverse of :func:`tool_calls_to_chat_items` for :meth:`Thread.addTool` / :meth:`Tool.invoke_async`."""
-    out: list[ToolCallNormalized] = []
+    out: List[ToolCallNormalized] = []
     for item in items:
         out.append(
             ToolCallNormalized(
@@ -104,10 +104,10 @@ class _ToolCallBuffer:
     tool_name: str | None = None
     start_sent: bool = False
     end_sent: bool = False
-    pending_args: list[str] = field(default_factory=list)
+    pending_args: List[str] = field(default_factory=list)
 
-    def merge_and_emit(self) -> list[LLMStreamEvent]:
-        out: list[LLMStreamEvent] = []
+    def merge_and_emit(self) -> List[LLMStreamEvent]:
+        out: List[LLMStreamEvent] = []
         if self.tool_call_id and self.tool_name and not self.start_sent:
             out.append(
                 ToolCallStartEvent(
@@ -135,10 +135,10 @@ class ChatCompletionStreamParser:
     """
 
     def __init__(self) -> None:
-        self._tools: dict[tuple[int, int], _ToolCallBuffer] = {}
+        self._tools: Dict[Tuple[int, int], _ToolCallBuffer] = {}
 
-    def feed_chunk(self, chunk: dict[str, Any]) -> list[LLMStreamEvent]:
-        out: list[LLMStreamEvent] = []
+    def feed_chunk(self, chunk: Dict[str, Any]) -> List[LLMStreamEvent]:
+        out: List[LLMStreamEvent] = []
         err = chunk.get("error")
         if isinstance(err, dict) and err:
             msg = err.get("message")
@@ -159,7 +159,7 @@ class ChatCompletionStreamParser:
                 continue
             raw_delta = choice.get("delta")
             if raw_delta is None:
-                delta: dict[str, Any] = {}
+                delta: Dict[str, Any] = {}
             elif isinstance(raw_delta, dict):
                 delta = raw_delta
             else:
@@ -205,8 +205,8 @@ class ChatCompletionStreamParser:
 
         return out
 
-    def _end_tools_for_choice(self, ci: int) -> list[LLMStreamEvent]:
-        out: list[LLMStreamEvent] = []
+    def _end_tools_for_choice(self, ci: int) -> List[LLMStreamEvent]:
+        out: List[LLMStreamEvent] = []
         for key, buf in list(self._tools.items()):
             if key[0] != ci:
                 continue
@@ -215,9 +215,9 @@ class ChatCompletionStreamParser:
                 buf.end_sent = True
         return out
 
-    def close_open_tool_calls(self) -> list[LLMStreamEvent]:
+    def close_open_tool_calls(self) -> List[LLMStreamEvent]:
         """If the upstream closed without ``finish_reason``, still emit ``tool_call_end`` for UI consistency."""
-        out: list[LLMStreamEvent] = []
+        out: List[LLMStreamEvent] = []
         for _, buf in list(self._tools.items()):
             if buf.start_sent and not buf.end_sent and buf.tool_call_id:
                 out.append(ToolCallEndEvent(tool_call_id=buf.tool_call_id))
@@ -233,10 +233,10 @@ class StreamTurnAccumulator:
     """
 
     def __init__(self) -> None:
-        self._thinking: list[str] = []
-        self._tokens: list[str] = []
-        self._tool_ids_ordered: list[str] = []
-        self._tools: dict[str, dict[str, Any]] = {}
+        self._thinking: List[str] = []
+        self._tokens: List[str] = []
+        self._tool_ids_ordered: List[str] = []
+        self._tools: Dict[str, Dict[str, Any]] = {}
         self._error: str | None = None
 
     def feed(self, ev: SingleTurnStreamEvent) -> None:
@@ -272,8 +272,8 @@ class StreamTurnAccumulator:
     def response_text(self) -> str:
         return "".join(self._tokens)
 
-    def tool_calls_normalized(self) -> list[ToolCallNormalized]:
-        out: list[ToolCallNormalized] = []
+    def tool_calls_normalized(self) -> List[ToolCallNormalized]:
+        out: List[ToolCallNormalized] = []
         for tid in self._tool_ids_ordered:
             info = self._tools.get(tid, {})
             name = str(info.get("name") or "").strip()
@@ -289,13 +289,13 @@ class StreamTurnAccumulator:
             )
         return out
 
-    def assistant_dict(self) -> dict[str, Any]:
+    def assistant_dict(self) -> Dict[str, Any]:
         """Shape compatible with :meth:`Thread.addAssistant` (OpenAI-style assistant fields)."""
         reasoning_text = self.reasoning
         content_text = self.response_text
         tcn = self.tool_calls_normalized()
         if tcn:
-            tool_calls: list[dict[str, Any]] = []
+            tool_calls: List[Dict[str, Any]] = []
             for t in tcn:
                 arguments = json.dumps(t.args, ensure_ascii=False) if t.args else "{}"
                 tool_calls.append(
@@ -340,9 +340,9 @@ class Agent:
         self.vector_model = agent_cfg.get("vector", "") or ""
         self.dim = self._to_int(agent_cfg.get("dim"), default=None)
 
-        self._model_ids: list[str] | None = None
+        self._model_ids: List[str] | None = None
 
-    def _load_settings(self, settings_path: str | Path) -> dict[str, Any]:
+    def _load_settings(self, settings_path: str | Path) -> Dict[str, Any]:
         path = Path(settings_path)
         if not path.exists():
             return {}
@@ -366,7 +366,7 @@ class Agent:
     def _resolve_dim(self, dim: int | None) -> int | None:
         return self.dim if dim is None else dim
 
-    def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _request(self, method: str, path: str, payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         url = f"{self.base_url.rstrip('/')}/{path.lstrip('/')}"
         try:
@@ -389,8 +389,8 @@ class Agent:
     def _request_stream(
         self,
         path: str,
-        payload: dict[str, Any],
-    ) -> Iterator[dict[str, Any]]:
+        payload: Dict[str, Any],
+    ) -> Iterator[Dict[str, Any]]:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         url = f"{self.base_url.rstrip('/')}/{path.lstrip('/')}"
         try:
@@ -408,14 +408,14 @@ class Agent:
                     if data == "[DONE]":
                         break
                     try:
-                        yield cast(dict[str, Any], json.loads(data))
+                        yield cast(Dict[str, Any], json.loads(data))
                     except json.JSONDecodeError:
                         continue
         except requests.RequestException as e:
             raise RuntimeError(f"Streaming request failed for {path}: {e}") from e
 
     @property
-    def model_ids(self) -> set[str]:
+    def model_ids(self) -> Set[str]:
         if self._model_ids is None:
             data = self.models().get("data", [])
             self._model_ids = {
@@ -433,7 +433,7 @@ class Agent:
         hint = f" Did you mean '{suggestion[0]}'?" if suggestion else ""
         raise ValueError(f"Invalid model: {model}.{hint}")
 
-    def models(self) -> dict[str, Any]:
+    def models(self) -> Dict[str, Any]:
         models = self._request("GET", "/models")
 
         try:
@@ -456,11 +456,11 @@ class Agent:
         temperature: float = 1.2,
         reasoning: str = "medium",
         stream: bool = False,
-    ) -> Union[Iterator[dict[str, Any]], AgentToolCallsResult, AgentTextResult]:
+    ) -> Union[Iterator[Dict[str, Any]], AgentToolCallsResult, AgentTextResult]:
         model = self._resolve_model(model, self.model)
         self._validate_model(model)
 
-        payload: dict[str, Any] = {
+        payload: Dict[str, Any] = {
             "model": model,
             "messages": messages.to_json(),
             "stream": bool(stream),
@@ -513,12 +513,12 @@ class Agent:
         tools: List[Dict[str, Any]] | None = None,
         temperature: float = 1.2,
         reasoning: str = "medium",
-    ) -> Iterator[dict[str, Any]]:
+    ) -> Iterator[Dict[str, Any]]:
         """
         Convenience wrapper for streaming. Yields raw SSE JSON events.
         """
         return cast(
-            Iterator[dict[str, Any]],
+            Iterator[Dict[str, Any]],
             self.invoke(
                 messages=messages,
                 model=model,
@@ -552,13 +552,13 @@ class Agent:
         tools: List[Dict[str, Any]] | None = None,
         temperature: float = 1.2,
         reasoning: str = "medium",
-    ) -> AsyncIterator[dict[str, Any]]:
+    ) -> AsyncIterator[Dict[str, Any]]:
         """
         Async wrapper around streaming generator.
 
         Note: implemented via a thread so callers can `async for` chunks.
         """
-        q: asyncio.Queue[Optional[dict[str, Any]]] = asyncio.Queue()
+        q: asyncio.Queue[Optional[Dict[str, Any]]] = asyncio.Queue()
         loop = asyncio.get_running_loop()
 
         def _worker():
@@ -855,7 +855,7 @@ class Agent:
 
     def _reduce_and_normalize_embeddings(
         self,
-        data: list[dict[str, Any]],
+        data: List[Dict[str, Any]],
         dim: int | None = None,
     ) -> np.ndarray:
         embeddings = np.array([item["embedding"] for item in data], dtype=np.float32)
@@ -871,7 +871,7 @@ class Agent:
 
     def vector(
         self,
-        docs: str | list[str] | None = None,
+        docs: str | List[str] | None = None,
         model: str | None = None,
         dim: int | None = None,
     ):

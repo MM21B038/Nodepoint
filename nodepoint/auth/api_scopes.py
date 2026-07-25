@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import List, Dict, FrozenSet, Tuple
 
 
 @dataclass(frozen=True)
 class ScopeDefinition:
     code: str
     description: str
-    url_names: frozenset[str]
-    methods: frozenset[str]
+    url_names: FrozenSet[str]
+    methods: FrozenSet[str]
 
 
-SCOPE_DEFINITIONS: tuple[ScopeDefinition, ...] = (
+SCOPE_DEFINITIONS: Tuple[ScopeDefinition, ...] = (
     ScopeDefinition(
         "workspace:read",
         "List and read workspaces",
@@ -149,9 +150,9 @@ SCOPE_DEFINITIONS: tuple[ScopeDefinition, ...] = (
     ),
 )
 
-SCOPE_CODES: frozenset[str] = frozenset(d.code for d in SCOPE_DEFINITIONS)
+SCOPE_CODES: FrozenSet[str] = frozenset(d.code for d in SCOPE_DEFINITIONS)
 
-_URL_SCOPE_INDEX: dict[tuple[str, str], str] = {}
+_URL_SCOPE_INDEX: Dict[Tuple[str, str], str] = {}
 for _defn in SCOPE_DEFINITIONS:
     for _url_name in _defn.url_names:
         for _method in _defn.methods:
@@ -164,5 +165,5 @@ def scope_for_request(url_name: str | None, method: str) -> str | None:
     return _URL_SCOPE_INDEX.get((url_name, method.upper()))
 
 
-def list_scopes_for_api() -> list[dict[str, str]]:
+def list_scopes_for_api() -> List[Dict[str, str]]:
     return [{"code": d.code, "description": d.description} for d in SCOPE_DEFINITIONS]

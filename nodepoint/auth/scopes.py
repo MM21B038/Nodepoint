@@ -4,9 +4,10 @@ from django.contrib.auth.models import AbstractBaseUser
 
 from nodepoint.auth.api_scopes import SCOPE_CODES
 from nodepoint.enums import UserRole
+from typing import List
 
 
-def default_scopes_for_role(role: str) -> list[str] | None:
+def default_scopes_for_role(role: str) -> List[str] | None:
     """None means unrestricted (all scopes)."""
     if role in (UserRole.SUPERADMIN, UserRole.ADMIN):
         return None
@@ -21,7 +22,7 @@ def default_scopes_for_role(role: str) -> list[str] | None:
     ]
 
 
-def effective_allowed_scopes(user: AbstractBaseUser) -> list[str] | None:
+def effective_allowed_scopes(user: AbstractBaseUser) -> List[str] | None:
     from nodepoint.auth.users import ensure_profile
 
     profile = ensure_profile(user)
@@ -39,14 +40,14 @@ def user_has_scope(user: AbstractBaseUser, required: str | None) -> bool:
     return required in allowed
 
 
-def scopes_assignable_by(actor: AbstractBaseUser) -> list[str] | None:
+def scopes_assignable_by(actor: AbstractBaseUser) -> List[str] | None:
     """Scopes an admin may grant to managed users (subset of their own)."""
     return effective_allowed_scopes(actor)
 
 
 def validate_scopes_subset(
-    scopes: list[str], *, assigner: AbstractBaseUser
-) -> list[str]:
+    scopes: List[str], *, assigner: AbstractBaseUser
+) -> List[str]:
     unknown = [s for s in scopes if s not in SCOPE_CODES]
     if unknown:
         raise ValueError(f"Unknown scopes: {unknown}")

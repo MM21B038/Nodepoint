@@ -1,3 +1,4 @@
+from typing import Tuple
 from django_rq.management.commands.rqworker import Command as RQWorkerCommand
 
 from nodepoint.rq_hooks import install_rq_worker_hooks
@@ -7,7 +8,7 @@ from nodepoint.services.preprocess_recovery import (
 )
 
 
-def should_run_startup_recovery(queues: tuple[str, ...]) -> bool:
+def should_run_startup_recovery(queues: Tuple[str, ...]) -> bool:
     if "orchestrator" in queues:
         return True
     if "chunk" in queues and has_orphaned_preprocess_work():

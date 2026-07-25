@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any, Dict, Mapping, Tuple, cast
 
 import asyncio
 import json
@@ -43,7 +44,7 @@ from nodepoint.services import workspace_group as group_svc
 logger = logging.getLogger(__name__)
 
 
-def _parse_connect_query(scope: dict) -> tuple[uuid.UUID | None, bool, str | None]:
+def _parse_connect_query(scope: Mapping[str, Any]) -> Tuple[uuid.UUID | None, bool, str | None]:
     raw = scope.get("query_string") or b""
     if isinstance(raw, bytes):
         raw = raw.decode()
@@ -84,7 +85,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
     async def _reject_connect(self, message: str, *, candidates=None, code: int = 4000):
         await self.accept()
         self._connected = True
-        payload: dict = {"type": "error", "message": message}
+        payload: Dict[str, Any] = {"type": "error", "message": message}
         if candidates is not None:
             payload["candidates"] = candidates
         await self._safe_send_json(payload)
@@ -93,16 +94,18 @@ class ChatConsumer(AsyncWebsocketConsumer):
     async def connect(self):
         bind_event_loop(asyncio.get_running_loop())
 
-        user, auth_error = await authenticate_websocket(self.scope)
-        if auth_error:
+        scope = cast(Dict[str, Any], self.scope)
+        user, auth_error = await authenticate_websocket(scope)
+        if auth_error or user is None:
             await self.close(code=4401)
             return
-        self.scope["user"] = user
+        scope["user"] = user
 
-        url_kwargs = self.scope["url_route"]["kwargs"]
+        url_route = scope.get("url_route") or {}
+        url_kwargs = url_route.get("kwargs") or {}
         group_name = url_kwargs.get("group_name")
 
-        raw_qs = self.scope.get("query_string") or b""
+        raw_qs = scope.get("query_string") or b""
         if isinstance(raw_qs, bytes):
             raw_qs = raw_qs.decode()
         query_params = parse_qs(raw_qs)
@@ -154,7 +157,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             return
 
         self.workspace = workspace
-        session_id, incognito, query_error = _parse_connect_query(self.scope)
+        session_id, incognito, query_error = _parse_connect_query(scope)
         if query_error:
             await self.accept()
             self._connected = True
@@ -166,23 +169,28 @@ class ChatConsumer(AsyncWebsocketConsumer):
         self.persist = not incognito
 
         if incognito:
-            self.conversation_id = uuid.uuid4()
-            self.active_branch_id = uuid.uuid4()
+            conversation_id = uuid.uuid4()
+            active_branch_id = uuid.uuid4()
             self._thread = await asyncio.to_thread(
                 chat_storage.build_empty_thread, settings.CHAT_DEFAULT_SYSTEM
             )
         else:
+            if session_id is None:
+                await self.close(code=4000)
+                return
             try:
                 conversation = await storage_async.get_session(workspace, session_id)
             except SessionNotFoundError:
                 await self.close(code=4004)
                 return
             active = await storage_async.get_active_branch(conversation.id)
-            self.conversation_id = conversation.id
-            self.active_branch_id = active.id
+            conversation_id = conversation.id
+            active_branch_id = active.id
 
+        self.conversation_id = conversation_id
+        self.active_branch_id = active_branch_id
         self._channel_group = chat_turn_runner.conversation_channel_group(
-            self.conversation_id
+            conversation_id
         )
 
         if self.channel_layer is not None:
@@ -191,15 +199,15 @@ class ChatConsumer(AsyncWebsocketConsumer):
         await self.accept()
         self._connected = True
 
-        ready: dict = {
+        ready: Dict[str, Any] = {
             "type": "chat.ready",
-            "session_id": str(self.conversation_id),
-            "conversation_id": str(self.conversation_id),
+            "session_id": str(conversation_id),
+            "conversation_id": str(conversation_id),
             "incognito": self.incognito,
             "agent_busy": False,
         }
-        if self.active_branch_id is not None:
-            ready["active_branch_id"] = str(self.active_branch_id)
+        if active_branch_id is not None:
+            ready["active_branch_id"] = str(active_branch_id)
         if self.group_name:
             group = await database_sync_to_async(get_group_by_name)(
                 self.group_name, actor=user, owner_id=self._owner_id
@@ -219,7 +227,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
         else:
             ready["workspace"] = self.workspace_name
 
-        turn = await chat_turn_registry.get_status(self.conversation_id)
+        turn = await chat_turn_registry.get_status(conversation_id)
         ready["agent_busy"] = turn.active
         if turn.active:
             self._streaming = True
@@ -242,7 +250,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 self._channel_group, self.channel_name
             )
 
-    async def chat_stream(self, event: dict):
+    async def chat_stream(self, event: Dict[str, Any]):
         """Channel layer fan-out: live stream for all subscribers on this conversation."""
         if not self._streaming:
             return
@@ -290,7 +298,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
         turn = await chat_turn_registry.get_status(self.conversation_id)
         if turn.active:
             self._streaming = True
-            payload: dict = {
+            payload: Dict[str, Any] = {
                 "type": "chat.reconnected",
                 "agent_busy": True,
                 "hint": chat_turn_runner.RECONNECT_HINT,
@@ -311,7 +319,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             await self._safe_send_json({"type": "chat.status", "agent_busy": False})
             return
         turn = await chat_turn_registry.get_status(self.conversation_id)
-        payload: dict = {
+        payload: Dict[str, Any] = {
             "type": "chat.status",
             "agent_busy": turn.active,
             "active_branch_id": str(self.active_branch_id)
@@ -353,10 +361,15 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 }
             )
 
-    async def _handle_send(self, data: dict):
-        if self.conversation_id is not None and await chat_turn_registry.is_turn_active(
-            self.conversation_id
-        ):
+    async def _handle_send(self, data: Dict[str, Any]):
+        conversation_id = self.conversation_id
+        if conversation_id is None:
+            await self._safe_send_json(
+                {"type": "error", "message": "Chat session is not ready"}
+            )
+            return
+
+        if await chat_turn_registry.is_turn_active(conversation_id):
             await self._safe_send_json(
                 {
                     "type": "error",
@@ -380,15 +393,21 @@ class ChatConsumer(AsyncWebsocketConsumer):
             thread = self._thread
             thread.addUser(content)
             branch_id = self.active_branch_id
+            if branch_id is None:
+                await self._safe_send_json(
+                    {"type": "error", "message": "Chat session is not ready"}
+                )
+                return
         else:
-            if self.active_branch_id is None and self.conversation_id is not None:
-                active = await storage_async.get_active_branch(self.conversation_id)
-                self.active_branch_id = active.id
             branch_id = self.active_branch_id
+            if branch_id is None:
+                active = await storage_async.get_active_branch(conversation_id)
+                branch_id = active.id
+                self.active_branch_id = branch_id
             thread, _, _ = await storage_async.load_thread(branch_id)
             thread.addUser(content)
             await storage_async.append_message_visible(
-                self.conversation_id,
+                conversation_id,
                 branch_id,
                 role="user",
                 content=content,
@@ -414,7 +433,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
         try:
             turn_id = await chat_turn_runner.start_turn_queued(
-                conversation_id=self.conversation_id,
+                conversation_id=conversation_id,
                 branch_id=branch_id,
                 thread=thread,
                 workspace_name=self.workspace_name,
@@ -456,7 +475,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             {"type": "chat.turn_started", "turn_id": str(turn_id)}
         )
 
-    async def _apply_stream_side_effects(self, payload: dict) -> None:
+    async def _apply_stream_side_effects(self, payload: Dict[str, Any]) -> None:
         ev_type = payload.get("type")
         if ev_type == "chat.compressed" and self.persist and self.conversation_id is not None:
             active = await storage_async.get_active_branch(self.conversation_id)
@@ -475,7 +494,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
         elif ev_type in ("chat.cancelled", "error"):
             self._streaming = False
 
-    async def _safe_send_json(self, content: dict) -> None:
+    async def _safe_send_json(self, content: Dict[str, Any]) -> None:
         if not self._connected:
             return
         try:

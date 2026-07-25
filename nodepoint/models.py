@@ -1,10 +1,18 @@
+from __future__ import annotations
+
 import os
 import uuid
+from typing import TYPE_CHECKING
+from uuid import UUID
 
 from django.conf import settings
 from django.db import models
 
 from .enums import AccountStatus, GroupTag, Status, UserRole
+
+if TYPE_CHECKING:
+    # django-stubs 6.x dropped RelatedManager; Manager is the reverse-relation stand-in.
+    from django.db.models.manager import Manager as RelatedManager
 
 
 # =========================
@@ -13,6 +21,12 @@ from .enums import AccountStatus, GroupTag, Status, UserRole
 
 
 class UserProfile(models.Model):
+    # Explicit FK id attrs for Pyright (django-stubs mypy plugin normally injects these).
+    user_id: int
+    managed_by_id: int | None
+    created_by_id: int | None
+    deletion_requested_by_id: int | None
+
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -70,6 +84,9 @@ class UserProfile(models.Model):
 
 
 class ApiKey(models.Model):
+    user_id: int
+    created_by_id: int | None
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -101,6 +118,9 @@ class ApiKey(models.Model):
 
 
 class ApiUsageLog(models.Model):
+    user_id: int | None
+    api_key_id: UUID | None
+
     id = models.BigAutoField(primary_key=True)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -139,6 +159,10 @@ class ApiUsageLog(models.Model):
 # =========================
 
 class Workspace(models.Model):
+    owner_id: int
+    documents: RelatedManager[Document]
+    group_memberships: RelatedManager[WorkspaceGroupMembership]
+
     name = models.CharField(max_length=255)
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -166,6 +190,12 @@ class Workspace(models.Model):
 # =========================
 
 class WorkspaceGroup(models.Model):
+    owner_id: int
+    memberships: RelatedManager[WorkspaceGroupMembership]
+    document_memberships: RelatedManager[GroupDocumentMembership]
+    entity_memberships: RelatedManager[GroupEntityMembership]
+    relation_memberships: RelatedManager[GroupRelationMembership]
+
     name = models.CharField(max_length=255)
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -193,6 +223,9 @@ class WorkspaceGroup(models.Model):
 
 
 class WorkspaceGroupMembership(models.Model):
+    group_id: int
+    workspace_id: int
+
     group = models.ForeignKey(
         WorkspaceGroup,
         on_delete=models.CASCADE,
@@ -218,6 +251,9 @@ class WorkspaceGroupMembership(models.Model):
 
 
 class GroupDocumentMembership(models.Model):
+    group_id: int
+    document_id: UUID
+
     group = models.ForeignKey(
         WorkspaceGroup,
         on_delete=models.CASCADE,
@@ -243,6 +279,9 @@ class GroupDocumentMembership(models.Model):
 
 
 class GroupEntityMembership(models.Model):
+    group_id: int
+    entity_id: UUID
+
     group = models.ForeignKey(
         WorkspaceGroup,
         on_delete=models.CASCADE,
@@ -268,6 +307,9 @@ class GroupEntityMembership(models.Model):
 
 
 class GroupRelationMembership(models.Model):
+    group_id: int
+    relation_id: UUID
+
     group = models.ForeignKey(
         WorkspaceGroup,
         on_delete=models.CASCADE,
@@ -304,6 +346,9 @@ def workspace_upload_path(instance, filename):
     )
 
 class Document(models.Model):
+    workspace_id: int
+    chunks: RelatedManager[DocumentChunk]
+
     id = models.UUIDField(
         primary_key=True,
         default=uuid.uuid4,
@@ -354,6 +399,8 @@ class Document(models.Model):
 # =========================
 
 class DocumentChunk(models.Model):
+    document_id: UUID
+
     id = models.UUIDField(
         primary_key=True,
         default=uuid.uuid4,
@@ -399,6 +446,8 @@ class DocumentChunk(models.Model):
 # =========================
 
 class KnowledgeEntity(models.Model):
+    document_id: UUID
+    chunk_id: UUID | None
 
     id = models.UUIDField(
         primary_key=True,
@@ -450,6 +499,10 @@ class KnowledgeEntity(models.Model):
 # =========================
 
 class KnowledgeRelation(models.Model):
+    document_id: UUID
+    chunk_id: UUID | None
+    source_id: UUID
+    target_id: UUID
 
     id = models.UUIDField(
         primary_key=True,
@@ -521,6 +574,8 @@ class ChatMessageRole(models.TextChoices):
 
 
 class Conversation(models.Model):
+    workspace_id: int
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey(
         Workspace,
@@ -546,6 +601,9 @@ class Conversation(models.Model):
 
 
 class ChatBranch(models.Model):
+    conversation_id: UUID
+    parent_id: UUID | None
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     conversation = models.ForeignKey(
         Conversation,
@@ -578,6 +636,8 @@ class ChatBranch(models.Model):
 
 
 class ChatMessage(models.Model):
+    branch_id: UUID
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     branch = models.ForeignKey(
         ChatBranch,

@@ -2,18 +2,17 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from django.contrib.auth import get_user_model
 from django.db.models import Count
 from django.db.models.functions import TruncDate
 from django.utils import timezone
 
+from nodepoint.auth.users import User
 from nodepoint.auth.visibility import can_manage_user
 from nodepoint.models import ApiUsageLog
+from typing import Any, Dict
 
-User = get_user_model()
 
-
-def usage_summary_for_user(user, *, days: int = 30) -> dict:
+def usage_summary_for_user(user: User, *, days: int = 30) -> Dict[str, Any]:
     since = timezone.now() - timedelta(days=days)
     qs = ApiUsageLog.objects.filter(user=user, created_at__gte=since)
     total = qs.count()
@@ -44,7 +43,7 @@ def usage_summary_for_user(user, *, days: int = 30) -> dict:
     }
 
 
-def usage_platform_summary(*, days: int = 30) -> dict:
+def usage_platform_summary(*, days: int = 30) -> Dict[str, Any]:
     since = timezone.now() - timedelta(days=days)
     qs = ApiUsageLog.objects.filter(created_at__gte=since)
     by_user = list(

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any, Dict, List
 
 import os
 import shutil
@@ -7,11 +8,9 @@ from django.conf import settings
 from django.db import transaction
 from django.db.models import QuerySet
 
-from django.contrib.auth import get_user_model
-
+from nodepoint.auth.users import User
 from nodepoint.models import Workspace
 
-User = get_user_model()
 from nodepoint.auth.visibility import visible_workspaces_qs
 from nodepoint.quadrant.manager import rename_workspace_vectors
 from nodepoint.services import optional_fields as opt
@@ -36,7 +35,10 @@ class WorkspaceNotFoundError(WorkspaceValidationError):
 
 
 class AmbiguousWorkspaceError(WorkspaceValidationError):
-    def __init__(self, name: str, candidates: list[dict]):
+    name: str
+    candidates: List[Dict[str, Any]]
+
+    def __init__(self, name: str, candidates: List[Dict[str, Any]]):
         self.name = name
         self.candidates = candidates
         super().__init__(
@@ -103,7 +105,7 @@ def workspace_storage_abspath(workspace: Workspace) -> str:
     return os.path.join(settings.MEDIA_ROOT, workspace_storage_relpath(workspace))
 
 
-def _workspace_owner_candidates(workspaces: list[Workspace]) -> list[dict]:
+def _workspace_owner_candidates(workspaces: List[Workspace]) -> List[Dict[str, Any]]:
     return [
         {
             "owner_id": ws.owner_id,
@@ -145,7 +147,7 @@ def lookup_workspaces_by_name(
     *,
     actor: User,
     owner_id: int | None = None,
-) -> dict:
+) -> Dict[str, Any]:
     """Return visible workspaces matching name with owner info (disambiguation picker)."""
     cleaned = (name or "").strip()
     if not cleaned:
@@ -168,7 +170,7 @@ def workspaces_for_actor(actor: User) -> QuerySet[Workspace]:
     return visible_workspaces_qs(actor)
 
 
-def serialize_workspace_for_api(workspace: Workspace) -> dict:
+def serialize_workspace_for_api(workspace: Workspace) -> Dict[str, Any]:
     owner = workspace.owner
     return {
         "id": workspace.pk,
@@ -203,7 +205,7 @@ def move_workspace_media_dir(
             os.rmdir(new_path)
         else:
             raise WorkspaceValidationError(
-                f"Cannot rename workspace: media path already exists for '{new_name}'"
+                f"Cannot rename workspace: media path already exists for '{to_name}'"
             )
     if os.path.exists(old_path):
         os.rename(old_path, new_path)
@@ -211,7 +213,7 @@ def move_workspace_media_dir(
         os.makedirs(new_path, exist_ok=True)
 
 
-def update_workspace_instance(workspace: Workspace, updates: dict, *, actor: User) -> Workspace:
+def update_workspace_instance(workspace: Workspace, updates: Dict[str, Any], *, actor: User) -> Workspace:
     """Apply metadata updates to an already-resolved workspace (no name re-lookup)."""
     allowed = {"name", "tag", "description"}
     unknown = set(updates) - allowed
@@ -227,7 +229,7 @@ def update_workspace_instance(workspace: Workspace, updates: dict, *, actor: Use
 
     old_name = workspace.name
     new_name = old_name
-    update_fields: list[str] = []
+    update_fields: List[str] = []
 
     if "name" in updates:
         candidate = updates["name"]
@@ -295,7 +297,7 @@ def update_workspace_instance(workspace: Workspace, updates: dict, *, actor: Use
 
 def update_workspace(
     current_name: str,
-    updates: dict,
+    updates: Dict[str, Any],
     *,
     actor: User,
     owner_id: int | None = None,

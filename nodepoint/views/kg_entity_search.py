@@ -1,6 +1,7 @@
 from rest_framework import status
 from rest_framework.response import Response
 from nodepoint.auth.mixins import AuthenticatedAPIView
+from nodepoint.auth.users import request_actor
 
 from nodepoint.services import kg_entity_search
 from nodepoint.views.kg_scope import resolve_kg_scope, resolve_kg_scope_targets
@@ -22,11 +23,14 @@ class KnowledgeEntitySearchAPIView(AuthenticatedAPIView):
             )
 
         scope, error = resolve_kg_scope(request)
-        if error:
-            return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
+        if scope is None:
+            return Response(
+                {"error": error or "Provide workspace_name or group"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         workspace, group, err = resolve_kg_scope_targets(
-            request, scope, actor=request.user
+            request, scope, actor=request_actor(request)
         )
         if err is not None:
             return err
@@ -56,6 +60,11 @@ class KnowledgeEntitySearchAPIView(AuthenticatedAPIView):
                 owner_id=group.owner_id,
             )
             return Response(payload)
+
+        if workspace is None:
+            return Response(
+                {"error": "Workspace not found"}, status=status.HTTP_404_NOT_FOUND
+            )
 
         payload = kg_entity_search.search_workspace_by_name(
             workspace,

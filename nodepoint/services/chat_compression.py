@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any
+from typing import Any, Dict
 
 import tiktoken
 from django.conf import settings
@@ -84,7 +84,7 @@ def compression_payload_bytes(thread: Thread) -> int:
     return len(json.dumps(thread.to_json(), ensure_ascii=False).encode("utf-8"))
 
 
-def compression_diagnostics(thread: Thread) -> dict[str, Any]:
+def compression_diagnostics(thread: Thread) -> Dict[str, Any]:
     payload_bytes = compression_payload_bytes(thread)
     return {
         "message_count": len(thread.messages),
@@ -154,7 +154,7 @@ async def compress_async(agent: Agent, thread: Thread) -> str:
     if isinstance(resp, AgentTextResult):
         summary = resp.response or ""
     elif isinstance(resp, AgentToolCallsResult):
-        summary = resp.response or ""
+        summary = ""
     else:
         summary = str(getattr(resp, "response", "") or "")
 

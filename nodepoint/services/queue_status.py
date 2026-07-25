@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Dict, List, Set, Tuple, cast
 from uuid import UUID
 
 import django_rq
@@ -29,8 +29,7 @@ from nodepoint.models import (
 )
 from nodepoint.services.preprocess_status import build_workspace_preprocess_overall
 
-
-def _allowed_workspace_names_for_actor(actor) -> set[str] | None:
+def _allowed_workspace_names_for_actor(actor) -> Set[str] | None:
     """None = no name filter (legacy); with actor, restrict to visible workspaces."""
     if actor is None:
         return None
@@ -39,7 +38,7 @@ def _allowed_workspace_names_for_actor(actor) -> set[str] | None:
     return set(visible_workspaces_qs(actor).values_list("name", flat=True))
 
 
-def _apply_workspace_name_filter(names: set[str], allowed_names: set[str] | None) -> set[str]:
+def _apply_workspace_name_filter(names: Set[str], allowed_names: Set[str] | None) -> Set[str]:
     if allowed_names is None:
         return names
     return names & allowed_names
@@ -87,9 +86,15 @@ def _func_short_name(func_name: str | None) -> str | None:
     return func_name.rsplit(".", 1)[-1]
 
 
-def _parse_args_summary(func_name: str | None, args: tuple, kwargs: dict) -> dict[str, Any]:
+def _job_args_tuple(job: Job) -> Tuple[Any, ...]:
+    return tuple(job.args) if job.args else ()
+
+
+def _parse_args_summary(
+    func_name: str | None, args: Tuple[Any, ...], kwargs: Dict[str, Any]
+) -> Dict[str, Any]:
     short = _func_short_name(func_name) or ""
-    summary: dict[str, Any] = {}
+    summary: Dict[str, Any] = {}
 
     if short in _WORKSPACE_FIRST_ARG_FUNCS and args and isinstance(args[0], str):
         summary["workspace"] = args[0]
@@ -115,7 +120,7 @@ def _parse_args_summary(func_name: str | None, args: tuple, kwargs: dict) -> dic
 
 
 def _job_matches_workspace(job: Job, workspace: str) -> bool:
-    summary = _parse_args_summary(job.func_name, job.args or (), job.kwargs or {})
+    summary = _parse_args_summary(job.func_name, _job_args_tuple(job), job.kwargs or {})
     if summary.get("workspace") == workspace:
         return True
     if workspace in str(job.args) or workspace in str(job.kwargs):
@@ -123,8 +128,8 @@ def _job_matches_workspace(job: Job, workspace: str) -> bool:
     return False
 
 
-def _job_in_allowed_workspaces(job: Job, allowed_names: set[str]) -> bool:
-    summary = _parse_args_summary(job.func_name, job.args or (), job.kwargs or {})
+def _job_in_allowed_workspaces(job: Job, allowed_names: Set[str]) -> bool:
+    summary = _parse_args_summary(job.func_name, _job_args_tuple(job), job.kwargs or {})
     ws = summary.get("workspace")
     if ws:
         return ws in allowed_names
@@ -139,7 +144,7 @@ def _job_in_allowed_workspaces(job: Job, allowed_names: set[str]) -> bool:
     return False
 
 
-def _serialize_job(job: Job, *, origin_queue: str | None = None) -> dict[str, Any]:
+def _serialize_job(job: Job, *, origin_queue: str | None = None) -> Dict[str, Any]:
     origin = origin_queue or getattr(job, "origin", None) or job.origin
     return {
         "id": job.id,
@@ -150,13 +155,13 @@ def _serialize_job(job: Job, *, origin_queue: str | None = None) -> dict[str, An
         "ended_at": _iso(job.ended_at),
         "origin_queue": origin,
         "args_summary": _parse_args_summary(
-            job.func_name, job.args or (), job.kwargs or {}
+            job.func_name, _job_args_tuple(job), job.kwargs or {}
         ),
     }
 
 
-def _fetch_jobs(job_ids: list[str], connection) -> list[Job]:
-    jobs: list[Job] = []
+def _fetch_jobs(job_ids: List[str], connection) -> List[Job]:
+    jobs: List[Job] = []
     for job_id in job_ids:
         try:
             jobs.append(Job.fetch(job_id, connection=connection))
@@ -165,7 +170,7 @@ def _fetch_jobs(job_ids: list[str], connection) -> list[Job]:
     return jobs
 
 
-def _queue_counts(queue_name: str, connection) -> dict[str, int]:
+def _queue_counts(queue_name: str, connection) -> Dict[str, int]:
     queue = django_rq.get_queue(queue_name)
     started = StartedJobRegistry(queue_name, connection=connection)
     failed = FailedJobRegistry(queue_name, connection=connection)
@@ -183,11 +188,11 @@ def _queue_jobs(
     connection,
     *,
     workspace: str | None,
-    allowed_names: set[str] | None = None,
-) -> list[dict[str, Any]]:
+    allowed_names: Set[str] | None = None,
+) -> List[Dict[str, Any]]:
     queue = django_rq.get_queue(queue_name)
-    seen: set[str] = set()
-    serialized: list[dict[str, Any]] = []
+    seen: Set[str] = set()
+    serialized: List[Dict[str, Any]] = []
 
     def add(job: Job, origin: str | None = None) -> None:
         if job.id in seen:
@@ -222,10 +227,10 @@ def _failed_sample(
     connection,
     *,
     workspace: str | None = None,
-    allowed_names: set[str] | None = None,
-) -> list[dict[str, Any]]:
+    allowed_names: Set[str] | None = None,
+) -> List[Dict[str, Any]]:
     registry = FailedJobRegistry(queue_name, connection=connection)
-    sample: list[dict[str, Any]] = []
+    sample: List[Dict[str, Any]] = []
     for job_id in registry.get_job_ids()[:MAX_FAILED_SAMPLE]:
         for job in _fetch_jobs([job_id], connection):
             if workspace and not _job_matches_workspace(job, workspace):
@@ -241,10 +246,10 @@ def _failed_sample(
 
 
 def build_rq_snapshot(
-    *, workspace: str | None = None, allowed_names: set[str] | None = None
-) -> dict[str, Any]:
+    *, workspace: str | None = None, allowed_names: Set[str] | None = None
+) -> Dict[str, Any]:
     connection = get_connection()
-    queues: dict[str, Any] = {}
+    queues: Dict[str, Any] = {}
     for name in MONITORED_QUEUES:
         if name not in settings.RQ_QUEUES:
             continue
@@ -265,7 +270,7 @@ def build_rq_snapshot(
             logger.exception("queue_status: failed to read queue %s", name)
             queues[name] = {"error": f"Could not read queue '{name}'"}
 
-    workers: list[dict[str, Any]] = []
+    workers: List[Dict[str, Any]] = []
     try:
         for worker in Worker.all(connection=connection):
             workers.append(
@@ -284,13 +289,13 @@ def build_rq_snapshot(
     return {"queues": queues, "workers": workers}
 
 
-def _scan_pipeline_locks() -> list[dict[str, Any]]:
+def _scan_pipeline_locks() -> List[Dict[str, Any]]:
     try:
         conn = get_connection()
     except Exception:
         logger.debug("queue_status: could not connect to Redis for pipeline locks", exc_info=True)
         return []
-    locks: list[dict[str, Any]] = []
+    locks: List[Dict[str, Any]] = []
     try:
         key_iter = conn.scan_iter(match=PIPELINE_LOCK_SCAN_PREFIX)
     except Exception:
@@ -299,21 +304,21 @@ def _scan_pipeline_locks() -> list[dict[str, Any]]:
     for key in key_iter:
         key_str = key.decode() if isinstance(key, bytes) else str(key)
         workspace = key_str.rsplit(":", 1)[-1]
-        ttl = conn.ttl(key)
+        ttl = cast(int, conn.ttl(key))
         locks.append(
             {
                 "workspace": workspace,
                 "key": key_str,
-                "ttl_seconds": ttl if ttl is not None and ttl >= 0 else None,
+                "ttl_seconds": ttl if ttl >= 0 else None,
             }
         )
     locks.sort(key=lambda x: x["workspace"])
     return locks
 
 
-def _status_counts(qs, field: str = "status") -> dict[str, int]:
+def _status_counts(qs, field: str = "status") -> Dict[str, int]:
     rows = qs.values(field).annotate(count=Count("id"))
-    out: dict[str, int] = {}
+    out: Dict[str, int] = {}
     total = 0
     for row in rows:
         status = row[field]
@@ -324,7 +329,7 @@ def _status_counts(qs, field: str = "status") -> dict[str, int]:
     return out
 
 
-def _vector_backlog_counts(qs) -> dict[str, int]:
+def _vector_backlog_counts(qs) -> Dict[str, int]:
     rows = qs.values("vector").annotate(count=Count("id"))
     pending = failed = completed = 0
     for row in rows:
@@ -347,7 +352,7 @@ def _vector_backlog_counts(qs) -> dict[str, int]:
 
 def _document_qs(
     workspace: str | None,
-    allowed_names: set[str] | None = None,
+    allowed_names: Set[str] | None = None,
     *,
     workspace_id: int | None = None,
 ):
@@ -363,7 +368,7 @@ def _document_qs(
 
 def _chunk_qs(
     workspace: str | None,
-    allowed_names: set[str] | None = None,
+    allowed_names: Set[str] | None = None,
     *,
     workspace_id: int | None = None,
 ):
@@ -379,7 +384,7 @@ def _chunk_qs(
 
 def _entity_qs(
     workspace: str | None,
-    allowed_names: set[str] | None = None,
+    allowed_names: Set[str] | None = None,
     *,
     workspace_id: int | None = None,
 ):
@@ -395,7 +400,7 @@ def _entity_qs(
 
 def _relation_qs(
     workspace: str | None,
-    allowed_names: set[str] | None = None,
+    allowed_names: Set[str] | None = None,
     *,
     workspace_id: int | None = None,
 ):
@@ -409,11 +414,11 @@ def _relation_qs(
     return qs
 
 
-def _chunk_ids_with_live_rq_jobs(connection=None) -> set[UUID]:
+def _chunk_ids_with_live_rq_jobs(connection=None) -> Set[UUID]:
     """Chunk IDs that have a waiting or started process_chunk job in Redis."""
     connection = connection or get_connection()
     chunk_queue = getattr(settings, "RQ_QUEUE_CHUNK", "chunk")
-    live: set[UUID] = set()
+    live: Set[UUID] = set()
     try:
         queue = django_rq.get_queue(chunk_queue)
         job_ids = [job.id for job in queue.get_jobs()]
@@ -422,7 +427,9 @@ def _chunk_ids_with_live_rq_jobs(connection=None) -> set[UUID]:
         for job in _fetch_jobs(job_ids, connection):
             if _func_short_name(job.func_name) != "process_chunk":
                 continue
-            summary = _parse_args_summary(job.func_name, job.args or (), job.kwargs or {})
+            summary = _parse_args_summary(
+                job.func_name, _job_args_tuple(job), job.kwargs or {}
+            )
             raw = summary.get("chunk_id")
             if raw:
                 try:
@@ -465,7 +472,7 @@ def _chunk_queue_busy(connection) -> bool:
 def _orphaned_chunk_count(
     *,
     workspace: str | None = None,
-    allowed_names: set[str] | None = None,
+    allowed_names: Set[str] | None = None,
     workspace_id: int | None = None,
 ) -> int:
     """
@@ -495,10 +502,10 @@ _VECTOR_BACKLOG_STATUSES = (Status.PENDING, Status.FAILED)
 
 
 def _workspace_names_with_db_backlog(
-    allowed_names: set[str] | None = None,
-) -> set[str]:
+    allowed_names: Set[str] | None = None,
+) -> Set[str]:
     """Workspace names that may still need preprocess (coarse DB signals)."""
-    names: set[str] = set()
+    names: Set[str] = set()
     names.update(
         Document.objects.filter(status__in=_BACKLOG_DOCUMENT_STATUSES)
         .values_list("workspace__name", flat=True)
@@ -526,9 +533,9 @@ def _workspace_names_with_db_backlog(
 
 
 def _workspaces_from_rq_queue_jobs(
-    queue_names: tuple[str, ...], connection, *, allowed_names: set[str] | None = None
-) -> set[str]:
-    names: set[str] = set()
+    queue_names: Tuple[str, ...], connection, *, allowed_names: Set[str] | None = None
+) -> Set[str]:
+    names: Set[str] = set()
     for queue_name in queue_names:
         if queue_name not in settings.RQ_QUEUES:
             continue
@@ -539,7 +546,7 @@ def _workspaces_from_rq_queue_jobs(
             job_ids.extend(started.get_job_ids())
             for job in _fetch_jobs(job_ids, connection):
                 summary = _parse_args_summary(
-                    job.func_name, job.args or (), job.kwargs or {}
+                    job.func_name, _job_args_tuple(job), job.kwargs or {}
                 )
                 if summary.get("workspace"):
                     names.add(summary["workspace"])
@@ -554,10 +561,10 @@ def _workspaces_from_rq_queue_jobs(
 
 def _collect_incomplete_workspace_candidate_names(
     *,
-    active_pipelines: list[dict[str, Any]] | None = None,
-    pipeline_locks: list[dict[str, Any]] | None = None,
-    allowed_names: set[str] | None = None,
-) -> set[str]:
+    active_pipelines: List[Dict[str, Any]] | None = None,
+    pipeline_locks: List[Dict[str, Any]] | None = None,
+    allowed_names: Set[str] | None = None,
+) -> Set[str]:
     """
     Names likely not preprocess-ready — avoids scanning every workspace.
 
@@ -589,19 +596,21 @@ def _collect_incomplete_workspace_candidate_names(
 def _workspace_not_ready_row(
     ws: Workspace,
     *,
-    overall: dict[str, Any] | None = None,
+    overall: Dict[str, Any] | None = None,
     pipeline_active: bool = False,
     lock_held: bool = False,
     orchestrator_jobs: int = 0,
     phase_override: str | None = None,
-) -> dict[str, Any]:
-    overall = overall or build_workspace_preprocess_overall(ws)["overall"]
-    phase = phase_override or overall["phase"]
+) -> Dict[str, Any]:
+    overall_stats: Dict[str, Any] = overall or build_workspace_preprocess_overall(ws)[
+        "overall"
+    ]
+    phase = phase_override or overall_stats["phase"]
     return {
         "workspace": ws.name,
         "phase": phase,
-        "documents_total": overall["documents_total"],
-        "documents_failed": overall["documents_failed"],
+        "documents_total": overall_stats["documents_total"],
+        "documents_failed": overall_stats["documents_failed"],
         "chunks_orphaned": _orphaned_chunk_count(workspace=ws.name),
         "pipeline_active": pipeline_active,
         "lock_held": lock_held,
@@ -611,10 +620,10 @@ def _workspace_not_ready_row(
 
 def _build_workspaces_incomplete_list(
     *,
-    active_pipelines: list[dict[str, Any]] | None = None,
-    pipeline_locks: list[dict[str, Any]] | None = None,
-    allowed_names: set[str] | None = None,
-) -> list[dict[str, Any]]:
+    active_pipelines: List[Dict[str, Any]] | None = None,
+    pipeline_locks: List[Dict[str, Any]] | None = None,
+    allowed_names: Set[str] | None = None,
+) -> List[Dict[str, Any]]:
     """
     Workspaces that are not preprocess-ready in Postgres and/or have an active
     orchestrator pipeline (lock or queued/started jobs).
@@ -623,7 +632,7 @@ def _build_workspaces_incomplete_list(
     workspaces that are running but may already show per-file ready in the DB.
     """
     active_pipelines = active_pipelines or []
-    by_name: dict[str, dict[str, Any]] = {}
+    by_name: Dict[str, Dict[str, Any]] = {}
     candidates = _collect_incomplete_workspace_candidate_names(
         active_pipelines=active_pipelines,
         pipeline_locks=pipeline_locks,
@@ -678,7 +687,7 @@ def _build_workspaces_incomplete_list(
     return rows
 
 
-def build_workspaces_preprocess_summary(*, actor=None) -> dict[str, Any]:
+def build_workspaces_preprocess_summary(*, actor=None) -> Dict[str, Any]:
     """Lightweight list of not-ready workspaces visible to actor."""
     allowed = _allowed_workspace_names_for_actor(actor)
     locks = _scan_pipeline_locks()
@@ -699,13 +708,13 @@ def build_database_backlog(
     *,
     workspace: str | None = None,
     workspace_id: int | None = None,
-    active_pipelines: list[dict[str, Any]] | None = None,
-    pipeline_locks: list[dict[str, Any]] | None = None,
-    allowed_names: set[str] | None = None,
-) -> dict[str, Any]:
+    active_pipelines: List[Dict[str, Any]] | None = None,
+    pipeline_locks: List[Dict[str, Any]] | None = None,
+    allowed_names: Set[str] | None = None,
+) -> Dict[str, Any]:
     pending_failed = [Status.PENDING, Status.FAILED]
     scoped = workspace_id is not None or bool(workspace)
-    result: dict[str, Any] = {
+    result: Dict[str, Any] = {
         "documents": _status_counts(
             _document_qs(workspace, allowed_names, workspace_id=workspace_id)
         ),
@@ -747,7 +756,7 @@ def build_database_backlog(
     return result
 
 
-def _orchestrator_queue_names() -> tuple[str, ...]:
+def _orchestrator_queue_names() -> Tuple[str, ...]:
     return (
         getattr(settings, "RQ_QUEUE_ORCHESTRATOR_HIGH", "high"),
         getattr(settings, "RQ_QUEUE_ORCHESTRATOR", "orchestrator"),
@@ -755,28 +764,28 @@ def _orchestrator_queue_names() -> tuple[str, ...]:
     )
 
 
-def _orchestrator_jobs_for_workspace(workspace: str, connection) -> list[dict[str, Any]]:
-    jobs: list[dict[str, Any]] = []
+def _orchestrator_jobs_for_workspace(workspace: str, connection) -> List[Dict[str, Any]]:
+    jobs: List[Dict[str, Any]] = []
     for queue_name in _orchestrator_queue_names():
         jobs.extend(_queue_jobs(queue_name, connection, workspace=workspace))
     return jobs
 
 
 def _workspaces_from_orchestrator_jobs(
-    connection, *, allowed_names: set[str] | None = None
-) -> set[str]:
-    names: set[str] = set()
+    connection, *, allowed_names: Set[str] | None = None
+) -> Set[str]:
+    names: Set[str] = set()
     try:
         for queue_name in _orchestrator_queue_names():
             queue = django_rq.get_queue(queue_name)
-            job_ids: list[str] = []
+            job_ids: List[str] = []
             for job in queue.get_jobs():
                 job_ids.append(job.id)
             started = StartedJobRegistry(queue_name, connection=connection)
             job_ids.extend(started.get_job_ids())
             for job in _fetch_jobs(job_ids, connection):
                 summary = _parse_args_summary(
-                    job.func_name, job.args or (), job.kwargs or {}
+                    job.func_name, _job_args_tuple(job), job.kwargs or {}
                 )
                 if summary.get("workspace"):
                     names.add(summary["workspace"])
@@ -789,11 +798,11 @@ def _workspaces_from_orchestrator_jobs(
 
 
 def build_active_pipelines(
-    locks: list[dict[str, Any]],
+    locks: List[Dict[str, Any]],
     *,
     workspace: str | None = None,
-    allowed_names: set[str] | None = None,
-) -> list[dict[str, Any]]:
+    allowed_names: Set[str] | None = None,
+) -> List[Dict[str, Any]]:
     connection = get_connection()
     lock_by_ws = {item["workspace"]: item for item in locks}
     try:
@@ -809,7 +818,7 @@ def build_active_pipelines(
     elif allowed_names is not None:
         workspaces &= allowed_names
 
-    active: list[dict[str, Any]] = []
+    active: List[Dict[str, Any]] = []
     for ws_name in sorted(workspaces):
         lock = lock_by_ws.get(ws_name)
         try:
@@ -818,7 +827,7 @@ def build_active_pipelines(
             logger.exception(
                 "queue_status: failed orchestrator jobs for workspace=%s", ws_name
             )
-            orch_jobs = []
+            orch_jobs: List[Dict[str, Any]] = []
         if not lock and not orch_jobs:
             continue
         active.append(
@@ -837,7 +846,7 @@ def build_queue_status(
     workspace: str | None = None,
     workspace_id: int | None = None,
     actor=None,
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
     """
     Operational snapshot scoped to workspaces visible to actor when provided.
     When workspace_id is set, DB counts use that pk (disambiguates duplicate names).

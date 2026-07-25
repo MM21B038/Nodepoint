@@ -3,16 +3,14 @@ from __future__ import annotations
 from datetime import timedelta
 
 from django.conf import settings
-from django.contrib.auth import get_user_model
 from django.contrib.auth.hashers import check_password
 from django.db import transaction
 from django.utils import timezone
 
-from nodepoint.auth.users import ensure_profile, user_role
+from nodepoint.auth.users import User, ensure_profile, user_role
 from nodepoint.enums import AccountStatus, UserRole
 from nodepoint.models import ApiKey, UserProfile
-
-User = get_user_model()
+from typing import Any, Dict, List
 
 
 class AccountLifecycleError(ValueError):
@@ -98,7 +96,7 @@ def recover_account(*, username: str, password: str, role: str) -> User:
     return user
 
 
-def deletion_status_payload(user) -> dict:
+def deletion_status_payload(user: User) -> Dict[str, Any]:
     profile = ensure_profile(user)
     remaining_days = None
     if profile.purge_scheduled_at and profile.status == AccountStatus.PENDING_DELETION:
@@ -113,7 +111,7 @@ def deletion_status_payload(user) -> dict:
 
 
 @transaction.atomic
-def purge_due_accounts() -> list[int]:
+def purge_due_accounts() -> List[int]:
     """Hard-delete users whose purge_scheduled_at has passed. Returns deleted user ids."""
     from nodepoint.auth.user_lifecycle import purge_user_permanently
 
@@ -127,7 +125,7 @@ def purge_due_accounts() -> list[int]:
     if not due_users:
         return []
     requested_by = User.objects.filter(username="system").first() or due_users[0]
-    deleted_ids = []
+    deleted_ids: List[int] = []
     for user in due_users:
         uid = user.pk
         purge_user_permanently(user, requested_by=requested_by)

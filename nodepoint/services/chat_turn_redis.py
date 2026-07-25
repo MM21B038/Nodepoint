@@ -6,7 +6,7 @@ import os
 import socket
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Dict
 from uuid import UUID
 
 from django.conf import settings
@@ -65,7 +65,7 @@ def _serialize_record(
     started_at: datetime,
     owner_worker_id: str,
 ) -> str:
-    payload: dict[str, Any] = {
+    payload: Dict[str, Any] = {
         "turn_id": str(turn_id),
         "started_at": started_at.isoformat(),
         "worker_id": owner_worker_id,

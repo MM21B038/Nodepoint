@@ -4,6 +4,7 @@ import re
 
 from django.core.exceptions import ValidationError
 from django.utils.translation import gettext as _
+from typing import List
 
 
 class NodepointPasswordValidator:
@@ -12,7 +13,7 @@ class NodepointPasswordValidator:
     MIN_LENGTH = 8
 
     def validate(self, password, user=None):
-        errors: list[str] = []
+        errors: List[str] = []
         if len(password) < self.MIN_LENGTH:
             errors.append(
                 _(f"Password must be at least {self.MIN_LENGTH} characters long.")

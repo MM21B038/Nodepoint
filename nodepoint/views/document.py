@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import os
+from typing import Any, Dict, List
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
@@ -51,6 +54,11 @@ class UploadDocumentAPIView(AuthenticatedAPIView):
                     return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
             elif err is not None:
                 return err
+            if workspace is None:
+                return Response(
+                    {"error": "Workspace not found"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
         else:
             try:
                 workspace = require_default_upload_workspace(request.user)
@@ -131,10 +139,12 @@ class UploadDocumentAPIView(AuthenticatedAPIView):
 class ListWorkspaceDocumentsAPIView(AuthenticatedAPIView):
     def get(self, request, workspace_name):
         workspace, err = resolve_workspace_response(request, workspace_name)
-        if err is not None:
-            return err
+        if workspace is None:
+            return err or Response(
+                {"error": "Workspace not found"}, status=status.HTTP_404_NOT_FOUND
+            )
 
-        files = []
+        files: List[Dict[str, Any]] = []
         for doc in workspace.documents.all().order_by("-created_at"):
             files.append(
                 {
@@ -159,8 +169,10 @@ class ListWorkspaceDocumentsAPIView(AuthenticatedAPIView):
 class DeleteDocumentAPIView(AuthenticatedAPIView):
     def delete(self, request, workspace_name, file_name):
         workspace, err = resolve_workspace_response(request, workspace_name)
-        if err is not None:
-            return err
+        if workspace is None:
+            return err or Response(
+                {"error": "Workspace not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         try:
             document = Document.objects.get(
                 workspace=workspace,

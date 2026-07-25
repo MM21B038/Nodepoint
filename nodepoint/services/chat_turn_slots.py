@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import cast
 from uuid import UUID
 
 from django.conf import settings
@@ -85,7 +86,7 @@ def count_active_turn_slots() -> int:
     conn = get_connection()
     now = time.time()
     conn.zremrangebyscore(SLOTS_KEY, "-inf", now)
-    return int(conn.zcard(SLOTS_KEY) or 0)
+    return int(cast(int, conn.zcard(SLOTS_KEY)) or 0)
 
 
 def clear_all_turn_slots() -> None:

@@ -17,7 +17,7 @@ _SKIP_PATH_PREFIXES = (
 
 class ApiUsageLoggingMiddleware(MiddlewareMixin):
     def process_request(self, request):
-        request._api_usage_start = time.perf_counter()
+        setattr(request, "_api_usage_start", time.perf_counter())
 
     def process_response(self, request, response):
         path = getattr(request, "path", "") or ""

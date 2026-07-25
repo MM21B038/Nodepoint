@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from enum import StrEnum
-from typing import Any, List, Literal
+from typing import Any, List, Literal, Dict
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -40,7 +40,7 @@ class ChatCompletionMessage(BaseModel):
     model_config = ConfigDict(extra="allow")
     role: str | None = None
     content: str | None = None
-    tool_calls: list[ChatCompletionToolCallItem] | None = None
+    tool_calls: List[ChatCompletionToolCallItem] | None = None
     reasoning_content: str | None = None
     reasoning: str | None = None
 
@@ -61,21 +61,21 @@ class ChatCompletionUsage(BaseModel):
 
 class ChatCompletionResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
-    choices: list[ChatCompletionChoice]
+    choices: List[ChatCompletionChoice]
     usage: ChatCompletionUsage | None = None
 
 
 class ToolCallNormalized(BaseModel):
     model_config = ConfigDict(extra="allow")
     name: str
-    args: dict[str, Any] = Field(default_factory=dict)
+    args: Dict[str, Any] = Field(default_factory=dict)
     id: str | None = None
 
 
 class AgentToolCallsResult(BaseModel):
     model_config = ConfigDict(extra="allow")
     finish_reason: Literal["tool_calls"] = "tool_calls"
-    tool_calls: list[ToolCallNormalized]
+    tool_calls: List[ToolCallNormalized]
     reasoning: str = ""
     message: ChatCompletionMessage
     usage: ChatCompletionUsage | None = None
@@ -224,7 +224,7 @@ class AssistantToolCallsMessageEvent(BaseStreamEvent):
     type: Literal[StreamEventType.ASSISTANT_TOOL_CALLS_MESSAGE] = (
         StreamEventType.ASSISTANT_TOOL_CALLS_MESSAGE
     )
-    tool_calls: list[ChatCompletionToolCallItem]
+    tool_calls: List[ChatCompletionToolCallItem]
     reasoning_content: str | None = None
     content: str | None = None
 
@@ -256,7 +256,7 @@ AgentStreamEvent = (
 )
 
 
-def to_sse(event: SingleTurnStreamEvent) -> dict[str, str]:
+def to_sse(event: SingleTurnStreamEvent) -> Dict[str, str]:
     """Map a single-turn stream event to ``sse-starlette.EventSourceResponse`` payloads."""
     match event:
         case ThinkingTokenEvent():
@@ -278,7 +278,7 @@ def to_sse(event: SingleTurnStreamEvent) -> dict[str, str]:
             return {"event": StreamEventType.DONE.value, "data": event.model_dump_json()}
 
 
-def to_sse_agent(event: AgentStreamEvent) -> dict[str, str]:
+def to_sse_agent(event: AgentStreamEvent) -> Dict[str, str]:
     """SSE mapping for the wider agent stream (includes orchestration envelopes)."""
     match event:
         case ThinkingTokenEvent():
@@ -343,13 +343,19 @@ def json_safe_for_dump(obj: Any) -> Any:
         return str(obj)
 
 
-def tool_args_as_dict(args: Any) -> dict[str, Any]:
+def tool_args_as_dict(args: Any) -> Dict[str, Any]:
     if args is None:
         return {}
-    if isinstance(args, dict):
-        return args
     if isinstance(args, BaseModel):
         return args.model_dump()
-    if hasattr(args, "to_dict") and callable(args.to_dict):
-        return dict(args.to_dict())
-    return dict(args)
+    if isinstance(args, dict):
+        return {str(k): v for k, v in args.items()}
+    to_dict = getattr(args, "to_dict", None)
+    if callable(to_dict):
+        converted = to_dict()
+        if isinstance(converted, dict):
+            return {str(k): v for k, v in converted.items()}
+    try:
+        return {str(k): v for k, v in dict(args).items()}
+    except (TypeError, ValueError):
+        return {}

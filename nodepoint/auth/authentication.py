@@ -40,7 +40,7 @@ class ApiKeyAuthentication(authentication.BaseAuthentication):
             msg = login_block_message(profile) or "Account cannot access the API."
             raise AuthenticationFailed(msg, code="account_blocked")
         ApiKey.objects.filter(pk=api_key.pk).update(last_used_at=timezone.now())
-        request.auth_api_key = api_key
+        setattr(request, "auth_api_key", api_key)
         return (api_key.user, api_key)
 
     def _extract_key(self, request) -> str | None:

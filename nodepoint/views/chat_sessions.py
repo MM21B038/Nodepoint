@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any, Dict, Tuple
 
 from rest_framework import status
 from rest_framework.response import Response
 from nodepoint.auth.mixins import AuthenticatedAPIView
 
+from nodepoint.models import Workspace, WorkspaceGroup
 from nodepoint.services import chat_storage
 from nodepoint.services.chat_storage import SessionNotFoundError
 from nodepoint.services.workspace import is_internal_chat_workspace_name
@@ -23,10 +25,15 @@ SESSION_REQUIRED_LEGACY = {
 }
 
 
-def _resolve_chat_workspace(request, workspace_name: str):
+def _resolve_chat_workspace(
+    request, workspace_name: str
+) -> Tuple[Workspace | None, Response | None]:
     workspace, err = resolve_workspace_response(request, workspace_name)
-    if err is not None:
-        return None, err
+    if workspace is None:
+        return None, err or Response(
+            {"error": "Workspace not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
     if is_internal_chat_workspace_name(workspace.name):
         return None, Response(
             {"error": "Workspace not found"},
@@ -35,7 +42,9 @@ def _resolve_chat_workspace(request, workspace_name: str):
     return workspace, None
 
 
-def _resolve_chat_group(request, name: str):
+def _resolve_chat_group(
+    request, name: str
+) -> Tuple[WorkspaceGroup | None, Response | None]:
     return resolve_group_response(request, name)
 
 
@@ -47,7 +56,7 @@ def _serialize_session_detail(
     group_name: str | None = None,
     group_owner_id: int | None = None,
     actor=None,
-) -> dict:
+) -> Dict[str, Any]:
     payload = {
         "session_id": str(conversation.id),
         "title": conversation.title,
@@ -70,8 +79,10 @@ class WorkspaceChatSessionsAPIView(AuthenticatedAPIView):
 
     def get(self, request, workspace_name: str):
         workspace, err = _resolve_chat_workspace(request, workspace_name)
-        if err is not None:
-            return err
+        if workspace is None:
+            return err or Response(
+                {"error": "Workspace not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         return Response(
             {
                 "workspace": workspace.name,
@@ -81,8 +92,10 @@ class WorkspaceChatSessionsAPIView(AuthenticatedAPIView):
 
     def post(self, request, workspace_name: str):
         workspace, err = _resolve_chat_workspace(request, workspace_name)
-        if err is not None:
-            return err
+        if workspace is None:
+            return err or Response(
+                {"error": "Workspace not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         title = (request.data.get("title") or "").strip() if request.data else ""
         conversation, _root = chat_storage.create_session(workspace, title=title)
         return Response(
@@ -101,8 +114,10 @@ class WorkspaceChatSessionDetailAPIView(AuthenticatedAPIView):
 
     def get(self, request, workspace_name: str, session_id: uuid.UUID):
         workspace, err = _resolve_chat_workspace(request, workspace_name)
-        if err is not None:
-            return err
+        if workspace is None:
+            return err or Response(
+                {"error": "Workspace not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         try:
             conversation = chat_storage.get_session(workspace, session_id)
         except SessionNotFoundError:
@@ -116,8 +131,10 @@ class WorkspaceChatSessionDetailAPIView(AuthenticatedAPIView):
 
     def patch(self, request, workspace_name: str, session_id: uuid.UUID):
         workspace, err = _resolve_chat_workspace(request, workspace_name)
-        if err is not None:
-            return err
+        if workspace is None:
+            return err or Response(
+                {"error": "Workspace not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         title = (request.data.get("title") or "").strip() if request.data else ""
         if not title:
             return Response(
@@ -140,8 +157,10 @@ class WorkspaceChatSessionDetailAPIView(AuthenticatedAPIView):
 
     def delete(self, request, workspace_name: str, session_id: uuid.UUID):
         workspace, err = _resolve_chat_workspace(request, workspace_name)
-        if err is not None:
-            return err
+        if workspace is None:
+            return err or Response(
+                {"error": "Workspace not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         try:
             chat_storage.get_session(workspace, session_id)
         except SessionNotFoundError:
@@ -161,8 +180,10 @@ class WorkspaceChatSessionClearAPIView(AuthenticatedAPIView):
 
     def post(self, request, workspace_name: str, session_id: uuid.UUID):
         workspace, err = _resolve_chat_workspace(request, workspace_name)
-        if err is not None:
-            return err
+        if workspace is None:
+            return err or Response(
+                {"error": "Workspace not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         try:
             chat_storage.get_session(workspace, session_id)
         except SessionNotFoundError:
@@ -182,8 +203,10 @@ class GroupChatSessionsAPIView(AuthenticatedAPIView):
 
     def get(self, request, name: str):
         group, err = _resolve_chat_group(request, name)
-        if err is not None:
-            return err
+        if group is None:
+            return err or Response(
+                {"error": "Group not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         workspace = get_or_create_group_chat_workspace(
             group.name, actor=request.user, owner_id=group.owner_id
         )
@@ -199,8 +222,10 @@ class GroupChatSessionsAPIView(AuthenticatedAPIView):
 
     def post(self, request, name: str):
         group, err = _resolve_chat_group(request, name)
-        if err is not None:
-            return err
+        if group is None:
+            return err or Response(
+                {"error": "Group not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         workspace = get_or_create_group_chat_workspace(
             group.name, actor=request.user, owner_id=group.owner_id
         )
@@ -222,8 +247,10 @@ class GroupChatSessionDetailAPIView(AuthenticatedAPIView):
 
     def get(self, request, name: str, session_id: uuid.UUID):
         group, err = _resolve_chat_group(request, name)
-        if err is not None:
-            return err
+        if group is None:
+            return err or Response(
+                {"error": "Group not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         workspace = get_or_create_group_chat_workspace(
             group.name, actor=request.user, owner_id=group.owner_id
         )
@@ -244,8 +271,10 @@ class GroupChatSessionDetailAPIView(AuthenticatedAPIView):
 
     def patch(self, request, name: str, session_id: uuid.UUID):
         group, err = _resolve_chat_group(request, name)
-        if err is not None:
-            return err
+        if group is None:
+            return err or Response(
+                {"error": "Group not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         workspace = get_or_create_group_chat_workspace(
             group.name, actor=request.user, owner_id=group.owner_id
         )
@@ -271,8 +300,10 @@ class GroupChatSessionDetailAPIView(AuthenticatedAPIView):
 
     def delete(self, request, name: str, session_id: uuid.UUID):
         group, err = _resolve_chat_group(request, name)
-        if err is not None:
-            return err
+        if group is None:
+            return err or Response(
+                {"error": "Group not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         workspace = get_or_create_group_chat_workspace(
             group.name, actor=request.user, owner_id=group.owner_id
         )
@@ -295,8 +326,10 @@ class GroupChatSessionClearAPIView(AuthenticatedAPIView):
 
     def post(self, request, name: str, session_id: uuid.UUID):
         group, err = _resolve_chat_group(request, name)
-        if err is not None:
-            return err
+        if group is None:
+            return err or Response(
+                {"error": "Group not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         workspace = get_or_create_group_chat_workspace(
             group.name, actor=request.user, owner_id=group.owner_id
         )

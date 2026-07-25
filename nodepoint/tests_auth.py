@@ -3,7 +3,6 @@
 from datetime import timedelta
 from unittest.mock import patch
 
-from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from django.utils import timezone
@@ -13,13 +12,12 @@ from rest_framework.test import APIClient, APITestCase
 from nodepoint.auth.account_lifecycle import schedule_user_deletion
 from nodepoint.auth.api_keys import create_api_key
 from nodepoint.auth.password_validators import NodepointPasswordValidator
-from nodepoint.auth.users import ensure_profile
+from nodepoint.auth.users import User, ensure_profile
 from nodepoint.enums import AccountStatus, UserRole
 from nodepoint.enums import Status
 from nodepoint.models import ApiKey, ApiUsageLog, Document, Workspace, WorkspaceGroup
 from nodepoint.test_helpers import authenticated_client, create_test_user, create_test_workspace
 
-User = get_user_model()
 VALID_PASSWORD = "SecurePass123!"
 USER_GROUP_WRITE_SCOPES = [
     "workspace:read",
@@ -493,8 +491,7 @@ class PasswordAndNamingTests(APITestCase):
         client, user_a, _user_b = self._two_workspaces_named_123()
         resp = client.patch(
             "/api/workspace/update/123/",
-            {"tag": "notes"},
-            {"owner_id": user_a.pk},
+            {"tag": "notes", "owner_id": user_a.pk},
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)

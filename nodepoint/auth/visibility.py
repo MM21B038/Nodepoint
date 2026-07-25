@@ -1,23 +1,21 @@
 """Resource visibility for superadmin / admin / user hierarchy."""
 
 from __future__ import annotations
+from typing import List
 
-from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AbstractBaseUser
 from django.db.models import Q, QuerySet
 
-from nodepoint.auth.users import user_role
+from nodepoint.auth.users import User, user_role
 from nodepoint.enums import UserRole
 from nodepoint.models import Workspace, WorkspaceGroup
-
-User = get_user_model()
 
 
 class AccessDenied(PermissionError):
     pass
 
 
-def visible_owner_ids(actor: AbstractBaseUser) -> list[int] | None:
+def visible_owner_ids(actor: AbstractBaseUser) -> List[int] | None:
     """Return owner user ids visible to actor, or None for unrestricted (superadmin)."""
     role = user_role(actor)
     if role == UserRole.SUPERADMIN:
@@ -99,11 +97,11 @@ def require_group_access(actor: AbstractBaseUser, group: WorkspaceGroup) -> None
         raise AccessDenied("You do not have access to this group")
 
 
-def allowed_workspace_names(actor: AbstractBaseUser) -> list[str]:
+def allowed_workspace_names(actor: AbstractBaseUser) -> List[str]:
     return list(visible_workspaces_qs(actor).values_list("name", flat=True))
 
 
-def allowed_workspace_ids(actor: AbstractBaseUser) -> list[int]:
+def allowed_workspace_ids(actor: AbstractBaseUser) -> List[int]:
     return list(visible_workspaces_qs(actor).values_list("pk", flat=True))
 
 

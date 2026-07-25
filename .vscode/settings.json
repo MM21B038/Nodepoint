@@ -1,0 +1,9 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
+  "python.analysis.venvPath": "${workspaceFolder}",
+  "python.analysis.venv": ".venv",
+  "basedpyright.analysis.venvPath": "${workspaceFolder}",
+  "basedpyright.analysis.venv": ".venv",
+  "basedpyright.analysis.pythonVersion": "3.14",
+  "basedpyright.analysis.pythonPlatform": "Windows"
+}

@@ -2,7 +2,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, Literal, Optional, List
 
 TransportKind = Literal["http", "stdio", "sse"]
 
@@ -20,15 +20,15 @@ class MCPServerConfig:
     headers: Dict[str, str] | None = None
     verify: bool | str | None = None
     command: Optional[str] = None
-    args: list[str] | None = None
+    args: List[str] | None = None
     env: Dict[str, str] | None = None
     cwd: Optional[str] = None
-    include_tools: list[str] | None = None
-    exclude_tools: list[str] | None = None
+    include_tools: List[str] | None = None
+    exclude_tools: List[str] | None = None
     tools: Dict[str, Dict[str, Any]] | None = None
 
-    def to_json_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {
+    def to_json_dict(self) -> Dict[str, Any]:
+        d: Dict[str, Any] = {
             "enabled": self.enabled,
             "transport": self.transport,
         }
@@ -59,18 +59,18 @@ class MCPRegistry:
     Persists MCP server config under `app/registry/tools/mcp_servers.json`.
     """
 
-    _clients: dict[str, Any] = {}
+    _clients: Dict[str, Any] = {}
 
     def __init__(self, config_path: str | Path | None = None):
         base_dir = Path(__file__).resolve().parent / "tools"
         self.config_path = Path(config_path) if config_path else (base_dir / "mcp_servers.json")
 
-    def load_raw(self) -> dict[str, Any]:
+    def load_raw(self) -> Dict[str, Any]:
         if not self.config_path.exists():
             return {"mcpServers": {}}
         return json.loads(self.config_path.read_text(encoding="utf-8") or "{}")
 
-    def save_raw(self, data: dict[str, Any]) -> None:
+    def save_raw(self, data: Dict[str, Any]) -> None:
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         self.config_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -79,7 +79,7 @@ class MCPRegistry:
         servers = raw.get("mcpServers", {}) or {}
         return isinstance(servers, dict) and name in servers
 
-    def list_servers(self) -> list[str]:
+    def list_servers(self) -> List[str]:
         raw = self.load_raw()
         servers = raw.get("mcpServers", {}) or {}
         return sorted([k for k in servers.keys() if isinstance(k, str)])
@@ -131,7 +131,7 @@ class MCPRegistry:
             return False
         return True
 
-    def upsert_server(self, name: str, config: dict[str, Any]) -> None:
+    def upsert_server(self, name: str, config: Dict[str, Any]) -> None:
         raw = self.load_raw()
         raw.setdefault("mcpServers", {})
         if not isinstance(raw["mcpServers"], dict):

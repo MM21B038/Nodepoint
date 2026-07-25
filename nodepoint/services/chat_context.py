@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import List, Set
 
 from contextvars import ContextVar, Token
 
@@ -8,7 +9,7 @@ from nodepoint.services.workspace_group import (
 
 _chat_workspace: ContextVar[str | None] = ContextVar("chat_workspace", default=None)
 _group_scope_chat: ContextVar[str | None] = ContextVar("group_scope_chat", default=None)
-_search_ids: ContextVar[set[str] | None] = ContextVar("search_ids", default=None)
+_search_ids: ContextVar[Set[str] | None] = ContextVar("search_ids", default=None)
 
 
 def set_chat_workspace(workspace_name: str | None) -> Token:
@@ -47,12 +48,12 @@ def reset_search_session(token: Token) -> None:
     _search_ids.reset(token)
 
 
-def get_accumulated_search_ids() -> set[str]:
+def get_accumulated_search_ids() -> Set[str]:
     current = _search_ids.get()
     return set(current) if current is not None else set()
 
 
-def record_search_ids(ids: list[str]) -> None:
+def record_search_ids(ids: List[str]) -> None:
     current = _search_ids.get()
     if current is None:
         current = set()
@@ -66,7 +67,7 @@ def _is_internal_chat_workspace_name(name: str) -> bool:
     return name.startswith(GROUP_CHAT_PREFIX)
 
 
-def resolve_search_workspace_names() -> list[str]:
+def resolve_search_workspace_names() -> List[str]:
     """
     Workspaces included in Knowledge.search_graph.
 

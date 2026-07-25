@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from django.contrib.auth import get_user_model
 from django.contrib.auth.hashers import check_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.contrib.auth.password_validation import validate_password
@@ -47,12 +46,10 @@ from nodepoint.auth.usage import (
     usage_platform_summary,
     usage_summary_for_user,
 )
-from nodepoint.auth.users import create_account, ensure_profile, user_role
+from nodepoint.auth.users import User, create_account, ensure_profile, user_role
 from nodepoint.auth.visibility import can_manage_user, manageable_users_qs
 from nodepoint.enums import AccountStatus, UserRole
 from nodepoint.models import ApiKey
-
-User = get_user_model()
 
 
 class PublicAPIView(APIView):

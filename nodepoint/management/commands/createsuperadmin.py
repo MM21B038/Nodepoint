@@ -1,7 +1,6 @@
-from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
 
-from nodepoint.auth.users import create_account
+from nodepoint.auth.users import User, create_account
 from nodepoint.enums import UserRole
 
 
@@ -14,7 +13,6 @@ class Command(BaseCommand):
         parser.add_argument("--noinput", action="store_true", help="Use password from env")
 
     def handle(self, *args, **options):
-        User = get_user_model()
         username = options["username"]
         if User.objects.filter(username=username).exists():
             raise CommandError(f"User '{username}' already exists")

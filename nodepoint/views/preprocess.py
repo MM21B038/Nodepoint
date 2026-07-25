@@ -26,8 +26,10 @@ class QueueStatusAPIView(AuthenticatedAPIView):
         workspace_id = None
         if workspace_name:
             ws, err = resolve_workspace_response(request, workspace_name)
-            if err is not None:
-                return err
+            if ws is None:
+                return err or Response(
+                    {"error": "Workspace not found"}, status=status.HTTP_404_NOT_FOUND
+                )
             workspace_id = ws.pk
             workspace_name = ws.name
         try:
@@ -58,8 +60,10 @@ class PreprocessStatusAPIView(AuthenticatedAPIView):
             )
 
         workspace, err = resolve_workspace_response(request, name)
-        if err is not None:
-            return err
+        if workspace is None:
+            return err or Response(
+                {"error": "Workspace not found"}, status=status.HTTP_404_NOT_FOUND
+            )
 
         return Response(build_workspace_preprocess_status(workspace))
 
@@ -74,8 +78,10 @@ class PreprocessWorkspaceAPIView(AuthenticatedAPIView):
             )
 
         workspace, err = resolve_workspace_response(request, name)
-        if err is not None:
-            return err
+        if workspace is None:
+            return err or Response(
+                {"error": "Workspace not found"}, status=status.HTTP_404_NOT_FOUND
+            )
 
         params = {**request.query_params.dict(), **request.data}
         priority = _parse_bool_param(params.get("priority"), default=False)

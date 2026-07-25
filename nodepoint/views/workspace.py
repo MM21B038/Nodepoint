@@ -117,8 +117,10 @@ class UpdateWorkspaceAPIView(AuthenticatedAPIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         workspace, err = resolve_workspace_response(request, name)
-        if err is not None:
-            return err
+        if workspace is None:
+            return err or Response(
+                {"error": "Workspace not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         try:
             workspace = workspace_svc.update_workspace_instance(
                 workspace, updates, actor=request.user
@@ -138,8 +140,10 @@ class DeleteWorkspaceAPIView(AuthenticatedAPIView):
 
     def delete(self, request, name):
         workspace, err = resolve_workspace_response(request, name)
-        if err is not None:
-            return err
+        if workspace is None:
+            return err or Response(
+                {"error": "Workspace not found"}, status=status.HTTP_404_NOT_FOUND
+            )
 
         workspace_path = workspace_storage_abspath(workspace)
         workspace.delete()

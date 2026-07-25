@@ -4,18 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from django.utils import timezone
 
 from nodepoint.auth.api_scopes import SCOPE_CODES
-from django.contrib.auth import get_user_model
-
+from nodepoint.auth.users import User
 from nodepoint.models import ApiKey
+from typing import List, Dict, Tuple
 
-User = get_user_model()
-
-EXPIRY_PRESETS: dict[str, timedelta] = {
+EXPIRY_PRESETS: Dict[str, timedelta] = {
     "3_months": timedelta(days=90),
     "6_months": timedelta(days=180),
     "12_months": timedelta(days=365),
@@ -31,7 +29,7 @@ def _hash_key(raw_key: str) -> str:
     return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
 
-def generate_api_key_pair() -> tuple[str, str, str]:
+def generate_api_key_pair() -> Tuple[str, str, str]:
     """Return (full_key, prefix, key_hash)."""
     prefix = secrets.token_hex(4)
     secret = secrets.token_urlsafe(32)
@@ -39,7 +37,7 @@ def generate_api_key_pair() -> tuple[str, str, str]:
     return full_key, prefix, _hash_key(full_key)
 
 
-def expires_at_from_preset(preset: str) -> timezone.datetime:
+def expires_at_from_preset(preset: str) -> datetime:
     delta = EXPIRY_PRESETS.get(preset)
     if delta is None:
         raise ApiKeyError(
@@ -48,8 +46,8 @@ def expires_at_from_preset(preset: str) -> timezone.datetime:
     return timezone.now() + delta
 
 
-def validate_scopes(scopes: list[str]) -> list[str]:
-    cleaned = []
+def validate_scopes(scopes: List[str]) -> List[str]:
+    cleaned: List[str] = []
     for scope in scopes:
         if scope not in SCOPE_CODES:
             raise ApiKeyError(f"Unknown scope: {scope}")
@@ -64,9 +62,9 @@ def create_api_key(
     user: User,
     created_by: User,
     name: str,
-    scopes: list[str],
+    scopes: List[str],
     expiry_preset: str,
-) -> tuple[ApiKey, str]:
+) -> Tuple[ApiKey, str]:
     allowed = validate_scopes(scopes)
     full_key, prefix, key_hash = generate_api_key_pair()
     api_key = ApiKey.objects.create(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, Dict, List
 
 from nodepoint.models import Document, DocumentChunk, KnowledgeEntity, KnowledgeRelation
 from nodepoint.mongo.manager import get_chunk_text, get_document_text
@@ -22,14 +22,14 @@ CITATION_RULES = (
 )
 
 
-def citation_for_record(rec: dict[str, Any]) -> str:
+def citation_for_record(rec: Dict[str, Any]) -> str:
     """Primary citation link for a search/record row."""
     kind = rec.get("kind", "record")
     rid = rec.get("id", "")
     return f"[{kind}]({rid})"
 
 
-def citation_metadata_lines(rec: dict[str, Any]) -> list[str]:
+def citation_metadata_lines(rec: Dict[str, Any]) -> List[str]:
     """Standard metadata lines emphasizing id-based citations."""
     kind = rec.get("kind", "record")
     rid = rec.get("id", "")
@@ -69,7 +69,7 @@ def _relation_content(relation: KnowledgeRelation) -> str:
 
 
 def record_search_text(kind: str, *, name: str = "", entity_type: str | None = None,
-                       attributes: dict | None = None, source: str = "", target: str = "",
+                       attributes: Dict[str, Any] | None = None, source: str = "", target: str = "",
                        type_description: str | None = None, description: str | None = None,
                        file_name: str = "", chunk_index: int = 0, text: str = "") -> str:
     """Plain text used for BM25/fuzzy reranking (aligned with vector ingest)."""
@@ -85,7 +85,7 @@ def record_search_text(kind: str, *, name: str = "", entity_type: str | None = N
     return ""
 
 
-def serialize_entity(entity: KnowledgeEntity) -> dict[str, Any]:
+def serialize_entity(entity: KnowledgeEntity) -> Dict[str, Any]:
     return {
         "kind": "entity",
         "id": str(entity.id),
@@ -100,7 +100,7 @@ def serialize_entity(entity: KnowledgeEntity) -> dict[str, Any]:
     }
 
 
-def serialize_relation(relation: KnowledgeRelation) -> dict[str, Any]:
+def serialize_relation(relation: KnowledgeRelation) -> Dict[str, Any]:
     return {
         "kind": "relation",
         "id": str(relation.id),
@@ -118,7 +118,7 @@ def serialize_relation(relation: KnowledgeRelation) -> dict[str, Any]:
     }
 
 
-def serialize_chunk(chunk: DocumentChunk, *, full_content: bool = True) -> dict[str, Any]:
+def serialize_chunk(chunk: DocumentChunk, *, full_content: bool = True) -> Dict[str, Any]:
     text = get_chunk_text(chunk.id) or ""
     content = text if full_content else (text[:500] + ("..." if len(text) > 500 else ""))
     return {
@@ -133,7 +133,7 @@ def serialize_chunk(chunk: DocumentChunk, *, full_content: bool = True) -> dict[
     }
 
 
-def serialize_document(document: Document, *, full_content: bool = True) -> dict[str, Any]:
+def serialize_document(document: Document, *, full_content: bool = True) -> Dict[str, Any]:
     text = get_document_text(document.id) or ""
     if not full_content and len(text) > 2000:
         text = text[:2000] + "..."
@@ -148,13 +148,20 @@ def serialize_document(document: Document, *, full_content: bool = True) -> dict
 
 
 def _check_workspace_id(
-    workspace_id: int, allowed_workspace_ids: list[int] | None
+    workspace_id: int, allowed_workspace_ids: List[int] | None
 ) -> None:
     if allowed_workspace_ids is not None and workspace_id not in allowed_workspace_ids:
         raise RecordAccessError("Record is not in an allowed workspace")
 
 
-def _check_scope(rec: dict[str, Any], scope) -> None:
+def _check_workspace_names(
+    workspace_name: str, allowed_workspaces: List[str] | None
+) -> None:
+    if allowed_workspaces is not None and workspace_name not in allowed_workspaces:
+        raise RecordAccessError("Record is not in an allowed workspace")
+
+
+def _check_scope(rec: Dict[str, Any], scope) -> None:
     if scope is None or scope.is_workspace_tag:
         return
     from nodepoint.services.group_scope import record_allowed_in_scope
@@ -168,9 +175,10 @@ def _check_scope(rec: dict[str, Any], scope) -> None:
 def get_entity(
     entity_id: uuid.UUID | str,
     *,
-    allowed_workspace_ids: list[int] | None = None,
+    allowed_workspace_ids: List[int] | None = None,
+    allowed_workspaces: List[str] | None = None,
     scope=None,
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
     try:
         uid = uuid.UUID(str(entity_id))
     except ValueError as exc:
@@ -182,6 +190,7 @@ def get_entity(
     except KnowledgeEntity.DoesNotExist as exc:
         raise RecordNotFoundError(f"Entity not found: {entity_id}") from exc
     _check_workspace_id(entity.document.workspace_id, allowed_workspace_ids)
+    _check_workspace_names(entity.document.workspace.name, allowed_workspaces)
     rec = serialize_entity(entity)
     _check_scope(rec, scope)
     return rec
@@ -190,9 +199,10 @@ def get_entity(
 def get_relation(
     relation_id: uuid.UUID | str,
     *,
-    allowed_workspace_ids: list[int] | None = None,
+    allowed_workspace_ids: List[int] | None = None,
+    allowed_workspaces: List[str] | None = None,
     scope=None,
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
     try:
         uid = uuid.UUID(str(relation_id))
     except ValueError as exc:
@@ -208,6 +218,7 @@ def get_relation(
     except KnowledgeRelation.DoesNotExist as exc:
         raise RecordNotFoundError(f"Relation not found: {relation_id}") from exc
     _check_workspace_id(relation.document.workspace_id, allowed_workspace_ids)
+    _check_workspace_names(relation.document.workspace.name, allowed_workspaces)
     rec = serialize_relation(relation)
     _check_scope(rec, scope)
     return rec
@@ -216,9 +227,10 @@ def get_relation(
 def get_chunk(
     chunk_id: uuid.UUID | str,
     *,
-    allowed_workspace_ids: list[int] | None = None,
+    allowed_workspace_ids: List[int] | None = None,
+    allowed_workspaces: List[str] | None = None,
     scope=None,
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
     try:
         uid = uuid.UUID(str(chunk_id))
     except ValueError as exc:
@@ -230,6 +242,7 @@ def get_chunk(
     except DocumentChunk.DoesNotExist as exc:
         raise RecordNotFoundError(f"Chunk not found: {chunk_id}") from exc
     _check_workspace_id(chunk.document.workspace_id, allowed_workspace_ids)
+    _check_workspace_names(chunk.document.workspace.name, allowed_workspaces)
     rec = serialize_chunk(chunk, full_content=True)
     _check_scope(rec, scope)
     return rec
@@ -238,9 +251,10 @@ def get_chunk(
 def get_document(
     document_id: uuid.UUID | str,
     *,
-    allowed_workspace_ids: list[int] | None = None,
+    allowed_workspace_ids: List[int] | None = None,
+    allowed_workspaces: List[str] | None = None,
     scope=None,
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
     try:
         uid = uuid.UUID(str(document_id))
     except ValueError as exc:
@@ -250,6 +264,7 @@ def get_document(
     except Document.DoesNotExist as exc:
         raise RecordNotFoundError(f"Document not found: {document_id}") from exc
     _check_workspace_id(document.workspace_id, allowed_workspace_ids)
+    _check_workspace_names(document.workspace.name, allowed_workspaces)
     rec = serialize_document(document, full_content=True)
     _check_scope(rec, scope)
     return rec
@@ -257,13 +272,13 @@ def get_document(
 
 def search_entities_by_name(
     name: str,
-    workspaces: list[str],
+    workspaces: List[str],
     *,
     exact: bool = False,
     limit: int = 20,
     threshold: float = 0.6,
     scope=None,
-) -> list[dict[str, Any]]:
+) -> List[Dict[str, Any]]:
     if not workspaces or not name.strip():
         return []
 
@@ -273,7 +288,7 @@ def search_entities_by_name(
         if not entity_id_filter:
             return []
 
-    scores_by_id: dict[str, Any] = {}
+    scores_by_id: Dict[str, Any] = {}
     if exact:
         qs = KnowledgeEntity.objects.filter(
             document__workspace__name__in=workspaces,
@@ -310,7 +325,7 @@ def search_entities_by_name(
         "source", "target"
     )
 
-    relations_by_entity: dict[uuid.UUID, list[dict[str, Any]]] = {eid: [] for eid in entity_ids}
+    relations_by_entity: Dict[uuid.UUID, List[Dict[str, Any]]] = {eid: [] for eid in entity_ids}
 
     for rel in outgoing:
         relations_by_entity[rel.source_id].append(
@@ -335,7 +350,7 @@ def search_entities_by_name(
             }
         )
 
-    results: list[dict[str, Any]] = []
+    results: List[Dict[str, Any]] = []
     for entity in entities:
         rec = serialize_entity(entity)
         rec["relations"] = relations_by_entity.get(entity.id, [])
@@ -346,7 +361,7 @@ def search_entities_by_name(
     return results
 
 
-def format_record_markdown(rec: dict[str, Any]) -> str:
+def format_record_markdown(rec: Dict[str, Any]) -> str:
     kind = rec.get("kind", "record")
     rid = rec.get("id", "")
     lines = [
@@ -387,7 +402,7 @@ def format_record_markdown(rec: dict[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def format_name_search_markdown(name: str, matches: list[dict[str, Any]]) -> str:
+def format_name_search_markdown(name: str, matches: List[Dict[str, Any]]) -> str:
     if not matches:
         return f'# Entity name search: "{name}"\n\nNo matching entities found.\n'
     lines = [

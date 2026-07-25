@@ -1,7 +1,7 @@
-from typing import Optional, Literal, List, Any
+from typing import Optional, Literal, List, Any, Dict, Set
 from pydantic import create_model, Field
 
-def Entities(types: set):
+def Entities(types: Set[str]) -> Any:
 
     EntityType = Literal[*types]
 
@@ -20,7 +20,7 @@ def Entities(types: set):
             Field(default="", description="name of new type of entity, only if type=OTHER")
         ),
         attributes=(
-            dict[str, Any],
+            Dict[str, Any],
             Field(..., description="Attributes of the entity.")
         ),
     )

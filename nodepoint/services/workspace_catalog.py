@@ -1,9 +1,9 @@
 from __future__ import annotations
+from typing import Any, Dict, List, Tuple
 
 from django.db.models import Count, QuerySet
 
-from django.contrib.auth import get_user_model
-
+from nodepoint.auth.users import User
 from nodepoint.models import (
     Document,
     DocumentChunk,
@@ -11,8 +11,6 @@ from nodepoint.models import (
     KnowledgeRelation,
     Workspace,
 )
-
-User = get_user_model()
 from nodepoint.services import optional_fields as opt
 from nodepoint.services.workspace_group import user_workspaces_qs
 
@@ -22,7 +20,7 @@ MAX_PAGE_SIZE = 100
 _EMPTY_COUNTS = {"files": 0, "chunks": 0, "entities": 0, "relations": 0}
 
 
-def get_workspace_count_stats(*, actor: User) -> dict:
+def get_workspace_count_stats(*, actor: User) -> Dict[str, Any]:
     base = user_workspaces_qs(actor)
     total = base.count()
     in_group = (
@@ -72,7 +70,7 @@ def workspaces_base_qs(
     )
 
 
-def bulk_counts_for_workspace_ids(workspace_ids: list[int]) -> dict[int, dict[str, int]]:
+def bulk_counts_for_workspace_ids(workspace_ids: List[int]) -> Dict[int, Dict[str, int]]:
     """Per-workspace file/chunk/entity/relation counts (page-sized batches only)."""
     if not workspace_ids:
         return {}
@@ -117,8 +115,8 @@ def bulk_counts_for_workspace_ids(workspace_ids: list[int]) -> dict[int, dict[st
 def serialize_workspace_row(
     ws: Workspace,
     *,
-    counts: dict[str, int] | None = None,
-) -> dict:
+    counts: Dict[str, int] | None = None,
+) -> Dict[str, Any]:
     groups = sorted(m.group.name for m in ws.group_memberships.all())
     row = {
         "id": ws.pk,
@@ -138,7 +136,7 @@ def serialize_workspace_row(
 def parse_pagination(
     page_raw: str | None,
     page_size_raw: str | None,
-) -> tuple[int, int]:
+) -> Tuple[int, int]:
     page = 1
     if page_raw is not None and str(page_raw).strip():
         try:
@@ -176,7 +174,7 @@ def paginate_queryset(
     *,
     page: int,
     page_size: int,
-) -> tuple[list, dict]:
+) -> Tuple[List[Any], Dict[str, Any]]:
     total_items = qs.count()
     total_pages = max(1, (total_items + page_size - 1) // page_size) if total_items else 1
     page = min(max(1, page), total_pages)
@@ -200,7 +198,7 @@ def list_workspaces_paginated(
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     include_counts: bool = True,
-) -> dict:
+) -> Dict[str, Any]:
     base = workspaces_base_qs(
         actor, group_name, group_owner_id=group_owner_id
     ).prefetch_related(
@@ -210,7 +208,7 @@ def list_workspaces_paginated(
         base, page=page, page_size=page_size
     )
 
-    counts_by_id: dict[int, dict[str, int]] = {}
+    counts_by_id: Dict[int, Dict[str, int]] = {}
     if include_counts and page_list:
         counts_by_id = bulk_counts_for_workspace_ids([ws.pk for ws in page_list])
 

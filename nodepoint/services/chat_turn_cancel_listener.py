@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import List
 
 import asyncio
 import logging
@@ -78,7 +79,7 @@ def start_chat_turn_cancel_listener() -> None:
         logger.info("chat_turn_cancel_listener: background thread started")
 
 
-def should_start_chat_cancel_listener(argv: list[str] | None = None) -> bool:
+def should_start_chat_cancel_listener(argv: List[str] | None = None) -> bool:
     """True for uvicorn/web ASGI processes; false for one-shot manage.py commands."""
     import sys
 

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Dict
 
 import asyncio
 import logging
@@ -13,7 +14,7 @@ from nodepoint.services import chat_turn_redis, chat_turn_slots
 logger = logging.getLogger(__name__)
 
 _lock = asyncio.Lock()
-_turns: dict[uuid.UUID, TurnState] = {}
+_turns: Dict[uuid.UUID, TurnState] = {}
 
 CANCEL_WAIT_POLL_INTERVAL = 0.05
 

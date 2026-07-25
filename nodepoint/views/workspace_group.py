@@ -125,8 +125,10 @@ class GroupMembersAPIView(AuthenticatedAPIView):
         from nodepoint.services import workspace_catalog
 
         group, err = resolve_group_response(request, name)
-        if err is not None:
-            return err
+        if group is None:
+            return err or Response(
+                {"error": "Group not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         try:
             page, page_size = workspace_catalog.parse_pagination(
                 request.query_params.get("page"),
@@ -150,8 +152,10 @@ class GroupDetailAPIView(AuthenticatedAPIView):
         from nodepoint.services import workspace_catalog
 
         group, err = resolve_group_response(request, name)
-        if err is not None:
-            return err
+        if group is None:
+            return err or Response(
+                {"error": "Group not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         try:
             page, page_size = workspace_catalog.parse_pagination(
                 request.query_params.get("page"),
@@ -171,8 +175,10 @@ class GroupDetailAPIView(AuthenticatedAPIView):
 
     def delete(self, request, name):
         group, err = resolve_group_response(request, name)
-        if err is not None:
-            return err
+        if group is None:
+            return err or Response(
+                {"error": "Group not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         group_svc.delete_group(
             group.name, actor=request.user, owner_id=group.owner_id
         )
@@ -180,8 +186,10 @@ class GroupDetailAPIView(AuthenticatedAPIView):
 
     def patch(self, request, name):
         group, err = resolve_group_response(request, name)
-        if err is not None:
-            return err
+        if group is None:
+            return err or Response(
+                {"error": "Group not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         allowed = {"name", "description"}
         updates = {key: request.data[key] for key in allowed if key in request.data}
         if "tag" in request.data:
@@ -221,11 +229,15 @@ class AddWorkspaceToGroupAPIView(AuthenticatedAPIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         group, err = resolve_group_response(request, name)
-        if err is not None:
-            return err
+        if group is None:
+            return err or Response(
+                {"error": "Group not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         workspace, err = resolve_workspace_response(request, workspace_name)
-        if err is not None:
-            return err
+        if workspace is None:
+            return err or Response(
+                {"error": "Workspace not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         try:
             group_svc.add_workspace_to_group(
                 group.name,
@@ -247,11 +259,15 @@ class AddWorkspaceToGroupAPIView(AuthenticatedAPIView):
 class RemoveWorkspaceFromGroupAPIView(AuthenticatedAPIView):
     def delete(self, request, name, workspace_name):
         group, err = resolve_group_response(request, name)
-        if err is not None:
-            return err
+        if group is None:
+            return err or Response(
+                {"error": "Group not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         workspace, err = resolve_workspace_response(request, workspace_name)
-        if err is not None:
-            return err
+        if workspace is None:
+            return err or Response(
+                {"error": "Workspace not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         try:
             group_svc.remove_workspace_from_group(
                 group.name,
@@ -273,8 +289,10 @@ class RemoveWorkspaceFromGroupAPIView(AuthenticatedAPIView):
 class AddFileToGroupAPIView(AuthenticatedAPIView):
     def post(self, request, name):
         group, err = resolve_group_response(request, name)
-        if err is not None:
-            return err
+        if group is None:
+            return err or Response(
+                {"error": "Group not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         document_id = request.data.get("document_id")
         workspace_name = request.data.get("workspace_name")
         file_name = request.data.get("file_name")
@@ -287,8 +305,11 @@ class AddFileToGroupAPIView(AuthenticatedAPIView):
                 workspace, ws_err = resolve_workspace_response(
                     request, workspace_name
                 )
-                if ws_err is not None:
-                    return ws_err
+                if workspace is None:
+                    return ws_err or Response(
+                        {"error": "Workspace not found"},
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
                 document = Document.objects.select_related("workspace").get(
                     workspace=workspace,
                     file_name=file_name,
@@ -328,8 +349,10 @@ class AddFileToGroupAPIView(AuthenticatedAPIView):
 class RemoveFileFromGroupAPIView(AuthenticatedAPIView):
     def delete(self, request, name, document_id):
         group, err = resolve_group_response(request, name)
-        if err is not None:
-            return err
+        if group is None:
+            return err or Response(
+                {"error": "Group not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         try:
             group_svc.remove_document_from_group(
                 group.name,
@@ -358,8 +381,10 @@ class GroupAddOptionsAPIView(AuthenticatedAPIView):
         )
 
         group, err = resolve_group_response(request, name)
-        if err is not None:
-            return err
+        if group is None:
+            return err or Response(
+                {"error": "Group not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         try:
             page, page_size = workspace_catalog.parse_pagination(
                 request.query_params.get("page"),
@@ -404,8 +429,10 @@ class WorkspaceGroupOptionsAPIView(AuthenticatedAPIView):
         from nodepoint.services import workspace_catalog
 
         workspace, err = resolve_workspace_response(request, workspace_name)
-        if err is not None:
-            return err
+        if workspace is None:
+            return err or Response(
+                {"error": "Workspace not found"}, status=status.HTTP_404_NOT_FOUND
+            )
         try:
             page, page_size = workspace_catalog.parse_pagination(
                 request.query_params.get("page"),

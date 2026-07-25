@@ -1,12 +1,10 @@
 """Resolve resource owner hints from API query/body (disambiguate same names per owner)."""
 
 from __future__ import annotations
+from typing import Dict, List
 
-from django.contrib.auth import get_user_model
-
+from nodepoint.auth.users import User
 from nodepoint.auth.visibility import can_access_owner
-
-User = get_user_model()
 
 
 class OwnerScopeError(ValueError):
@@ -47,7 +45,7 @@ def parse_owner_id(
 
 
 def parse_owner_id_from_query_dict(
-    params: dict[str, list[str]],
+    params: Dict[str, List[str]],
     *,
     actor,
 ) -> int | None:

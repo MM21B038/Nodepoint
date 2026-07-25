@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Dict, List, Tuple
 
 from rank_bm25 import BM25Okapi
 from rapidfuzz import fuzz
@@ -15,14 +15,14 @@ from nodepoint.services.kg_records import record_search_text
 _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 
 
-def tokenize(text: str) -> list[str]:
+def tokenize(text: str) -> List[str]:
     return [t.lower() for t in _TOKEN_RE.findall(text or "")]
 
 
 def normalize_weights(
     semantic_weight: float,
     lexical_weight: float,
-) -> tuple[float, float]:
+) -> Tuple[float, float]:
     sem = max(0.0, float(semantic_weight))
     lex = max(0.0, float(lexical_weight))
     total = sem + lex
@@ -31,7 +31,7 @@ def normalize_weights(
     return sem / total, lex / total
 
 
-def _min_max_normalize(values: dict[str, float]) -> dict[str, float]:
+def _min_max_normalize(values: Dict[str, float]) -> Dict[str, float]:
     if not values:
         return {}
     nums = list(values.values())
@@ -41,7 +41,7 @@ def _min_max_normalize(values: dict[str, float]) -> dict[str, float]:
     return {k: (v - lo) / (hi - lo) for k, v in values.items()}
 
 
-def search_text_for_record(rec: dict[str, Any]) -> str:
+def search_text_for_record(rec: Dict[str, Any]) -> str:
     kind = rec.get("kind", "entity")
     if kind == "entity":
         return record_search_text(
@@ -70,12 +70,12 @@ def search_text_for_record(rec: dict[str, Any]) -> str:
 
 def rerank_records(
     query: str,
-    records: list[dict[str, Any]],
+    records: List[Dict[str, Any]],
     *,
     semantic_weight: float = 0.6,
     lexical_weight: float = 0.4,
     bm25_weight: float = 0.5,
-) -> list[dict[str, Any]]:
+) -> List[Dict[str, Any]]:
     if not records:
         return []
 
@@ -91,7 +91,7 @@ def rerank_records(
     else:
         bm25_raw = {r["id"]: 0.0 for r in records}
 
-    fuzzy_raw: dict[str, float] = {}
+    fuzzy_raw: Dict[str, float] = {}
     for rec in records:
         text = search_text_for_record(rec)
         fuzzy_raw[rec["id"]] = fuzz.token_set_ratio(query, text) / 100.0
@@ -123,7 +123,7 @@ def rerank_records(
 
 def hybrid_search(
     query: str,
-    workspaces: list[str],
+    workspaces: List[str],
     *,
     limit: int = 10,
     record_type: str | None = None,
@@ -132,7 +132,7 @@ def hybrid_search(
     lexical_weight: float = 0.4,
     bm25_weight: float = 0.5,
     scope: GroupSearchScope | None = None,
-) -> list[dict[str, Any]]:
+) -> List[Dict[str, Any]]:
     vector = get_agent().vector(query).squeeze().tolist()
     hits = search_by_workspaces(
         vector,

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any, Dict, List, Tuple
 
 import os
 import re
@@ -9,8 +10,7 @@ from django.db import transaction
 from django.db.models import Count, Q, QuerySet
 
 from nodepoint.enums import GroupTag
-from django.contrib.auth import get_user_model
-
+from nodepoint.auth.users import User
 from nodepoint.auth.visibility import visible_groups_qs, visible_workspaces_qs
 from nodepoint.models import (
     Document,
@@ -23,8 +23,6 @@ from nodepoint.models import (
     WorkspaceGroup,
     WorkspaceGroupMembership,
 )
-
-User = get_user_model()
 from nodepoint.services import optional_fields as opt
 
 GROUP_CHAT_PREFIX = "__group_chat__"
@@ -49,7 +47,10 @@ class GroupMembershipDenied(GroupError):
 
 
 class AmbiguousGroupError(GroupError):
-    def __init__(self, name: str, candidates: list[dict]):
+    name: str
+    candidates: List[Dict[str, Any]]
+
+    def __init__(self, name: str, candidates: List[Dict[str, Any]]):
         self.name = name
         self.candidates = candidates
         super().__init__(
@@ -65,7 +66,7 @@ def group_chat_workspace_name(group: WorkspaceGroup | str, owner_id: int | None 
     return f"{GROUP_CHAT_PREFIX}{owner_id}__{group}"
 
 
-def parse_group_chat_workspace_name(workspace_name: str) -> tuple[int, str] | None:
+def parse_group_chat_workspace_name(workspace_name: str) -> Tuple[int, str] | None:
     if not workspace_name.startswith(GROUP_CHAT_PREFIX):
         return None
     suffix = workspace_name[len(GROUP_CHAT_PREFIX) :]
@@ -127,7 +128,7 @@ def validate_group_name(name: str) -> str:
     return cleaned
 
 
-def _group_owner_candidates(groups: list[WorkspaceGroup]) -> list[dict]:
+def _group_owner_candidates(groups: List[WorkspaceGroup]) -> List[Dict[str, Any]]:
     return [
         {
             "owner_id": g.owner_id,
@@ -166,9 +167,9 @@ def get_group_by_name(
 
 def get_or_create_group(
     name: str, *, owner: User | None = None
-) -> tuple[WorkspaceGroup, bool]:
+) -> Tuple[WorkspaceGroup, bool]:
     cleaned = validate_group_name(name)
-    defaults = {"tag": GroupTag.WORKSPACE}
+    defaults: Dict[str, Any] = {"tag": GroupTag.WORKSPACE}
     if owner is not None:
         defaults["owner"] = owner
     if owner is None:
@@ -221,15 +222,15 @@ def create_group(
 
 def _member_count_from_annotated(group: WorkspaceGroup) -> int:
     if group.tag == GroupTag.WORKSPACE:
-        return group.workspace_member_count
+        return int(getattr(group, "workspace_member_count", 0) or 0)
     if group.tag == GroupTag.FILES:
-        return group.document_member_count
+        return int(getattr(group, "document_member_count", 0) or 0)
     if group.tag == GroupTag.ENTITY:
-        return group.entity_member_count
-    return group.relation_member_count
+        return int(getattr(group, "entity_member_count", 0) or 0)
+    return int(getattr(group, "relation_member_count", 0) or 0)
 
 
-def _serialize_group_list_row(group: WorkspaceGroup) -> dict:
+def _serialize_group_list_row(group: WorkspaceGroup) -> Dict[str, Any]:
     return {
         "id": group.pk,
         "name": group.name,
@@ -249,7 +250,7 @@ def list_groups(
     owner_id: int | None = None,
     page: int = 1,
     page_size: int = 20,
-) -> dict:
+) -> Dict[str, Any]:
     from nodepoint.services.workspace_catalog import paginate_queryset
 
     qs = visible_groups_qs(actor).select_related("owner").annotate(
@@ -275,7 +276,7 @@ def lookup_groups_by_name(
     actor: User,
     owner_id: int | None = None,
     tag_filter: str | None = None,
-) -> dict:
+) -> Dict[str, Any]:
     """Return visible groups matching name with owner info (disambiguation picker)."""
     cleaned = validate_group_name(name)
     qs = visible_groups_qs(actor).filter(name=cleaned).select_related("owner").annotate(
@@ -299,14 +300,14 @@ def lookup_groups_by_name(
     }
 
 
-def _serialize_workspace_member(m: WorkspaceGroupMembership) -> dict:
+def _serialize_workspace_member(m: WorkspaceGroupMembership) -> Dict[str, Any]:
     return {
         "name": m.workspace.name,
         "created_at": m.workspace.created_at,
     }
 
 
-def _serialize_document_member(m: GroupDocumentMembership) -> dict:
+def _serialize_document_member(m: GroupDocumentMembership) -> Dict[str, Any]:
     return {
         "document_id": str(m.document_id),
         "workspace": m.document.workspace.name,
@@ -315,7 +316,7 @@ def _serialize_document_member(m: GroupDocumentMembership) -> dict:
     }
 
 
-def _serialize_entity_member(m: GroupEntityMembership) -> dict:
+def _serialize_entity_member(m: GroupEntityMembership) -> Dict[str, Any]:
     return {
         "entity_id": str(m.entity_id),
         "name": m.entity.name,
@@ -325,7 +326,7 @@ def _serialize_entity_member(m: GroupEntityMembership) -> dict:
     }
 
 
-def _serialize_relation_member(m: GroupRelationMembership) -> dict:
+def _serialize_relation_member(m: GroupRelationMembership) -> Dict[str, Any]:
     return {
         "relation_id": str(m.relation_id),
         "source": m.relation.source.name,
@@ -385,7 +386,7 @@ def list_group_members(
     owner_id: int | None = None,
     page: int = 1,
     page_size: int = 20,
-) -> dict:
+) -> Dict[str, Any]:
     group = get_group_by_name(name, actor=actor, owner_id=owner_id)
     members, pagination = _paginate_group_members(
         group, page=page, page_size=page_size
@@ -406,7 +407,7 @@ def get_group_detail(
     owner_id: int | None = None,
     page: int = 1,
     page_size: int = 20,
-) -> dict:
+) -> Dict[str, Any]:
     group = get_group_by_name(name, actor=actor, owner_id=owner_id)
     members, pagination = _paginate_group_members(
         group, page=page, page_size=page_size
@@ -428,7 +429,7 @@ def list_group_members_summary(
     actor: User | None = None,
     owner_id: int | None = None,
     limit: int = 50,
-) -> list[dict]:
+) -> List[Dict[str, Any]]:
     group = get_group_by_name(group_name, actor=actor, owner_id=owner_id)
     if group.tag == GroupTag.WORKSPACE:
         qs = (
@@ -463,7 +464,7 @@ def list_group_members_summary(
     return [_serialize_relation_member(m) for m in qs]
 
 
-def group_workspaces_summary(group_name: str) -> dict:
+def group_workspaces_summary(group_name: str) -> Dict[str, Any]:
     from nodepoint.services.group_scope import resolve_group_search_scope
 
     group = get_group_by_name(group_name)
@@ -526,7 +527,7 @@ def may_add_to_group(
         return False
 
 
-def eligible_resource_owner_ids(actor: User, group: WorkspaceGroup) -> list[int] | None:
+def eligible_resource_owner_ids(actor: User, group: WorkspaceGroup) -> List[int] | None:
     """Owner ids whose resources may be listed for add-options on this group."""
     from nodepoint.auth.users import user_role
     from nodepoint.auth.visibility import visible_owner_ids
@@ -689,7 +690,7 @@ def delete_group(
     group.delete()
 
 
-def serialize_group_for_api(group: WorkspaceGroup) -> dict:
+def serialize_group_for_api(group: WorkspaceGroup) -> Dict[str, Any]:
     return {
         "id": group.pk,
         "name": group.name,
@@ -736,7 +737,7 @@ def _rename_group_chat_workspace(group: WorkspaceGroup, new_group_name: str) -> 
 
 def update_group(
     current_name: str,
-    updates: dict,
+    updates: Dict[str, Any],
     *,
     actor: User | None = None,
     owner_id: int | None = None,
@@ -750,7 +751,7 @@ def update_group(
 
     group = get_group_by_name(current_name, actor=actor, owner_id=owner_id)
     old_name = group.name
-    update_fields: list[str] = []
+    update_fields: List[str] = []
 
     if "name" in updates:
         new_name = validate_group_name(updates["name"])
@@ -813,7 +814,7 @@ def list_group_workspace_names(
     *,
     actor: User | None = None,
     owner_id: int | None = None,
-) -> list[str]:
+) -> List[str]:
     from nodepoint.services.group_scope import resolve_group_search_scope
 
     return resolve_group_search_scope(
@@ -821,7 +822,7 @@ def list_group_workspace_names(
     ).workspace_names
 
 
-def get_group_document_ids(group_name: str) -> list[uuid.UUID]:
+def get_group_document_ids(group_name: str) -> List[uuid.UUID]:
     group = get_group_by_name(group_name)
     if group.tag != GroupTag.FILES:
         return []
@@ -832,7 +833,7 @@ def get_group_document_ids(group_name: str) -> list[uuid.UUID]:
     )
 
 
-def get_group_entity_ids(group_name: str) -> list[uuid.UUID]:
+def get_group_entity_ids(group_name: str) -> List[uuid.UUID]:
     group = get_group_by_name(group_name)
     if group.tag != GroupTag.ENTITY:
         return []
@@ -843,7 +844,7 @@ def get_group_entity_ids(group_name: str) -> list[uuid.UUID]:
     )
 
 
-def get_group_relation_ids(group_name: str) -> list[uuid.UUID]:
+def get_group_relation_ids(group_name: str) -> List[uuid.UUID]:
     group = get_group_by_name(group_name)
     if group.tag != GroupTag.RELATION:
         return []
@@ -864,7 +865,7 @@ def _apply_search_filter(qs, search: str | None, *field_names: str):
     return qs.filter(q)
 
 
-def _serialize_workspace_add_option(ws: Workspace) -> dict:
+def _serialize_workspace_add_option(ws: Workspace) -> Dict[str, Any]:
     return {
         "id": ws.pk,
         "name": ws.name,
@@ -875,7 +876,7 @@ def _serialize_workspace_add_option(ws: Workspace) -> dict:
     }
 
 
-def _serialize_document_add_option(doc: Document) -> dict:
+def _serialize_document_add_option(doc: Document) -> Dict[str, Any]:
     ws = doc.workspace
     return {
         "document_id": str(doc.id),
@@ -887,7 +888,7 @@ def _serialize_document_add_option(doc: Document) -> dict:
     }
 
 
-def _serialize_entity_add_option(entity: KnowledgeEntity) -> dict:
+def _serialize_entity_add_option(entity: KnowledgeEntity) -> Dict[str, Any]:
     ws = entity.document.workspace
     return {
         "entity_id": str(entity.id),
@@ -900,7 +901,7 @@ def _serialize_entity_add_option(entity: KnowledgeEntity) -> dict:
     }
 
 
-def _serialize_relation_add_option(relation: KnowledgeRelation) -> dict:
+def _serialize_relation_add_option(relation: KnowledgeRelation) -> Dict[str, Any]:
     ws = relation.document.workspace
     return {
         "relation_id": str(relation.id),
@@ -920,7 +921,7 @@ def list_group_add_options(
     page_size: int = 20,
     search: str | None = None,
     candidate_owner_id: int | None = None,
-) -> dict:
+) -> Dict[str, Any]:
     from nodepoint.services.workspace_catalog import paginate_queryset
 
     if group.tag in (GroupTag.ENTITY, GroupTag.RELATION):
@@ -1014,7 +1015,7 @@ def list_workspace_group_options(
     page: int = 1,
     page_size: int = 20,
     search: str | None = None,
-) -> dict:
+) -> Dict[str, Any]:
     from nodepoint.auth.users import user_role
     from nodepoint.enums import UserRole
     from nodepoint.services.workspace_catalog import paginate_queryset

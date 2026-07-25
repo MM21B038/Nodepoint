@@ -16,8 +16,13 @@ from dotenv import load_dotenv
 import os
 import sys
 
+import django_stubs_ext
+
 from nodepoint.settings_loader import postgres_config, redis_config
 from nodepoint.registry.prompt import Prompt
+
+# Enable typing generics (Manager[Model], etc.) used by django-stubs.
+django_stubs_ext.monkeypatch()
 
 load_dotenv()
 
@@ -79,6 +84,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "django_rq",
     "nodepoint",
+    "groups",
 ]
 
 ASGI_APPLICATION = "config.asgi.application"

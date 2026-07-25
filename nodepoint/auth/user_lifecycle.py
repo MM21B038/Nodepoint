@@ -6,17 +6,15 @@ import os
 import shutil
 
 from django.conf import settings
-from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.db.models import Count, Q, QuerySet
 
 from nodepoint.auth.account_lifecycle import AccountLifecycleError
-from nodepoint.auth.users import ensure_profile, user_role
+from nodepoint.auth.users import User, ensure_profile, user_role
 from nodepoint.enums import AccountStatus, UserRole
 from nodepoint.models import ApiKey, UserProfile, Workspace
 from nodepoint.services.workspace import workspace_storage_abspath
-
-User = get_user_model()
+from typing import Any, Dict
 
 
 def account_state_label(user) -> str:
@@ -95,7 +93,7 @@ def _remove_workspace_media(workspace: Workspace) -> None:
 
 
 @transaction.atomic
-def purge_user_permanently(user, *, requested_by) -> dict:
+def purge_user_permanently(user: User, *, requested_by: User) -> Dict[str, Any]:
     """
     Hard-delete user and owned DB rows (CASCADE). Removes workspace media on disk.
     Not recoverable. Allowed for inactive accounts or pending_deletion.

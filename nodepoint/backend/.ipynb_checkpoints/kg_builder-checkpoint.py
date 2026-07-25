@@ -5,7 +5,7 @@ from nodepoint.registry import Thread, Prompt
 from nodepoint.registry.schema import Schema, get_entity_types
 from nodepoint.agent.agent import Agent
 from nodepoint.models import KnowledgeEntity, KnowledgeRelation
-from typing import Type
+from typing import Type, Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +13,7 @@ EXTRACTION_TEMPERATURE = 1.2
 TRIALS = 3
 
 
-def entity_types_as_md_table(entity_types: dict[str, str]) -> str:
+def entity_types_as_md_table(entity_types: Dict[str, str]) -> str:
     table = "| Type | Description |\n|------|-------------|\n"
     for type_, description in entity_types.items():
         table += f"| {type_} | {description} |\n"
@@ -47,7 +47,7 @@ def extract_entities(doc: str, entity_types: str, agent: Agent) -> list:
         trial += 1
     return []
     
-def extract_relations(doc: str, entities: list[str], agent: Agent) -> list:
+def extract_relations(doc: str, entities: List[str], agent: Agent) -> list:
     trial = 0
     thread = Thread()
     thread.addSystem(Prompt["relation_extractor_system"])
@@ -84,7 +84,7 @@ def extract_knowledge_graph(doc: str) -> Schema.KnowledgeGraph:
     return Schema.KnowledgeGraph(entities=entities, relations=relations)
 
 
-def ingest_knowledge_graph(doc, knowledge_graph: Schema.KnowledgeGraph) -> tuple[bool, list, list]:
+def ingest_knowledge_graph(doc, knowledge_graph: Schema.KnowledgeGraph) -> Tuple[bool, list, list]:
     entity_ids: list = []
     relation_ids: list = []
 
@@ -92,7 +92,7 @@ def ingest_knowledge_graph(doc, knowledge_graph: Schema.KnowledgeGraph) -> tuple
         KnowledgeRelation.objects.filter(document=doc).delete()
         KnowledgeEntity.objects.filter(document=doc).delete()
 
-        entity_by_name: dict[str, KnowledgeEntity] = {}
+        entity_by_name: Dict[str, KnowledgeEntity] = {}
         for entity in knowledge_graph.entities:
             row = KnowledgeEntity.objects.create(
                 document=doc,

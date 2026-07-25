@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import Any, Dict, Set
 from uuid import UUID
 
 from django_rq import get_connection
@@ -23,7 +23,7 @@ RECOVERY_LOCK_KEY = "nodepoint:preprocess:recovery:startup"
 _RECOVERY_LOCK_TTL = int(os.getenv("PREPROCESS_RECOVERY_LOCK_TTL", "300"))
 
 
-def _live_chunk_job_ids() -> set[UUID]:
+def _live_chunk_job_ids() -> Set[UUID]:
     from nodepoint.services.queue_status import _chunk_ids_with_live_rq_jobs
 
     return _chunk_ids_with_live_rq_jobs()
@@ -43,7 +43,7 @@ def _recovery_enabled() -> bool:
     return str(raw).strip().lower() not in ("0", "false", "no", "off")
 
 
-def reset_orphaned_chunk_statuses(*, workspace: str | None = None) -> dict[str, int]:
+def reset_orphaned_chunk_statuses(*, workspace: str | None = None) -> Dict[str, int]:
     """Move orphaned QUEUED/INPROGRESS chunks back to PENDING after RQ job loss."""
     live = _live_chunk_job_ids()
     in_progress_qs = DocumentChunk.objects.filter(status=Status.INPROGRESS).exclude(
@@ -72,7 +72,7 @@ def _rollup_stale_document_statuses(*, workspace: str | None = None) -> int:
     return len(doc_ids)
 
 
-def recover_orphaned_chunks(*, workspace: str | None = None) -> dict[str, int]:
+def recover_orphaned_chunks(*, workspace: str | None = None) -> Dict[str, int]:
     """Reset orphaned chunk rows (per workspace or globally) then rollup documents."""
     live = _live_chunk_job_ids()
     stuck_qs = DocumentChunk.objects.filter(
@@ -92,14 +92,14 @@ def recover_orphaned_chunks(*, workspace: str | None = None) -> dict[str, int]:
     return stats
 
 
-def run_preprocess_recovery() -> dict[str, Any]:
+def run_preprocess_recovery() -> Dict[str, Any]:
     """
     Reset orphaned chunk statuses and re-enqueue global chunk + vector backlog.
 
     Safe after a full restart when Redis queues are empty but Postgres still
     shows QUEUED/INPROGRESS rows.
     """
-    stats: dict[str, Any] = {}
+    stats: Dict[str, Any] = {}
     stats.update(reset_orphaned_chunk_statuses())
     stats["documents_rolled_up"] = _rollup_stale_document_statuses()
     stats["legacy_prepared"] = run_prepare_legacy_batch(workspace_name=None)
@@ -111,7 +111,7 @@ def run_preprocess_recovery() -> dict[str, Any]:
     return stats
 
 
-def maybe_run_startup_recovery(*, force: bool = False) -> dict[str, Any] | None:
+def maybe_run_startup_recovery(*, force: bool = False) -> Dict[str, Any] | None:
     """
     Run recovery once per cluster boot (Redis SET NX lock).
 

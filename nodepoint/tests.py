@@ -15,6 +15,7 @@ from nodepoint.test_helpers import (
     create_test_user,
     create_test_workspace,
 )
+from nodepoint.auth.users import User
 from nodepoint.models import (
     ChatBranch,
     Conversation,
@@ -27,6 +28,7 @@ from nodepoint.models import (
 from nodepoint.backend.kg_builder import ingest_knowledge_graph_for_chunk
 from nodepoint.registry.schema import Entity, Relation
 from nodepoint.services.document import doc_preprocess
+from typing import List
 
 
 class KnowledgeGraphIngestTests(TestCase):
@@ -424,6 +426,7 @@ class PreprocessRecoveryTests(TestCase):
         mock_conn.return_value.set.return_value = False
         mock_run.return_value = {"chunks_enqueued": 2}
         result = maybe_run_startup_recovery()
+        assert result is not None
         self.assertEqual(result["chunks_enqueued"], 2)
         mock_conn.return_value.delete.assert_called_once()
         mock_run.assert_called_once()
@@ -445,6 +448,7 @@ class PreprocessRecoveryTests(TestCase):
         )
         mock_run.return_value = {"chunks_enqueued": 1}
         result = maybe_run_startup_recovery()
+        assert result is not None
         self.assertEqual(result["chunks_enqueued"], 1)
         mock_conn.return_value.delete.assert_called_once()
         mock_run.assert_called_once()
@@ -460,6 +464,7 @@ class PreprocessRecoveryTests(TestCase):
         mock_conn.return_value.set.return_value = True
         mock_run.return_value = {"chunks_enqueued": 2}
         result = maybe_run_startup_recovery()
+        assert result is not None
         self.assertEqual(result["chunks_enqueued"], 2)
         mock_run.assert_called_once()
 
@@ -2489,6 +2494,11 @@ class ChatSummaryAPITests(TestCase):
 
 
 class ChatContextSearchScopeTests(TestCase):
+    user: User
+
+    def setUp(self):
+        self.user = create_test_user()
+
     def test_resolve_per_workspace_chat_is_active_workspace_only(self):
         create_test_workspace(name="chat-only")
         create_test_workspace(name="flag-a")
@@ -2599,6 +2609,11 @@ class KgSearchTests(TestCase):
 
 
 class ChatSystemPromptTests(TestCase):
+    user: User
+
+    def setUp(self):
+        self.user = create_test_user()
+
     def test_create_conversation_uses_fixed_system_prompt(self):
         from nodepoint.registry.prompt import Prompt
 
@@ -3362,7 +3377,7 @@ class ChatCompressionTests(TestCase):
         conversation, root = chat_storage.create_conversation(workspace)
         thread, _, _ = chat_storage.load_thread(root.id)
 
-        events: list[dict] = []
+        events: List[dict] = []
 
         async def on_event(payload):
             events.append(payload)
@@ -3573,7 +3588,7 @@ class ChatTurnRegistryRedisTests(TestCase):
         conv_id = uuid.uuid4()
         branch_id = uuid.uuid4()
         thread = Thread()
-        queued_calls: list[int] = []
+        queued_calls: List[int] = []
 
         async def on_queued():
             queued_calls.append(1)
@@ -3767,6 +3782,7 @@ class WebSocketCancelPartialSaveTests(TransactionTestCase):
                 self.assertTrue(saw_interrupted)
                 self.assertTrue(saw_cancelled)
                 self.assertIsNotNone(saved_payload)
+                assert saved_payload is not None
                 self.assertEqual(saved_payload["content"], "Partial answer")
 
         async_to_sync(run)()
@@ -3992,6 +4008,8 @@ class QdrantSearchTests(TestCase):
         call_kwargs = mock_client.search.call_args.kwargs
         self.assertEqual(call_kwargs["query_vector"], [0.1, 0.2])
         self.assertEqual(call_kwargs["limit"], 5)
+        self.assertIsNotNone(hits)
+        assert hits is not None
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0].id, "p1")
 

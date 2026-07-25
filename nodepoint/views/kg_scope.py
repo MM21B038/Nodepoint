@@ -1,12 +1,13 @@
 from __future__ import annotations
+from typing import Tuple
 
 from dataclasses import dataclass
 
-from django.contrib.auth.models import AbstractBaseUser
 from rest_framework import status
 from rest_framework.request import Request
 from rest_framework.response import Response
 
+from nodepoint.auth.users import User
 from nodepoint.models import Workspace, WorkspaceGroup
 from nodepoint.services import kg_graph
 from nodepoint.services.owner_scope import (
@@ -36,7 +37,7 @@ class KgScope:
         return self.group_name is not None
 
 
-def resolve_kg_scope(request: Request) -> tuple[KgScope | None, str | None]:
+def resolve_kg_scope(request: Request) -> Tuple[KgScope | None, str | None]:
     """
     Returns (scope, error_message). error_message is set for 400 responses.
     """
@@ -70,8 +71,8 @@ def resolve_kg_scope_targets(
     request: Request,
     scope: KgScope,
     *,
-    actor: AbstractBaseUser,
-) -> tuple[Workspace | None, WorkspaceGroup | None, Response | None]:
+    actor: User,
+) -> Tuple[Workspace | None, WorkspaceGroup | None, Response | None]:
     """
     Resolve workspace or group for shared-scope endpoints.
     Returns (workspace, group, error_response); exactly one of workspace/group is set on success.
@@ -82,9 +83,15 @@ def resolve_kg_scope_targets(
         return None, None, _owner_scope_response(exc)
 
     if scope.is_group_scope:
+        group_name = scope.group_name
+        if group_name is None:
+            return None, None, Response(
+                {"error": "Provide group"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         try:
             group = get_group_by_name(
-                scope.group_name, actor=actor, owner_id=owner_id
+                group_name, actor=actor, owner_id=owner_id
             )
         except AmbiguousGroupError as exc:
             return None, None, Response(
@@ -93,14 +100,20 @@ def resolve_kg_scope_targets(
             )
         except GroupNotFoundError:
             return None, None, Response(
-                {"error": f"Group not found: {scope.group_name}"},
+                {"error": f"Group not found: {group_name}"},
                 status=status.HTTP_404_NOT_FOUND,
             )
         return None, group, None
 
+    workspace_name = scope.workspace_name
+    if workspace_name is None:
+        return None, None, Response(
+            {"error": "Provide workspace_name"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     try:
         workspace = get_workspace_by_name(
-            scope.workspace_name, actor=actor, owner_id=owner_id
+            workspace_name, actor=actor, owner_id=owner_id
         )
     except AmbiguousWorkspaceError as exc:
         return None, None, Response(
@@ -117,7 +130,7 @@ def resolve_kg_scope_targets(
 
 def parse_graph_filters_from_request(
     request: Request,
-) -> tuple[kg_graph.GraphFilters | None, str | None]:
+) -> Tuple[kg_graph.GraphFilters | None, str | None]:
     try:
         filters = kg_graph.parse_graph_filters(
             entity_type_raw=request.query_params.get("entity_type"),

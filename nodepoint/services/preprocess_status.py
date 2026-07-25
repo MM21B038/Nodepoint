@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any
+from typing import Any, Dict, List, Tuple
 
 from django.db.models import Count
 
@@ -14,11 +14,11 @@ CHUNK_STATUS_BUCKETS = ("pending", "queued", "in_progress", "completed", "failed
 _READY_FILE_PHASES = frozenset({"ready", "kg_ready"})
 
 
-def _empty_vector_counts() -> dict[str, int]:
+def _empty_vector_counts() -> Dict[str, int]:
     return {k: 0 for k in VECTOR_BUCKETS} | {"total": 0}
 
 
-def _empty_chunk_counts() -> dict[str, int]:
+def _empty_chunk_counts() -> Dict[str, int]:
     return {k: 0 for k in CHUNK_STATUS_BUCKETS} | {"total": 0}
 
 
@@ -42,8 +42,8 @@ def _chunk_status_bucket(status: str) -> str:
     return "pending"
 
 
-def _aggregate_vectors(qs) -> dict[str, dict[str, int]]:
-    by_doc: dict[Any, dict[str, int]] = defaultdict(_empty_vector_counts)
+def _aggregate_vectors(qs) -> Dict[str, Dict[str, int]]:
+    by_doc: Dict[Any, Dict[str, int]] = defaultdict(_empty_vector_counts)
     rows = qs.values("document_id", "vector").annotate(count=Count("id"))
     for row in rows:
         doc_id = row["document_id"]
@@ -54,8 +54,8 @@ def _aggregate_vectors(qs) -> dict[str, dict[str, int]]:
     return dict(by_doc)
 
 
-def _aggregate_chunk_status(qs) -> dict[Any, dict[str, int]]:
-    by_doc: dict[Any, dict[str, int]] = defaultdict(_empty_chunk_counts)
+def _aggregate_chunk_status(qs) -> Dict[Any, Dict[str, int]]:
+    by_doc: Dict[Any, Dict[str, int]] = defaultdict(_empty_chunk_counts)
     for chunk in qs.only("document_id", "status", "vector"):
         doc_id = chunk.document_id
         by_doc[doc_id]["total"] += 1
@@ -63,8 +63,8 @@ def _aggregate_chunk_status(qs) -> dict[Any, dict[str, int]]:
     return dict(by_doc)
 
 
-def _aggregate_chunk_vectors(qs) -> dict[str, dict[str, int]]:
-    by_doc: dict[Any, dict[str, int]] = defaultdict(_empty_vector_counts)
+def _aggregate_chunk_vectors(qs) -> Dict[str, Dict[str, int]]:
+    by_doc: Dict[Any, Dict[str, int]] = defaultdict(_empty_vector_counts)
     rows = qs.values("document_id", "vector").annotate(count=Count("id"))
     for row in rows:
         doc_id = row["document_id"]
@@ -75,7 +75,7 @@ def _aggregate_chunk_vectors(qs) -> dict[str, dict[str, int]]:
     return dict(by_doc)
 
 
-def _workspace_vector_totals(workspace: Workspace) -> dict[str, dict[str, int]]:
+def _workspace_vector_totals(workspace: Workspace) -> Dict[str, Dict[str, int]]:
     entities = KnowledgeEntity.objects.filter(document__workspace=workspace)
     relations = KnowledgeRelation.objects.filter(document__workspace=workspace)
     chunks = DocumentChunk.objects.filter(document__workspace=workspace)
@@ -100,9 +100,9 @@ def _workspace_vector_totals(workspace: Workspace) -> dict[str, dict[str, int]]:
 
 
 def _embedding_progress(
-    entities: dict[str, int],
-    relations: dict[str, int],
-    chunk_vectors: dict[str, int] | None = None,
+    entities: Dict[str, int],
+    relations: Dict[str, int],
+    chunk_vectors: Dict[str, int] | None = None,
 ) -> float:
     chunk_vectors = chunk_vectors or _empty_vector_counts()
     total = (
@@ -120,15 +120,15 @@ def _embedding_progress(
     return round(done / total, 4)
 
 
-def is_legacy_document(chunks: dict[str, int], content: bool) -> bool:
+def is_legacy_document(chunks: Dict[str, int], content: bool) -> bool:
     return chunks.get("total", 0) == 0 and bool(content)
 
 
 def _vector_work_counts(
-    entities: dict[str, int],
-    relations: dict[str, int],
-    chunk_vectors: dict[str, int],
-) -> tuple[int, int]:
+    entities: Dict[str, int],
+    relations: Dict[str, int],
+    chunk_vectors: Dict[str, int],
+) -> Tuple[int, int]:
     pending = (
         entities.get("pending", 0)
         + relations.get("pending", 0)
@@ -145,10 +145,10 @@ def _vector_work_counts(
 def file_has_preprocess_failure(
     document_status: str,
     phase: str,
-    chunks: dict[str, int],
-    entities: dict[str, int],
-    relations: dict[str, int],
-    chunk_vectors: dict[str, int],
+    chunks: Dict[str, int],
+    entities: Dict[str, int],
+    relations: Dict[str, int],
+    chunk_vectors: Dict[str, int],
 ) -> bool:
     """True when a file has a terminal preprocess failure (for Failed docs counts)."""
     if phase == "failed":
@@ -169,10 +169,10 @@ def file_has_preprocess_failure(
 
 def derive_file_phase(
     document_status: str,
-    chunks: dict[str, int],
-    entities: dict[str, int],
-    relations: dict[str, int],
-    chunk_vectors: dict[str, int],
+    chunks: Dict[str, int],
+    entities: Dict[str, int],
+    relations: Dict[str, int],
+    chunk_vectors: Dict[str, int],
     *,
     content: bool = False,
 ) -> str:
@@ -234,11 +234,11 @@ def derive_file_phase(
 
 
 def overall_from_files(
-    file_phases: list[str],
+    file_phases: List[str],
     documents_total: int,
     *,
     documents_failed: int | None = None,
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
     if documents_total == 0:
         return {
             "phase": "idle",
@@ -277,14 +277,22 @@ def overall_from_files(
     }
 
 
-def _documents_by_status(docs) -> dict[str, int]:
+def _documents_by_status(docs) -> Dict[str, int]:
     counts = {s.value: 0 for s in Status}
     for doc in docs:
         counts[doc.status] = counts.get(doc.status, 0) + 1
     return counts
 
 
-def _workspace_file_rollups(workspace: Workspace) -> tuple[list, dict, dict, dict, dict]:
+def _workspace_file_rollups(
+    workspace: Workspace,
+) -> Tuple[
+    List[Any],
+    Dict[Any, Dict[str, int]],
+    Dict[Any, Dict[str, int]],
+    Dict[Any, Dict[str, int]],
+    Dict[Any, Dict[str, int]],
+]:
     """Documents plus per-document aggregates used for phase / overall rollups."""
     docs = list(workspace.documents.order_by("-created_at"))
     entity_by_doc = _aggregate_vectors(
@@ -302,12 +310,12 @@ def _workspace_file_rollups(workspace: Workspace) -> tuple[list, dict, dict, dic
     return docs, entity_by_doc, relation_by_doc, chunk_by_doc, chunk_vector_by_doc
 
 
-def build_workspace_preprocess_overall(workspace: Workspace) -> dict[str, Any]:
+def build_workspace_preprocess_overall(workspace: Workspace) -> Dict[str, Any]:
     """Overall preprocess rollup without per-file payload (bulk summaries)."""
     docs, entity_by_doc, relation_by_doc, chunk_by_doc, chunk_vector_by_doc = (
         _workspace_file_rollups(workspace)
     )
-    file_phases: list[str] = []
+    file_phases: List[str] = []
     documents_failed = 0
 
     for doc in docs:
@@ -340,13 +348,13 @@ def build_workspace_preprocess_overall(workspace: Workspace) -> dict[str, Any]:
     return {"workspace": workspace.name, "overall": overall}
 
 
-def build_workspace_preprocess_status(workspace: Workspace) -> dict[str, Any]:
+def build_workspace_preprocess_status(workspace: Workspace) -> Dict[str, Any]:
     docs, entity_by_doc, relation_by_doc, chunk_by_doc, chunk_vector_by_doc = (
         _workspace_file_rollups(workspace)
     )
 
-    files: list[dict[str, Any]] = []
-    file_phases: list[str] = []
+    files: List[Dict[str, Any]] = []
+    file_phases: List[str] = []
 
     for doc in docs:
         entities = entity_by_doc.get(doc.id, _empty_vector_counts())

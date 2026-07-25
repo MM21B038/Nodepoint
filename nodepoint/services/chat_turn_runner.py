@@ -4,7 +4,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Dict, List, Set
 
 from channels.layers import get_channel_layer
 from django.conf import settings
@@ -31,7 +31,7 @@ def conversation_channel_group(conversation_id: uuid.UUID) -> str:
     return f"chat_{conversation_id}"
 
 
-async def publish_frame(conversation_id: uuid.UUID, frame: dict[str, Any]) -> None:
+async def publish_frame(conversation_id: uuid.UUID, frame: Dict[str, Any]) -> None:
     layer = get_channel_layer()
     if layer is None:
         return
@@ -42,7 +42,7 @@ async def publish_frame(conversation_id: uuid.UUID, frame: dict[str, Any]) -> No
 
 
 async def publish_frames(
-    conversation_id: uuid.UUID, frames: list[dict[str, Any]]
+    conversation_id: uuid.UUID, frames: List[Dict[str, Any]]
 ) -> None:
     for frame in frames:
         await publish_frame(conversation_id, frame)
@@ -55,8 +55,8 @@ async def start_turn(
     thread: Thread,
     workspace_name: str | None,
     group_name: str | None,
-    tools: list[dict[str, Any]],
-    exclude_servers: set[str],
+    tools: List[Dict[str, Any]],
+    exclude_servers: Set[str],
     persist: bool = True,
 ) -> uuid.UUID:
     turn_id = uuid.uuid4()
@@ -101,8 +101,8 @@ async def start_turn_queued(
     thread: Thread,
     workspace_name: str | None,
     group_name: str | None,
-    tools: list[dict[str, Any]],
-    exclude_servers: set[str],
+    tools: List[Dict[str, Any]],
+    exclude_servers: Set[str],
     persist: bool = True,
     on_queued: Callable[[], Awaitable[None]] | None = None,
     should_abort: Callable[[], bool] | None = None,
@@ -147,15 +147,15 @@ async def _run_turn(
     thread: Thread,
     workspace_name: str | None,
     group_name: str | None,
-    tools: list[dict[str, Any]],
-    exclude_servers: set[str],
+    tools: List[Dict[str, Any]],
+    exclude_servers: Set[str],
     persist: bool = True,
 ) -> None:
     agent = Agent()
     formatter = chat_stream_format.ChatStreamFormatter()
-    interrupt_state: dict[str, Any] = {}
+    interrupt_state: Dict[str, Any] = {}
 
-    async def on_event(payload: dict[str, Any]) -> None:
+    async def on_event(payload: Dict[str, Any]) -> None:
         await publish_frames(conversation_id, formatter.format(payload))
 
     try:
@@ -173,13 +173,13 @@ async def _run_turn(
             persist=persist,
         )
         await publish_frames(conversation_id, formatter.close_sections())
-        done_frame: dict[str, Any] = {"type": "chat.done", "turn_id": str(turn_id)}
+        done_frame: Dict[str, Any] = {"type": "chat.done", "turn_id": str(turn_id)}
         if new_branch_id:
             done_frame["active_branch_id"] = str(new_branch_id)
         await publish_frame(conversation_id, done_frame)
     except asyncio.CancelledError:
         await publish_frames(conversation_id, formatter.close_sections())
-        cancelled_frame: dict[str, Any] = {
+        cancelled_frame: Dict[str, Any] = {
             "type": "chat.cancelled",
             "turn_id": str(turn_id),
         }

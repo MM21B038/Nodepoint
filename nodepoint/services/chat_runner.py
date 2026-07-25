@@ -5,7 +5,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Dict, List, Set, Tuple
 
 from django.conf import settings
 
@@ -33,8 +33,8 @@ class SavedSegment:
     content: str
     reasoning_content: str | None
 
-    def as_saved_dict(self, *, ephemeral: bool = False) -> dict[str, Any]:
-        payload: dict[str, Any] = {"content": self.content}
+    def as_saved_dict(self, *, ephemeral: bool = False) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"content": self.content}
         if not ephemeral and self.message_id:
             payload["message_id"] = self.message_id
         if self.reasoning_content:
@@ -50,12 +50,12 @@ async def run_agent_stream(
     *,
     workspace_name: str | None = None,
     group_name: str | None = None,
-    tools: list[dict[str, Any]] | None = None,
-    exclude_servers: set[str] | None = None,
-    on_event: Callable[[dict[str, Any]], Awaitable[None]],
-    interrupt_state: dict[str, Any] | None = None,
+    tools: List[Dict[str, Any]] | None = None,
+    exclude_servers: Set[str] | None = None,
+    on_event: Callable[[Dict[str, Any]], Awaitable[None]],
+    interrupt_state: Dict[str, Any] | None = None,
     persist: bool = True,
-) -> tuple[Thread, uuid.UUID | None]:
+) -> Tuple[Thread, uuid.UUID | None]:
     """
     Stream agent events to ``on_event`` (JSON-serializable dicts).
     Mutates ``thread``; persists messages when ``persist`` is True.
@@ -63,8 +63,8 @@ async def run_agent_stream(
     """
     pending_calls = None
     tools_remaining = 0
-    thinking_buf: list[str] = []
-    response_buf: list[str] = []
+    thinking_buf: List[str] = []
+    response_buf: List[str] = []
     new_branch_id: uuid.UUID | None = None
     segment_saved = False
     effective_branch_id = branch_id
@@ -306,13 +306,13 @@ async def run_agent_stream(
             )
         chat_context.reset_search_session(search_token)
         chat_context.reset_chat_workspace(ctx_token)
-        if group_name:
+        if group_token is not None:
             chat_context.reset_group_scope_chat(group_token)
 
     return thread, new_branch_id
 
 
-def default_tools(exclude_servers: set[str] | None = None) -> list[dict[str, Any]]:
+def default_tools(exclude_servers: Set[str] | None = None) -> List[Dict[str, Any]]:
     del exclude_servers
     return Tool.schemas(
         include_servers={"Knowledge"},

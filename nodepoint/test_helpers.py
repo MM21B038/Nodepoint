@@ -4,13 +4,9 @@ from __future__ import annotations
 
 import uuid
 
-from django.contrib.auth import get_user_model
-
-from nodepoint.auth.users import create_account
+from nodepoint.auth.users import User, create_account
 from nodepoint.enums import UserRole
 from nodepoint.models import Workspace
-
-User = get_user_model()
 
 
 def create_test_user(

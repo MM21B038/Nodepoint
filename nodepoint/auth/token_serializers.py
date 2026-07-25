@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from django.contrib.auth import get_user_model
+from typing import cast
+
 from django.contrib.auth.hashers import check_password
 from rest_framework import serializers
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from nodepoint.auth.account_lifecycle import login_block_message, profile_allows_login
-from nodepoint.auth.users import ensure_profile
-
-User = get_user_model()
+from nodepoint.auth.users import User, ensure_profile
 
 
 class NodepointTokenObtainPairSerializer(TokenObtainPairSerializer):
@@ -37,7 +37,7 @@ class NodepointTokenObtainPairSerializer(TokenObtainPairSerializer):
                 "No active account found with the given credentials",
                 code="no_active_account",
             )
-        refresh = self.get_token(user)
+        refresh = cast(RefreshToken, self.get_token(user))
         return {
             "refresh": str(refresh),
             "access": str(refresh.access_token),
