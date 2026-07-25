@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, List
 
 
 class ChatStreamFormatter:
     """Turn raw agent events into UI WebSocket frames (section open/close + payload)."""
 
     def __init__(self) -> None:
-        self.thinking_open = False
-        self.response_open = False
-        self.compression_open = False
+        self.thinking_open: bool = False
+        self.response_open: bool = False
+        self.compression_open: bool = False
 
-    def format(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    def format(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         ev_type = payload.get("type")
-        frames: list[dict[str, Any]] = []
+        frames: List[Dict[str, Any]] = []
 
         if ev_type == "thinking_token":
             if not self.thinking_open:
@@ -76,11 +76,11 @@ class ChatStreamFormatter:
 
         return frames
 
-    def close_sections(self) -> list[dict[str, Any]]:
+    def close_sections(self) -> List[Dict[str, Any]]:
         return self._close_open_sections()
 
-    def _close_open_sections(self) -> list[dict[str, Any]]:
-        frames: list[dict[str, Any]] = []
+    def _close_open_sections(self) -> List[Dict[str, Any]]:
+        frames: List[Dict[str, Any]] = []
         if self.thinking_open:
             frames.append(
                 {"type": "section", "section": "thinking", "action": "close"}

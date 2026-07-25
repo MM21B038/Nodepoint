@@ -1,11 +1,11 @@
 from collections import defaultdict
 from pydantic import BaseModel, Field
-from typing import List, Optional, Union, Any
+from typing import List, Optional, Union, Any, Dict
 
 class Entity(BaseModel):
     name: str = Field(..., description="The name of the entity.")
     type: str = Field(..., description="The type of the entity.")
-    attributes: Optional[dict[str, Any]] = Field(default_factory=dict, description="Attributes of the entity.")
+    attributes: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Attributes of the entity.")
 
 class Entities(BaseModel):
     entities: List[Entity] = Field(..., description="A list of extracted entities.")

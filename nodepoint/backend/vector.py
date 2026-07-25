@@ -1,6 +1,11 @@
+from __future__ import annotations
+
 from functools import lru_cache
+from typing import Any, Dict, List
+from uuid import UUID
 
 from nodepoint.agent.agent import Agent
+from nodepoint.models import DocumentChunk, KnowledgeEntity, KnowledgeRelation
 from nodepoint.quadrant.manager import ingest_vector
 
 
@@ -9,7 +14,7 @@ def get_agent() -> Agent:
     return Agent()
 
 
-def create_entity_payload(entity):
+def create_entity_payload(entity: KnowledgeEntity) -> Dict[str, Any]:
     attributes = ", ".join(
         f"{key}: {value}" for key, value in (entity.attributes or {}).items()
     )
@@ -24,7 +29,7 @@ def create_entity_payload(entity):
     }
 
 
-def create_relation_payload(relation):
+def create_relation_payload(relation: KnowledgeRelation) -> Dict[str, Any]:
     workspace_name = relation.document.workspace.name
     doc = (
         f"{relation.source.name} {relation.type_description} {relation.target.name}. "
@@ -38,19 +43,19 @@ def create_relation_payload(relation):
     }
 
 
-def ingest_entity_vector(point_id, entity):
+def ingest_entity_vector(point_id: UUID | str, entity: KnowledgeEntity) -> bool:
     payload = create_entity_payload(entity)
     vector = payload.pop("vector")
     return ingest_vector(str(point_id), vector, payload)
 
 
-def ingest_relation_vector(point_id, relation):
+def ingest_relation_vector(point_id: UUID | str, relation: KnowledgeRelation) -> bool:
     payload = create_relation_payload(relation)
     vector = payload.pop("vector")
     return ingest_vector(str(point_id), vector, payload)
 
 
-def create_chunk_payload(chunk):
+def create_chunk_payload(chunk: DocumentChunk) -> Dict[str, Any]:
     from nodepoint.mongo.manager import get_chunk_text
 
     workspace_name = chunk.document.workspace.name
@@ -68,7 +73,7 @@ def create_chunk_payload(chunk):
     }
 
 
-def ingest_chunk_vector(point_id, chunk):
+def ingest_chunk_vector(point_id: UUID | str, chunk: DocumentChunk) -> bool:
     payload = create_chunk_payload(chunk)
     vector = payload.pop("vector")
     return ingest_vector(str(point_id), vector, payload)

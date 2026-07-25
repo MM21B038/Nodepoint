@@ -4,7 +4,7 @@ import os
 import tomllib
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict
 from urllib.parse import quote_plus
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -15,7 +15,7 @@ def settings_path() -> Path:
 
 
 @lru_cache(maxsize=1)
-def load_settings() -> dict[str, Any]:
+def load_settings() -> Dict[str, Any]:
     path = settings_path()
     if not path.exists():
         return {}
@@ -23,19 +23,19 @@ def load_settings() -> dict[str, Any]:
         return tomllib.load(f)
 
 
-def get_section(name: str) -> dict[str, Any]:
+def get_section(name: str) -> Dict[str, Any]:
     section = load_settings().get(name, {})
     return section if isinstance(section, dict) else {}
 
 
-def _env_or(section: dict[str, Any], env_key: str, section_key: str, default: Any = None) -> Any:
+def _env_or(section: Dict[str, Any], env_key: str, section_key: str, default: Any = None) -> Any:
     value = os.getenv(env_key)
     if value is not None and value != "":
         return value
     return section.get(section_key, default)
 
 
-def postgres_config() -> dict[str, Any]:
+def postgres_config() -> Dict[str, Any]:
     section = get_section("postgresql")
     return {
         "NAME": _env_or(section, "POSTGRES_NAME", "name"),
@@ -46,7 +46,7 @@ def postgres_config() -> dict[str, Any]:
     }
 
 
-def redis_config() -> dict[str, Any]:
+def redis_config() -> Dict[str, Any]:
     section = get_section("redis")
     host = _env_or(section, "REDIS_HOST", "host", "localhost")
     port = _env_or(section, "REDIS_PORT", "port", 6379)
@@ -58,7 +58,7 @@ def redis_config() -> dict[str, Any]:
     }
 
 
-def mongo_config() -> dict[str, Any]:
+def mongo_config() -> Dict[str, Any]:
     section = get_section("mongo")
     return {
         "user": _env_or(section, "MONGO_USER", "user", "admin"),
@@ -84,7 +84,7 @@ def mongo_uri() -> str:
     )
 
 
-def quadrant_config() -> dict[str, Any]:
+def quadrant_config() -> Dict[str, Any]:
     section = get_section("quadrant")
     return {
         "host": _env_or(section, "QDRANT_HOST", "host", "localhost"),

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Dict, List, Tuple
 
 import logging
 import os
@@ -77,7 +78,7 @@ def rollup_document_status(document_id: UUID) -> None:
     Document.objects.filter(id=document_id).update(status=doc_status)
 
 
-def prepare_document(doc_id: UUID, filepath: str) -> list[UUID]:
+def prepare_document(doc_id: UUID, filepath: str) -> List[UUID]:
     """Split file into chunks in Postgres + Mongo; return chunk ids."""
     try:
         doc = Document.objects.get(id=doc_id)
@@ -111,7 +112,7 @@ def prepare_document(doc_id: UUID, filepath: str) -> list[UUID]:
     delete_chunks_for_document(doc_id)
     DocumentChunk.objects.filter(document_id=doc_id).delete()
 
-    chunk_ids: list[UUID] = []
+    chunk_ids: List[UUID] = []
     for index, text in enumerate(text_chunks):
         chunk = DocumentChunk.objects.create(
             document=doc,
@@ -144,7 +145,7 @@ def documents_needing_prepare_qs(workspace_name: str | None = None):
 
 
 def run_prepare_failed_documents_batch(
-    exclude_document_ids: list[UUID] | None = None,
+    exclude_document_ids: List[UUID] | None = None,
 ) -> int:
     """Re-split documents that failed before any chunks were created (all workspaces)."""
     qs = (
@@ -215,7 +216,7 @@ def _wait_for_chunk_job(job: Job, timeout_seconds: int) -> None:
         time.sleep(_CHUNK_JOB_POLL_INTERVAL_SECONDS)
 
 
-def wait_for_chunk_jobs(jobs: list[Job]) -> None:
+def wait_for_chunk_jobs(jobs: List[Job]) -> None:
     """
     Block until all enqueued process_chunk jobs finish or the batch deadline elapses.
 
@@ -225,9 +226,9 @@ def wait_for_chunk_jobs(jobs: list[Job]) -> None:
     if not jobs:
         return
     deadline = time.monotonic() + CHUNK_BATCH_WAIT_SECONDS
-    pending: dict[str, Job] = {job.id: job for job in jobs}
+    pending: Dict[str, Job] = {job.id: job for job in jobs}
     while pending and time.monotonic() < deadline:
-        finished_ids: list[str] = []
+        finished_ids: List[str] = []
         for job_id, job in pending.items():
             try:
                 status = job.get_status(refresh=True)
@@ -253,11 +254,11 @@ def wait_for_chunk_jobs(jobs: list[Job]) -> None:
 
 
 def enqueue_chunks_for_documents(
-    document_ids: list[UUID] | None = None,
+    document_ids: List[UUID] | None = None,
     workspace_name: str | None = None,
     *,
-    chunk_statuses: tuple[str, ...] | None = None,
-    exclude_document_ids: list[UUID] | None = None,
+    chunk_statuses: Tuple[str, ...] | None = None,
+    exclude_document_ids: List[UUID] | None = None,
     wait: bool = False,
 ) -> int:
     """
@@ -285,7 +286,7 @@ def enqueue_chunks_for_documents(
         return 0
 
     queue = django_rq.get_queue(getattr(settings, "RQ_QUEUE_CHUNK", "chunk"))
-    jobs = []
+    jobs: List[Job] = []
     for chunk in chunks:
         DocumentChunk.objects.filter(id=chunk.id).update(status=Status.QUEUED)
         job = queue.enqueue(
@@ -314,7 +315,7 @@ def enqueue_chunks_for_document(
 
 
 def run_chunk_preprocess_failed_batch(
-    exclude_document_ids: list[UUID] | None = None,
+    exclude_document_ids: List[UUID] | None = None,
 ) -> int:
     """Retry KG extraction for failed chunks across all workspaces."""
     count = enqueue_chunks_for_documents(

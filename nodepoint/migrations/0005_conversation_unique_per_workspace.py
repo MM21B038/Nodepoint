@@ -1,9 +1,10 @@
+from typing import Set
 from django.db import migrations, models
 
 
 def dedupe_conversations_per_workspace(apps, schema_editor):
     Conversation = apps.get_model("nodepoint", "Conversation")
-    seen_workspaces: set[int] = set()
+    seen_workspaces: Set[int] = set()
     for conv in Conversation.objects.order_by("workspace_id", "-updated_at"):
         if conv.workspace_id in seen_workspaces:
             conv.delete()

@@ -2,9 +2,19 @@
 
 REST endpoints for listing Postgres knowledge graphs and conversations per workspace or per **workspace group**.
 
+## Per-owner naming (admin / superadmin)
+
+Workspace and group **names are unique per owner**, not globally. When your role can see duplicate names, add **`owner_id`** or **`owner_username`** on every request that uses `workspace_name`, `group`, or a workspace/group name in the path. If ambiguous → **`400`** with `candidates`. See [API.md — Workspace — per-owner naming](API.md#workspace--per-owner-naming) for full rules.
+
+```bash
+curl "http://localhost:8000/api/knowledge-graph/?workspace_name=123&owner_id=3"
+curl "http://localhost:8000/api/knowledge-graph/entity-types/?group=research&owner_id=3"
+curl "http://localhost:8000/api/chat/summary/?workspace_name=123&owner_username=alice"
+```
+
 ## Knowledge graph
 
-Scope: provide **exactly one** of `workspace_name=<name>` or `group=<name>`. Missing scope → `400`.
+Scope: provide **exactly one** of `workspace_name=<name>` or `group=<name>`. Missing scope → `400`. Use `owner_id` / `owner_username` when the name is ambiguous.
 
 ## Workspace groups
 
@@ -13,7 +23,8 @@ Groups have a fixed **`tag`** set at create: `workspace` (default) | `files` | `
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/api/group/create/` | Create group `{ "name": "...", "tag": "workspace", "description": "..." }` |
-| GET | `/api/group/list/` | Paginated groups (`?tag=`, `?page=`, `?page_size=`) |
+| GET | `/api/group/list/` | Paginated groups (`?tag=`, `?page=`, `?page_size=`, optional `?owner_id=`) |
+| GET | `/api/group/lookup/` | Resolve group name to owner(s) for disambiguation (`?name=`, optional `?owner_id=`) |
 | GET | `/api/group/<name>/` | Group metadata + paginated typed `members` |
 | GET | `/api/group/<name>/members/` | Paginated members only (all tag types) |
 | PATCH | `/api/group/<name>/` | Update `{ "name", "description" }` only |
@@ -26,6 +37,24 @@ Groups have a fixed **`tag`** set at create: `workspace` (default) | `files` | `
 | POST | `/api/group/<name>/relations/` | Add relation (relation tag) |
 | DELETE | `/api/group/<name>/relations/<relation_id>/` | Remove relation |
 | DELETE | `/api/group/<name>/` | Delete group |
+| GET | `/api/group/<name>/add-options/` | Paginated resources eligible to add (picker; excludes current members) |
+| GET | `/api/workspace/<name>/group-options/` | Paginated workspace-tagged groups where add would succeed (`already_member` flag) |
+
+Cross-owner membership rules (who may add whose resources) are in [API.md — Workspace groups](API.md#workspace-groups).
+
+```bash
+# Which user owns "research" when names collide (admin/superadmin UI)
+curl "http://localhost:8000/api/group/lookup/?name=research"
+
+# All groups owned by one managed user
+curl "http://localhost:8000/api/group/list/?owner_id=7"
+
+# Picker: workspaces not yet in group (admin aggregate group)
+curl "http://localhost:8000/api/group/research/add-options/?owner_id=3&search=pra"
+
+# Picker: groups for a workspace (disable rows where already_member is true)
+curl "http://localhost:8000/api/workspace/PRAJNA/group-options/?owner_id=3"
+```
 
 ### Entity types
 
@@ -33,7 +62,7 @@ Groups have a fixed **`tag`** set at create: `workspace` (default) | `files` | `
 
 Lists distinct `entity_type` values with counts per workspace.
 
-**Single workspace** — `?workspace_name=PRAJNA`
+**Single workspace** — `?workspace_name=PRAJNA` (add `&owner_id=` if needed)
 
 ```json
 {
@@ -45,7 +74,7 @@ Lists distinct `entity_type` values with counts per workspace.
 }
 ```
 
-**Group** — `?group=research`
+**Group** — `?group=research` (add `&owner_id=` if needed)
 
 ```json
 {
@@ -104,7 +133,7 @@ Sorted by `count` descending. `type` is `null` when the stored value is blank.
 }
 ```
 
-**Group** — `?group=research` (same optional filters; response includes `tag` and `graphs` per member workspace)
+**Group** — `?group=research` (add `&owner_id=` if needed) (same optional filters; response includes `tag` and `graphs` per member workspace)
 
 | Group `tag` | Graph seeds |
 |-------------|-------------|
@@ -155,7 +184,7 @@ Same query rules as the knowledge graph endpoint.
 
 ### Single workspace
 
-Query: `workspace_name=<name>`
+Query: `workspace_name=<name>` (add `owner_id` / `owner_username` if ambiguous)
 
 ```json
 {
@@ -167,7 +196,7 @@ Query: `workspace_name=<name>`
 
 ### Group
 
-Query: `group=<name>`
+Query: `group=<name>` (add `owner_id` / `owner_username` if ambiguous)
 
 ```json
 {

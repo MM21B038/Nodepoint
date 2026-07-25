@@ -1,7 +1,9 @@
 from __future__ import annotations
+from typing import Any, Dict, List, Tuple
 
 from django.db.models import Count, QuerySet
 
+from nodepoint.auth.users import User
 from nodepoint.models import (
     Document,
     DocumentChunk,
@@ -18,8 +20,8 @@ MAX_PAGE_SIZE = 100
 _EMPTY_COUNTS = {"files": 0, "chunks": 0, "entities": 0, "relations": 0}
 
 
-def get_workspace_count_stats() -> dict:
-    base = user_workspaces_qs()
+def get_workspace_count_stats(*, actor: User) -> Dict[str, Any]:
+    base = user_workspaces_qs(actor)
     total = base.count()
     in_group = (
         base.filter(group_memberships__isnull=False)
@@ -40,21 +42,35 @@ def parse_group_filter(raw: str | None) -> str | None:
 
 
 def filter_workspaces_by_group(
-    qs: QuerySet[Workspace], group_name: str | None
+    qs: QuerySet[Workspace],
+    group_name: str | None,
+    *,
+    group_owner_id: int | None = None,
 ) -> QuerySet[Workspace]:
     if not group_name:
         return qs
-    return qs.filter(group_memberships__group__name=group_name).distinct()
+    qs = qs.filter(group_memberships__group__name=group_name)
+    if group_owner_id is not None:
+        qs = qs.filter(group_memberships__group__owner_id=group_owner_id)
+    return qs.distinct()
 
 
-def workspaces_base_qs(group_name: str | None = None) -> QuerySet[Workspace]:
+def workspaces_base_qs(
+    actor: User,
+    group_name: str | None = None,
+    *,
+    group_owner_id: int | None = None,
+) -> QuerySet[Workspace]:
     return filter_workspaces_by_group(
-        user_workspaces_qs().order_by("-created_at", "name"),
+        user_workspaces_qs(actor)
+        .select_related("owner")
+        .order_by("-created_at", "name"),
         group_name,
+        group_owner_id=group_owner_id,
     )
 
 
-def bulk_counts_for_workspace_ids(workspace_ids: list[int]) -> dict[int, dict[str, int]]:
+def bulk_counts_for_workspace_ids(workspace_ids: List[int]) -> Dict[int, Dict[str, int]]:
     """Per-workspace file/chunk/entity/relation counts (page-sized batches only)."""
     if not workspace_ids:
         return {}
@@ -99,11 +115,14 @@ def bulk_counts_for_workspace_ids(workspace_ids: list[int]) -> dict[int, dict[st
 def serialize_workspace_row(
     ws: Workspace,
     *,
-    counts: dict[str, int] | None = None,
-) -> dict:
+    counts: Dict[str, int] | None = None,
+) -> Dict[str, Any]:
     groups = sorted(m.group.name for m in ws.group_memberships.all())
     row = {
+        "id": ws.pk,
         "name": ws.name,
+        "owner_id": ws.owner_id,
+        "owner_username": ws.owner.username,
         "tag": opt.optional_field_for_api(ws.tag),
         "description": opt.optional_field_for_api(ws.description),
         "groups": groups,
@@ -117,7 +136,7 @@ def serialize_workspace_row(
 def parse_pagination(
     page_raw: str | None,
     page_size_raw: str | None,
-) -> tuple[int, int]:
+) -> Tuple[int, int]:
     page = 1
     if page_raw is not None and str(page_raw).strip():
         try:
@@ -155,7 +174,7 @@ def paginate_queryset(
     *,
     page: int,
     page_size: int,
-) -> tuple[list, dict]:
+) -> Tuple[List[Any], Dict[str, Any]]:
     total_items = qs.count()
     total_pages = max(1, (total_items + page_size - 1) // page_size) if total_items else 1
     page = min(max(1, page), total_pages)
@@ -173,19 +192,23 @@ def paginate_queryset(
 
 def list_workspaces_paginated(
     *,
+    actor: User,
     group_name: str | None = None,
+    group_owner_id: int | None = None,
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     include_counts: bool = True,
-) -> dict:
-    base = workspaces_base_qs(group_name).prefetch_related(
+) -> Dict[str, Any]:
+    base = workspaces_base_qs(
+        actor, group_name, group_owner_id=group_owner_id
+    ).prefetch_related(
         "group_memberships__group"
     )
     page_list, pagination = paginate_queryset(
         base, page=page, page_size=page_size
     )
 
-    counts_by_id: dict[int, dict[str, int]] = {}
+    counts_by_id: Dict[int, Dict[str, int]] = {}
     if include_counts and page_list:
         counts_by_id = bulk_counts_for_workspace_ids([ws.pk for ws in page_list])
 

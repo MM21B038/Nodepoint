@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Any, Callable, Dict, Optional, Literal, Union
+from typing import Any, Callable, Dict, Optional, Literal, Union, List, Set, cast
 import concurrent.futures
 import inspect
 import asyncio
@@ -110,7 +110,7 @@ class Tool:
             cls._local_tools_loaded = True
             return
 
-        failures: list[str] = []
+        failures: List[str] = []
         for _, mod_name, _ in pkgutil.walk_packages(package.__path__, package.__name__ + "."):
             if ".ipynb_checkpoints" in mod_name:
                 continue
@@ -127,7 +127,7 @@ class Tool:
             cls._log.warning("Some tool modules failed to import: %s", ", ".join(failures))
 
     @classmethod
-    def _unregister_mcp_tools_for_servers(cls, servers: set[str] | None) -> None:
+    def _unregister_mcp_tools_for_servers(cls, servers: Set[str] | None) -> None:
         """Remove MCP tool entries from registry (before re-discovery)."""
         to_remove = [
             k
@@ -138,14 +138,14 @@ class Tool:
             del cls.registry[k]
 
     @classmethod
-    async def discover_mcp_tools_async(cls, include_servers: set[str] | None = None) -> dict[str, Any]:
+    async def discover_mcp_tools_async(cls, include_servers: Set[str] | None = None) -> Dict[str, Any]:
         """
         List tools from configured MCP servers and register as `{server}.{tool}` (same as local tools).
         """
         cls._ensure_local_tools_loaded()
         cls._unregister_mcp_tools_for_servers(include_servers)
 
-        summary: dict[str, Any] = {
+        summary: Dict[str, Any] = {
             "ok": True,
             "servers_ok": [],
             "servers_failed": [],
@@ -229,15 +229,15 @@ class Tool:
         discover: bool = True,
         enabled: bool = True,
         url: str | None = None,
-        headers: dict[str, str] | None = None,
+        headers: Dict[str, str] | None = None,
         verify: bool | str | None = None,
         command: str | None = None,
-        args: list[str] | None = None,
-        env: dict[str, str] | None = None,
+        args: List[str] | None = None,
+        env: Dict[str, str] | None = None,
         cwd: str | None = None,
-        include_tools: list[str] | None = None,
-        exclude_tools: list[str] | None = None,
-    ) -> dict[str, Any]:
+        include_tools: List[str] | None = None,
+        exclude_tools: List[str] | None = None,
+    ) -> Dict[str, Any]:
         """
         Register an MCP server and persist to `app/registry/tools/mcp_servers.json`.
 
@@ -247,12 +247,13 @@ class Tool:
         `server` may be a string or `types.SimpleNamespace(server='...')` / `.name=`.
         """
         name = cls._resolve_mcp_server_name(server)
-        transport = str(transport).strip().lower()
-        if transport not in ("http", "stdio", "sse"):
+        transport_raw = str(transport).strip().lower()
+        if transport_raw not in ("http", "stdio", "sse"):
             return {
                 "ok": False,
-                "error": f"invalid transport {transport!r}; use 'http', 'stdio', or 'sse'",
+                "error": f"invalid transport {transport_raw!r}; use 'http', 'stdio', or 'sse'",
             }
+        transport = cast(Literal["http", "stdio", "sse"], transport_raw)
 
         if cls._mcp.has_server(name) and not replace:
             return {
@@ -262,7 +263,7 @@ class Tool:
                 "message": f"MCP server {name!r} already registered (pass replace=True to overwrite).",
             }
 
-        cfg: dict[str, Any] = {"enabled": bool(enabled), "transport": transport}
+        cfg: Dict[str, Any] = {"enabled": bool(enabled), "transport": transport}
         if transport in ("http", "sse"):
             cfg["url"] = url
             if headers:
@@ -283,7 +284,7 @@ class Tool:
 
         cls._mcp.upsert_server(name, cfg)
 
-        result: dict[str, Any] = {
+        result: Dict[str, Any] = {
             "ok": True,
             "status": "updated" if replace else "created",
             "server": name,
@@ -296,14 +297,14 @@ class Tool:
         return result
 
     @classmethod
-    def refresh_mcp_tools(cls, server: str | None = None) -> dict[str, Any]:
+    def refresh_mcp_tools(cls, server: str | None = None) -> Dict[str, Any]:
         """
         Run MCP discovery synchronously. If an event loop is already running (e.g. Jupyter),
         discovery runs in a worker thread so `asyncio.run` is valid there.
         """
         include = {server} if server else None
 
-        def run_discovery() -> dict[str, Any]:
+        def run_discovery() -> Dict[str, Any]:
             summary = asyncio.run(cls.discover_mcp_tools_async(include_servers=include))
             return {"ok": bool(summary.get("ok", True)), "summary": summary}
 
@@ -316,15 +317,22 @@ class Tool:
             return pool.submit(run_discovery).result()
 
     @classmethod
-    async def refresh_tools_async(cls) -> dict[str, Any]:
+    async def refresh_tools_async(cls) -> Dict[str, Any]:
         """Reload local tools and rediscover MCP tools (safe inside async/run_async)."""
         cls._ensure_local_tools_loaded(force=True)
         summary = await cls.discover_mcp_tools_async()
         return {"ok": bool(summary.get("ok", True)), "local_loaded": True, "mcp": summary}
 
     @classmethod
-    def tool(cls, _func=None, *, name=None, description=None, server=None):
-        def decorator(func: Callable):
+    def tool(
+        cls,
+        _func: Callable | None = None,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        server: str | None = None,
+    ) -> Callable:
+        def decorator(func: Callable) -> Callable:
             if server is None:
                 module_parts = func.__module__.split(".")
                 if "tools" in module_parts:
@@ -341,7 +349,7 @@ class Tool:
             tool_desc = description or (func.__doc__ or "")
 
             sig = inspect.signature(func)
-            fields = {}
+            fields: Dict[str, Any] = {}
 
             for param_name, param in sig.parameters.items():
                 annotation = (
@@ -372,13 +380,13 @@ class Tool:
         return decorator if _func is None else decorator(_func)
 
     @classmethod
-    def invoke(cls, tool):
+    def invoke(cls, tool: Any) -> Any:
         cls._ensure_local_tools_loaded()
         tool_def = cls.registry[tool.name]
         kind = tool_def.get("kind", "local")
 
         if kind == "mcp":
-            def run_mcp():
+            def run_mcp() -> Any:
                 return asyncio.run(cls.invoke_async(tool))
 
             try:
@@ -395,7 +403,7 @@ class Tool:
         return tool_def["func"](**validated.model_dump())
 
     @classmethod
-    async def invoke_async(cls, tool):
+    async def invoke_async(cls, tool: Any) -> Any:
         cls._ensure_local_tools_loaded()
         tool_def = cls.registry[tool.name]
         kind = tool_def.get("kind", "local")
@@ -427,7 +435,7 @@ class Tool:
         raise RuntimeError(f"Unknown tool kind: {kind}")
 
     @classmethod
-    def refresh_tools(cls) -> dict[str, Any]:
+    def refresh_tools(cls) -> Dict[str, Any]:
         cls._ensure_local_tools_loaded(force=True)
         mcp = cls.refresh_mcp_tools()
         return {"ok": True, "status": "refreshed", "local_loaded": True, "mcp": mcp}
@@ -435,20 +443,20 @@ class Tool:
     @classmethod
     def schemas(
         cls,
-        include_tools: set[str] | None = None,
-        exclude_tools: set[str] | None = None,
-        include_servers: set[str] | None = None,
-        exclude_servers: set[str] | None = None,
+        include_tools: Set[str] | None = None,
+        exclude_tools: Set[str] | None = None,
+        include_servers: Set[str] | None = None,
+        exclude_servers: Set[str] | None = None,
         include_local: bool = True,
         include_mcp: bool = True,
-    ):
+    ) -> List[Dict[str, Any]]:
         cls._ensure_local_tools_loaded()
         include_tools = set(include_tools or cls.registry.keys())
         exclude_tools = set(exclude_tools or [])
         include_servers = set(include_servers or [])
         exclude_servers = set(exclude_servers or [])
 
-        results = []
+        results: List[Dict[str, Any]] = []
 
         for name, tool in cls.registry.items():
             server = tool["server"]
@@ -493,20 +501,20 @@ class Tool:
     @classmethod
     def list_tools(
         cls,
-        include_tools: set[str] | None = None,
-        exclude_tools: set[str] | None = None,
-        include_servers: set[str] | None = None,
-        exclude_servers: set[str] | None = None,
+        include_tools: Set[str] | None = None,
+        exclude_tools: Set[str] | None = None,
+        include_servers: Set[str] | None = None,
+        exclude_servers: Set[str] | None = None,
         include_local: bool = True,
         include_mcp: bool = True,
-    ):
+    ) -> List[str]:
         cls._ensure_local_tools_loaded()
         include_tools = set(include_tools or cls.registry.keys())
         exclude_tools = set(exclude_tools or [])
         include_servers = set(include_servers or [])
         exclude_servers = set(exclude_servers or [])
 
-        results: list[str] = []
+        results: List[str] = []
         for name, tool in cls.registry.items():
             server = tool["server"]
             kind = tool.get("kind", "local")
@@ -535,9 +543,9 @@ class Tool:
     @classmethod
     def list_servers(
         cls,
-        include: set[str] | None = None,
-        exclude: set[str] | None = None,
-    ):
+        include: Set[str] | None = None,
+        exclude: Set[str] | None = None,
+    ) -> List[str]:
         cls._ensure_local_tools_loaded()
         servers = {t["server"] for t in cls.registry.values()}
         try:

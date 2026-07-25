@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Dict, List, Tuple
 from uuid import UUID
 
 from rapidfuzz import fuzz
@@ -31,7 +31,7 @@ def parse_entity_search_params(
     file_name_raw: str | None = None,
     threshold_raw: str | None,
     match_limit_raw: str | None,
-) -> tuple[GraphFilters, float, int]:
+) -> Tuple[GraphFilters, float, int]:
     filters = parse_graph_filters(
         entity_type_raw=entity_type_raw,
         file_name_raw=file_name_raw,
@@ -60,10 +60,10 @@ def parse_entity_search_params(
 
 
 def _base_entity_qs(
-    workspace_names: list[str],
-    entity_types: list[str] | None,
-    file_names: list[str] | None = None,
-    document_ids: list[UUID] | None = None,
+    workspace_names: List[str],
+    entity_types: List[str] | None,
+    file_names: List[str] | None = None,
+    document_ids: List[UUID] | None = None,
 ):
     qs = KnowledgeEntity.objects.filter(
         document__workspace__name__in=workspace_names,
@@ -77,7 +77,7 @@ def _base_entity_qs(
     return qs
 
 
-def _query_tokens(query: str) -> list[str]:
+def _query_tokens(query: str) -> List[str]:
     return [t for t in _TOKEN_RE.findall(query.lower()) if len(t) >= 2]
 
 
@@ -105,8 +105,8 @@ def score_entity_name(query: str, name: str) -> float:
 
 
 def _merge_entities(
-    into: dict[UUID, KnowledgeEntity],
-    entities: list[KnowledgeEntity],
+    into: Dict[UUID, KnowledgeEntity],
+    entities: List[KnowledgeEntity],
     *,
     cap: int,
 ) -> None:
@@ -118,14 +118,14 @@ def _merge_entities(
 
 
 def gather_entity_candidates(
-    workspace_names: list[str],
+    workspace_names: List[str],
     query: str,
-    entity_types: list[str] | None,
-    file_names: list[str] | None = None,
+    entity_types: List[str] | None,
+    file_names: List[str] | None = None,
     *,
-    document_ids: list[UUID] | None = None,
+    document_ids: List[UUID] | None = None,
     include_broad_sample: bool = True,
-) -> list[KnowledgeEntity]:
+) -> List[KnowledgeEntity]:
     """
   Build a candidate pool for fuzzy scoring.
 
@@ -142,7 +142,7 @@ def gather_entity_candidates(
     base = _base_entity_qs(
         workspace_names, entity_types, file_names, document_ids=document_ids
     )
-    merged: dict[UUID, KnowledgeEntity] = {}
+    merged: Dict[UUID, KnowledgeEntity] = {}
 
     if len(q) >= 2:
         _merge_entities(merged, list(base.filter(name__icontains=q)[:CANDIDATE_PREFETCH_LIMIT]), cap=CANDIDATE_PREFETCH_LIMIT)
@@ -185,15 +185,15 @@ def gather_entity_candidates(
 
 def fuzzy_match_entities(
     query: str,
-    workspace_names: list[str],
+    workspace_names: List[str],
     *,
     threshold: float = DEFAULT_FUZZY_THRESHOLD,
     match_limit: int = DEFAULT_MATCH_LIMIT,
-    entity_types: list[str] | None = None,
-    file_names: list[str] | None = None,
-    document_ids: list[UUID] | None = None,
-    entity_ids: list[UUID] | None = None,
-) -> list[dict[str, Any]]:
+    entity_types: List[str] | None = None,
+    file_names: List[str] | None = None,
+    document_ids: List[UUID] | None = None,
+    entity_ids: List[UUID] | None = None,
+) -> List[Dict[str, Any]]:
     q = query.strip()
     if not q or not workspace_names:
         return []
@@ -212,7 +212,7 @@ def fuzzy_match_entities(
     scored = _rank_entities(q, candidates, threshold=threshold)
     top = scored[:match_limit]
 
-    results: list[dict[str, Any]] = []
+    results: List[Dict[str, Any]] = []
     for entity, score in top:
         row = kg_graph.serialize_graph_node(entity)
         row["score"] = round(score, 4)
@@ -223,11 +223,11 @@ def fuzzy_match_entities(
 
 def _rank_entities(
     query: str,
-    candidates: list[KnowledgeEntity],
+    candidates: List[KnowledgeEntity],
     *,
     threshold: float,
-) -> list[tuple[KnowledgeEntity, float]]:
-    scored: list[tuple[KnowledgeEntity, float]] = []
+) -> List[Tuple[KnowledgeEntity, float]]:
+    scored: List[Tuple[KnowledgeEntity, float]] = []
     for entity in candidates:
         score = score_entity_name(query, entity.name or "")
         if score >= threshold:
@@ -243,7 +243,7 @@ def search_workspace_by_name(
     *,
     threshold: float,
     match_limit: int,
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
     matches = fuzzy_match_entities(
         query,
         [workspace.name],
@@ -281,10 +281,10 @@ def _group_search_result_row(
     *,
     threshold: float,
     match_limit: int,
-    file_names: list[str] | None = None,
-    document_ids: list[UUID] | None = None,
-    entity_ids: list[UUID] | None = None,
-) -> dict[str, Any]:
+    file_names: List[str] | None = None,
+    document_ids: List[UUID] | None = None,
+    entity_ids: List[UUID] | None = None,
+) -> Dict[str, Any]:
     matches = fuzzy_match_entities(
         query,
         [workspace.name],
@@ -319,16 +319,24 @@ def search_group_workspaces_by_name(
     *,
     threshold: float,
     match_limit: int,
-) -> dict[str, Any]:
-    scope = resolve_group_search_scope(group_name)
+    actor=None,
+    owner_id: int | None = None,
+) -> Dict[str, Any]:
+    scope = resolve_group_search_scope(
+        group_name, actor=actor, owner_id=owner_id
+    )
     graph_filters_dict = graph_filters.as_response_dict()
     graph_filters_dict["threshold"] = threshold
     graph_filters_dict["match_limit"] = match_limit
 
-    results: list[dict[str, Any]] = []
+    results: List[Dict[str, Any]] = []
 
     if scope.tag == GroupTag.WORKSPACE:
-        workspaces = list(get_group_workspaces_qs(group_name).order_by("name"))
+        workspaces = list(
+            get_group_workspaces_qs(
+                group_name, actor=actor, owner_id=owner_id
+            ).order_by("name")
+        )
         for ws in workspaces:
             results.append(
                 _group_search_result_row(
@@ -341,13 +349,17 @@ def search_group_workspaces_by_name(
             )
 
     elif scope.tag == GroupTag.FILES:
-        doc_ids_by_ws: dict[str, list[UUID]] = {}
+        doc_ids_by_ws_id: Dict[int, List[UUID]] = {}
+        workspace_by_id: Dict[int, Workspace] = {}
         for doc in Document.objects.filter(id__in=scope.document_ids).select_related(
             "workspace"
         ):
-            doc_ids_by_ws.setdefault(doc.workspace.name, []).append(doc.id)
-        for ws_name, doc_ids in sorted(doc_ids_by_ws.items()):
-            workspace = Workspace.objects.get(name=ws_name)
+            ws = doc.workspace
+            workspace_by_id[ws.pk] = ws
+            doc_ids_by_ws_id.setdefault(ws.pk, []).append(doc.id)
+        for ws_id in sorted(doc_ids_by_ws_id):
+            workspace = workspace_by_id[ws_id]
+            doc_ids = doc_ids_by_ws_id[ws_id]
             member_file_names = list(
                 Document.objects.filter(id__in=doc_ids).values_list(
                     "file_name", flat=True
@@ -371,15 +383,16 @@ def search_group_workspaces_by_name(
             )
 
     elif scope.tag == GroupTag.ENTITY:
-        entity_ids_by_ws: dict[str, list[UUID]] = {}
+        entity_ids_by_ws_id: Dict[int, List[UUID]] = {}
+        workspace_by_id: Dict[int, Workspace] = {}
         for entity in KnowledgeEntity.objects.filter(
             id__in=scope.entity_ids
         ).select_related("document__workspace"):
-            entity_ids_by_ws.setdefault(entity.document.workspace.name, []).append(
-                entity.id
-            )
-        for ws_name, ws_entity_ids in sorted(entity_ids_by_ws.items()):
-            workspace = Workspace.objects.get(name=ws_name)
+            ws = entity.document.workspace
+            workspace_by_id[ws.pk] = ws
+            entity_ids_by_ws_id.setdefault(ws.pk, []).append(entity.id)
+        for ws_id in sorted(entity_ids_by_ws_id):
+            workspace = workspace_by_id[ws_id]
             results.append(
                 _group_search_result_row(
                     workspace,
@@ -387,24 +400,26 @@ def search_group_workspaces_by_name(
                     graph_filters,
                     threshold=threshold,
                     match_limit=match_limit,
-                    entity_ids=ws_entity_ids,
+                    entity_ids=entity_ids_by_ws_id[ws_id],
                 )
             )
 
     else:
-        relation_ids_by_ws: dict[str, list[UUID]] = {}
-        endpoint_ids_by_ws: dict[str, list[UUID]] = {}
+        relation_ids_by_ws_id: Dict[int, List[UUID]] = {}
+        endpoint_ids_by_ws_id: Dict[int, List[UUID]] = {}
+        workspace_by_id: Dict[int, Workspace] = {}
         for relation in KnowledgeRelation.objects.filter(
             id__in=scope.relation_ids
         ).select_related("document__workspace"):
-            ws_name = relation.document.workspace.name
-            relation_ids_by_ws.setdefault(ws_name, []).append(relation.id)
-            endpoint_ids_by_ws.setdefault(ws_name, []).extend(
+            ws = relation.document.workspace
+            workspace_by_id[ws.pk] = ws
+            relation_ids_by_ws_id.setdefault(ws.pk, []).append(relation.id)
+            endpoint_ids_by_ws_id.setdefault(ws.pk, []).extend(
                 [relation.source_id, relation.target_id]
             )
-        for ws_name, relation_ids in sorted(relation_ids_by_ws.items()):
-            workspace = Workspace.objects.get(name=ws_name)
-            endpoint_ids = list(set(endpoint_ids_by_ws.get(ws_name, [])))
+        for ws_id in sorted(relation_ids_by_ws_id):
+            workspace = workspace_by_id[ws_id]
+            endpoint_ids = list(set(endpoint_ids_by_ws_id.get(ws_id, [])))
             results.append(
                 _group_search_result_row(
                     workspace,
@@ -432,7 +447,7 @@ def search_by_name_for_workspace_name(
     *,
     threshold: float,
     match_limit: int,
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
     workspace = Workspace.objects.get(name=name)
     return search_workspace_by_name(
         workspace,

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any, Dict, List
 
 import uuid
 from dataclasses import dataclass
@@ -19,10 +20,10 @@ from nodepoint.models import (
 class GroupSearchScope:
     group_name: str
     tag: str
-    workspace_names: list[str]
-    document_ids: list[uuid.UUID]
-    entity_ids: list[uuid.UUID]
-    relation_ids: list[uuid.UUID]
+    workspace_names: List[str]
+    document_ids: List[uuid.UUID]
+    entity_ids: List[uuid.UUID]
+    relation_ids: List[uuid.UUID]
 
     @property
     def is_workspace_tag(self) -> bool:
@@ -122,10 +123,19 @@ def build_group_search_scope(group: WorkspaceGroup) -> GroupSearchScope:
     )
 
 
-def resolve_group_search_scope(group_name: str) -> GroupSearchScope:
-    from nodepoint.services import workspace_group as group_svc
+def resolve_group_search_scope(
+    group_name: str,
+    *,
+    actor=None,
+    owner_id: int | None = None,
+    group: WorkspaceGroup | None = None,
+) -> GroupSearchScope:
+    if group is None:
+        from nodepoint.services import workspace_group as group_svc
 
-    group = group_svc.get_group_by_name(group_name)
+        group = group_svc.get_group_by_name(
+            group_name, actor=actor, owner_id=owner_id
+        )
     return build_group_search_scope(group)
 
 
@@ -139,16 +149,16 @@ def resolve_active_group_search_scope() -> GroupSearchScope | None:
 
 
 def filter_records_by_scope(
-    records: list[dict],
+    records: List[Dict[str, Any]],
     scope: GroupSearchScope,
-) -> list[dict]:
+) -> List[Dict[str, Any]]:
     if scope.is_workspace_tag:
         return records
 
     allowed_docs = {str(doc_id) for doc_id in scope.document_ids}
     allowed_entities = {str(entity_id) for entity_id in scope.entity_ids}
     allowed_relations = {str(relation_id) for relation_id in scope.relation_ids}
-    filtered: list[dict] = []
+    filtered: List[Dict[str, Any]] = []
 
     for rec in records:
         kind = rec.get("kind")
@@ -186,7 +196,7 @@ def filter_records_by_scope(
     return filtered
 
 
-def _document_has_entity_members(document_id: str, entity_ids: list[uuid.UUID]) -> bool:
+def _document_has_entity_members(document_id: str, entity_ids: List[uuid.UUID]) -> bool:
     from nodepoint.models import KnowledgeEntity
 
     if not entity_ids:
@@ -218,5 +228,5 @@ def _document_has_allowed_relation(document_id: str, scope: GroupSearchScope) ->
     ).exists()
 
 
-def record_allowed_in_scope(rec: dict, scope: GroupSearchScope) -> bool:
+def record_allowed_in_scope(rec: Dict[str, Any], scope: GroupSearchScope) -> bool:
     return bool(filter_records_by_scope([rec], scope))

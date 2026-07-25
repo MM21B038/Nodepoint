@@ -1,11 +1,11 @@
 from pydantic import BaseModel, ConfigDict, Field
-from typing import List, Any
+from typing import List, Any, Dict
 
 class Entity(BaseModel):
     model_config = ConfigDict(extra="allow")
     name: str = Field(..., description="The name of the entity.")
     type: str = Field(..., description="The type of the entity.")
-    attributes: dict[str, Any] = Field(..., description="Attributes of the entity.")
+    attributes: Dict[str, Any] = Field(..., description="Attributes of the entity.")
 
 class Entities(BaseModel):
     model_config = ConfigDict(extra="allow")

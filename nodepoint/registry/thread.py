@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Iterable, List, Optional, Union
+from typing import Any, Iterable, List, Optional, Union, Dict
 
 import tiktoken
 from pydantic import BaseModel
@@ -49,8 +49,8 @@ class Thread:
     def __rshift__(self, context: Optional[str] = None) -> "Thread":
         return self.add_branch(context)
 
-    def to_json(self) -> List[dict[str, Any]]:
-        result: List[dict[str, Any]] = []
+    def to_json(self) -> List[Dict[str, Any]]:
+        result: List[Dict[str, Any]] = []
         for msg in self.thread:
             if isinstance(msg, Message):
                 result.append({"role": msg.role, "content": msg.content})
@@ -85,7 +85,7 @@ class Thread:
 
     def addAssistant(self, message: Any) -> None:
         if isinstance(message, str):
-            payload: dict[str, Any] = {"content": message}
+            payload: Dict[str, Any] = {"content": message}
         elif isinstance(message, dict):
             payload = message
         elif isinstance(message, BaseModel):
@@ -181,7 +181,7 @@ class Thread:
 
     def _count_tokens_openai_style(
         self,
-        thread: list[dict[str, Any]],
+        thread: List[Dict[str, Any]],
         model: Optional[str],
     ) -> int:
         if model:

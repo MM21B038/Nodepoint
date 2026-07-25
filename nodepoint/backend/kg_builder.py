@@ -1,10 +1,16 @@
+from __future__ import annotations
+
+from typing import Any, Dict, List, Set, Tuple
 import logging
 from collections import defaultdict
+from uuid import UUID
+
 from nodepoint.agent.schema import AgentParseEmptyResult, AgentParseSuccessResult, AgentParseErrorResult
 from nodepoint.registry import Thread, Schema, Prompt
 from nodepoint.registry.dynamic_schema import Entities
+from nodepoint.registry.schema import Relation
 from nodepoint.agent.agent import Agent
-from nodepoint.models import DocumentChunk, KnowledgeEntity, KnowledgeRelation
+from nodepoint.models import Document, DocumentChunk, KnowledgeEntity, KnowledgeRelation
 import tiktoken
 
 logger = logging.getLogger(__name__)
@@ -14,8 +20,9 @@ TRIALS = 3
 CHUNK_SIZE = 1000
 OVERLAP = 100
 
-def split_doc(doc: str) -> list[str]:
-    chunks = []
+
+def split_doc(doc: str) -> List[str]:
+    chunks: List[str] = []
     encoding = tiktoken.get_encoding("o200k_harmony")
     tokens = encoding.encode(doc)
     for i in range(0, len(tokens), CHUNK_SIZE - OVERLAP):
@@ -24,8 +31,9 @@ def split_doc(doc: str) -> list[str]:
         chunks.append(chunk)
     return chunks
 
-def get_entity_types() -> dict[str, str]:
-    entity_types = defaultdict(str)
+
+def get_entity_types() -> Dict[str, str]:
+    entity_types: Dict[str, str] = defaultdict(str)
     entity_types["PER"] = "Name of Individuals (e.g., John Doe, Jane Smith) or System Users (e.g., @username, root, kali)"
     entity_types["ORG"] = "Name of Organizations (e.g., Google, Microsoft, OpenAI)"
     entity_types["LOC"] = "Name of Locations (e.g., New York, Paris, Mount Everest)"
@@ -42,14 +50,16 @@ def get_entity_types() -> dict[str, str]:
     return entity_types
 
 
-def entity_types_as_md_table(entity_types: dict[str, str]) -> str:
+def entity_types_as_md_table(entity_types: Dict[str, str]) -> str:
     table = "| Type | Description |\n|------|-------------|\n"
     for type_, description in entity_types.items():
         table += f"| {type_} | {description} |\n"
     return table
 
 
-def extract_entities(doc: str, entity_types: set, md_entity_table: str, agent: Agent) -> list:
+def extract_entities(
+    doc: str, entity_types: Set[str], md_entity_table: str, agent: Agent
+) -> List[Any]:
     trial = 0
     thread = Thread()
     thread.addSystem(Prompt["entity_extractor_system"])
@@ -76,8 +86,9 @@ def extract_entities(doc: str, entity_types: set, md_entity_table: str, agent: A
             thread.addUser(response.error)
         trial += 1
     return []
-    
-def extract_relations(doc: str, entities: list[str], agent: Agent) -> list:
+
+
+def extract_relations(doc: str, entities: List[str], agent: Agent) -> List[Relation]:
     trial = 0
     thread = Thread()
     thread.addSystem(Prompt["relation_extractor_system"])
@@ -101,7 +112,9 @@ def extract_relations(doc: str, entities: list[str], agent: Agent) -> list:
     return []
 
 
-def extract_knowledge_graph(doc: str, agent: Agent | None = None) -> Schema.KnowledgeGraph:
+def extract_knowledge_graph(
+    doc: str, agent: Agent | None = None
+) -> Tuple[List[Any], List[Relation]]:
     owned_agent = agent is None
     if agent is None:
         agent = Agent()
@@ -122,19 +135,19 @@ def extract_knowledge_graph(doc: str, agent: Agent | None = None) -> Schema.Know
 
 
 def ingest_knowledge_graph_for_chunk(
-    doc,
+    doc: Document,
     chunk: DocumentChunk,
-    entities,
-    relations,
-) -> tuple[bool, list, list]:
-    entity_ids: list = []
-    relation_ids: list = []
+    entities: List[Any],
+    relations: List[Any],
+) -> Tuple[bool, List[UUID], List[UUID]]:
+    entity_ids: List[UUID] = []
+    relation_ids: List[UUID] = []
 
     try:
         KnowledgeRelation.objects.filter(chunk=chunk).delete()
         KnowledgeEntity.objects.filter(chunk=chunk).delete()
 
-        entity_by_name: dict[str, KnowledgeEntity] = {}
+        entity_by_name: Dict[str, KnowledgeEntity] = {}
         for entity in entities:
             row = KnowledgeEntity.objects.create(
                 document=doc,
@@ -174,16 +187,18 @@ def ingest_knowledge_graph_for_chunk(
         return False, entity_ids, relation_ids
 
 
-def ingest_knowledge_graph(doc, entities, relations) -> tuple[bool, list, list]:
+def ingest_knowledge_graph(
+    doc: Document, entities: List[Any], relations: List[Any]
+) -> Tuple[bool, List[UUID], List[UUID]]:
     """Legacy whole-document ingest (deletes all KG rows for the document)."""
-    entity_ids: list = []
-    relation_ids: list = []
+    entity_ids: List[UUID] = []
+    relation_ids: List[UUID] = []
 
     try:
         KnowledgeRelation.objects.filter(document=doc).delete()
         KnowledgeEntity.objects.filter(document=doc).delete()
 
-        entity_by_name: dict[str, KnowledgeEntity] = {}
+        entity_by_name: Dict[str, KnowledgeEntity] = {}
         for entity in entities:
             row = KnowledgeEntity.objects.create(
                 document=doc,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, Dict, List
 
 from nodepoint.models import DocumentChunk, KnowledgeEntity, KnowledgeRelation
 from nodepoint.services.chat_context import (
@@ -19,12 +19,12 @@ from nodepoint.services.kg_records import (
 )
 
 
-def resolve_hits(hits: list[dict]) -> list[dict[str, Any]]:
+def resolve_hits(hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Load entity/relation/chunk rows for Qdrant hits (point id = Postgres PK)."""
-    entity_ids: list[uuid.UUID] = []
-    relation_ids: list[uuid.UUID] = []
-    chunk_ids: list[uuid.UUID] = []
-    scores: dict[str, float] = {}
+    entity_ids: List[uuid.UUID] = []
+    relation_ids: List[uuid.UUID] = []
+    chunk_ids: List[uuid.UUID] = []
+    scores: Dict[str, float] = {}
 
     for hit in hits:
         hit_id = hit.get("id")
@@ -43,7 +43,7 @@ def resolve_hits(hits: list[dict]) -> list[dict[str, Any]]:
         else:
             entity_ids.append(uid)
 
-    records: list[dict[str, Any]] = []
+    records: List[Dict[str, Any]] = []
 
     if entity_ids:
         for entity in KnowledgeEntity.objects.filter(id__in=entity_ids).select_related(
@@ -78,9 +78,9 @@ def resolve_hits(hits: list[dict]) -> list[dict[str, Any]]:
 
 
 def _filter_records_by_workspace(
-    records: list[dict[str, Any]],
-    allowed_workspaces: list[str] | None,
-) -> list[dict[str, Any]]:
+    records: List[Dict[str, Any]],
+    allowed_workspaces: List[str] | None,
+) -> List[Dict[str, Any]]:
     if not allowed_workspaces:
         return records
     allowed = set(allowed_workspaces)
@@ -88,10 +88,10 @@ def _filter_records_by_workspace(
 
 
 def resolve_records_by_ids(
-    record_ids: list[str],
+    record_ids: List[str],
     *,
-    allowed_workspaces: list[str] | None = None,
-) -> list[dict[str, Any]]:
+    allowed_workspaces: List[str] | None = None,
+) -> List[Dict[str, Any]]:
     if not record_ids:
         return []
     hits = [{"id": rid, "type": None, "score": 0.0, "payload": {}} for rid in record_ids]
@@ -101,7 +101,7 @@ def resolve_records_by_ids(
     return _filter_records_by_workspace(records, allowed_workspaces)
 
 
-def merge_with_session_hits(new_hit_ids: list[str]) -> list[str]:
+def merge_with_session_hits(new_hit_ids: List[str]) -> List[str]:
     accumulated = list(get_accumulated_search_ids())
     seen = set(accumulated)
     for rid in new_hit_ids:
@@ -111,7 +111,7 @@ def merge_with_session_hits(new_hit_ids: list[str]) -> list[str]:
     return accumulated
 
 
-def format_search_document(records: list[dict[str, Any]], query: str) -> str:
+def format_search_document(records: List[Dict[str, Any]], query: str) -> str:
     if not records:
         return (
             f'# Knowledge search: "{query}"\n\n'
@@ -163,13 +163,13 @@ def format_search_document(records: list[dict[str, Any]], query: str) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def build_search_document(query: str, hits: list[dict]) -> str:
+def build_search_document(query: str, hits: List[Dict[str, Any]]) -> str:
     allowed_workspaces = resolve_search_workspace_names()
     new_ids = [str(h["id"]) for h in hits if h.get("id")]
     all_ids = merge_with_session_hits(new_ids)
     record_search_ids(new_ids)
 
-    records_by_id: dict[str, dict[str, Any]] = {}
+    records_by_id: Dict[str, Dict[str, Any]] = {}
     for rec in resolve_records_by_ids(all_ids, allowed_workspaces=allowed_workspaces):
         records_by_id[rec["id"]] = rec
 
@@ -183,7 +183,7 @@ def build_search_document(query: str, hits: list[dict]) -> str:
 
 def build_search_document_from_records(
     query: str,
-    records: list[dict[str, Any]],
+    records: List[Dict[str, Any]],
     *,
     merge_session: bool = True,
 ) -> str:
@@ -192,7 +192,7 @@ def build_search_document_from_records(
         new_ids = [r["id"] for r in records if r.get("id")]
         all_ids = merge_with_session_hits(new_ids)
         record_search_ids(new_ids)
-        records_by_id: dict[str, dict[str, Any]] = {}
+        records_by_id: Dict[str, Dict[str, Any]] = {}
         for rec in resolve_records_by_ids(all_ids, allowed_workspaces=allowed_workspaces):
             records_by_id[rec["id"]] = rec
         for rec in _filter_records_by_workspace(records, allowed_workspaces):

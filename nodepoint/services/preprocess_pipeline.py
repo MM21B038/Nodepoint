@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import Any, Dict, List
 from uuid import UUID
 
 import django_rq
@@ -94,9 +94,12 @@ def run_prepare_document(doc_id: UUID) -> None:
 
 def run_chunk_preprocess_batch(
     workspace_name: str | None = None,
-    document_ids: list[UUID] | None = None,
+    document_ids: List[UUID] | None = None,
 ) -> int:
     """Enqueue process_chunk jobs without blocking the orchestrator worker."""
+    from nodepoint.services.preprocess_recovery import recover_orphaned_chunks
+
+    recover_orphaned_chunks(workspace=workspace_name)
     count = enqueue_chunks_for_documents(
         document_ids=document_ids,
         workspace_name=workspace_name,
@@ -187,7 +190,7 @@ def run_chunk_mongo_repair_batch(workspace_name: str | None = None) -> int:
         release_workspace_pipeline_lock(workspace_name)
 
 
-def schedule_workspace_pipeline_tail(workspace_name: str | None) -> dict[str, Any]:
+def schedule_workspace_pipeline_tail(workspace_name: str | None) -> Dict[str, Any]:
     """
     Coalesced workspace tail: vector catch-up sweep then mongo repair.
 
@@ -226,7 +229,7 @@ def schedule_workspace_pipeline_tail(workspace_name: str | None) -> dict[str, An
     }
 
 
-def run_upload_failed_catchup_batch(exclude_document_id: UUID | None = None) -> dict[str, int]:
+def run_upload_failed_catchup_batch(exclude_document_id: UUID | None = None) -> Dict[str, int]:
     """
     Retry failed preprocess work in every workspace (used after upload).
 
@@ -247,7 +250,7 @@ def run_upload_failed_catchup_batch(exclude_document_id: UUID | None = None) -> 
 def _enqueue_upload_preprocess(
     uploaded_document_id: UUID,
     workspace_name: str | None,
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
     queue = _orchestrator_queue()
     job_kwargs = {"job_timeout": _orchestrator_timeout(), "retry": _RETRY}
 
@@ -299,7 +302,7 @@ def _enqueue_workspace_preprocess(
     workspace_name: str | None,
     *,
     orchestrator_queue_name: str | None = None,
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
     if workspace_name and not try_acquire_workspace_pipeline_lock(workspace_name):
         message = f"Preprocess pipeline already queued (workspace={workspace_name})"
         logger.info(message)
@@ -364,7 +367,7 @@ def enqueue_preprocess_pipeline(
     workspace_name: str | None = None,
     *,
     orchestrator_queue_name: str | None = None,
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
     if uploaded_document_id is not None:
         return _enqueue_upload_preprocess(uploaded_document_id, workspace_name)
     return _enqueue_workspace_preprocess(
@@ -373,9 +376,17 @@ def enqueue_preprocess_pipeline(
     )
 
 
-def _other_workspaces_needing_preprocess(exclude: str) -> list[str]:
-    names: list[str] = []
-    for ws in Workspace.objects.order_by("name"):
+def _other_workspaces_needing_preprocess(
+    exclude: str, *, actor=None
+) -> List[str]:
+    from nodepoint.services.queue_status import _allowed_workspace_names_for_actor
+
+    allowed = _allowed_workspace_names_for_actor(actor)
+    names: List[str] = []
+    qs = Workspace.objects.order_by("name")
+    if allowed is not None:
+        qs = qs.filter(name__in=allowed)
+    for ws in qs:
         if ws.name == exclude:
             continue
         if workspace_needs_preprocess(ws):
@@ -388,7 +399,8 @@ def enqueue_priority_workspace_preprocess(
     *,
     priority: bool = False,
     include_other_workspaces: bool = False,
-) -> dict[str, Any]:
+    actor=None,
+) -> Dict[str, Any]:
     """
     POST preprocess: prioritize one workspace and optionally queue the rest.
 
@@ -403,14 +415,16 @@ def enqueue_priority_workspace_preprocess(
         orchestrator_queue_name=priority_queue,
     )
 
-    other_workspaces: list[dict[str, Any]] = []
+    other_workspaces: List[Dict[str, Any]] = []
     if include_other_workspaces:
-        for other_name in _other_workspaces_needing_preprocess(workspace_name):
+        for other_name in _other_workspaces_needing_preprocess(
+            workspace_name, actor=actor
+        ):
             result = _enqueue_workspace_preprocess(
                 other_name,
                 orchestrator_queue_name=background_queue,
             )
-            entry: dict[str, Any] = {
+            entry: Dict[str, Any] = {
                 "workspace": other_name,
                 "queued": not result.get("coalesced"),
                 "coalesced": bool(result.get("coalesced")),

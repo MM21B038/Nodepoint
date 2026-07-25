@@ -30,6 +30,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+      start_period: 60s
 
   redis:
     image: redis:7-alpine
@@ -135,12 +136,9 @@ services:
         condition: service_healthy
     command:
       [
-        "/app/.venv/bin/python",
-        "manage.py",
-        "rqworker",
-        "high",
-        "orchestrator",
-        "low",
+        "/bin/sh",
+        "-c",
+        "if [ \"$${PREPROCESS_RECOVERY_ON_STARTUP:-1}\" != '0' ]; then /app/.venv/bin/python manage.py recover_preprocess --force; fi && exec /app/.venv/bin/python manage.py rqworker high orchestrator low",
       ]
 
   worker:

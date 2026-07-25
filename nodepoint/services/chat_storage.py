@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, Dict, List, Tuple
 
 from django.conf import settings
 from django.db import transaction
@@ -17,7 +17,11 @@ from nodepoint.models import (
 from nodepoint.registry import Thread
 
 
-def _create_conversation_with_root(workspace: Workspace) -> tuple[Conversation, ChatBranch]:
+class SessionNotFoundError(Exception):
+    """Raised when a session id is missing or not owned by the workspace."""
+
+
+def _create_conversation_with_root(workspace: Workspace) -> Tuple[Conversation, ChatBranch]:
     system_prompt = settings.CHAT_DEFAULT_SYSTEM
     conversation = Conversation.objects.create(
         workspace=workspace,
@@ -44,7 +48,7 @@ def get_workspace_chat(workspace: Workspace) -> Conversation | None:
     return Conversation.objects.filter(workspace=workspace).first()
 
 
-def get_or_create_workspace_chat(workspace: Workspace) -> tuple[Conversation, ChatBranch]:
+def get_or_create_workspace_chat(workspace: Workspace) -> Tuple[Conversation, ChatBranch]:
     conversation = get_workspace_chat(workspace)
     if conversation is not None:
         return conversation, get_root_branch(conversation.id)
@@ -55,14 +59,121 @@ def get_or_create_workspace_chat(workspace: Workspace) -> tuple[Conversation, Ch
         return _create_conversation_with_root(workspace)
 
 
-def clear_workspace_chat(workspace: Workspace) -> tuple[Conversation, ChatBranch]:
+def clear_workspace_chat(workspace: Workspace) -> Tuple[Conversation, ChatBranch]:
     Conversation.objects.filter(workspace=workspace).delete()
     return get_or_create_workspace_chat(workspace)
 
 
-def create_conversation(workspace: Workspace) -> tuple[Conversation, ChatBranch]:
+def create_conversation(workspace: Workspace) -> Tuple[Conversation, ChatBranch]:
     """Backward-compatible alias; returns existing chat if present."""
     return get_or_create_workspace_chat(workspace)
+
+
+def _session_message_count(conversation_id: uuid.UUID) -> int:
+    try:
+        root = get_root_branch(conversation_id)
+    except ChatBranch.DoesNotExist:
+        return 0
+    return ChatMessage.objects.filter(branch=root).count()
+
+
+def serialize_session_summary(conversation: Conversation) -> Dict[str, Any]:
+    return {
+        "session_id": str(conversation.id),
+        "title": conversation.title,
+        "created_at": conversation.created_at,
+        "updated_at": conversation.updated_at,
+        "message_count": _session_message_count(conversation.id),
+    }
+
+
+def list_sessions(workspace: Workspace) -> List[Dict[str, Any]]:
+    conversations = Conversation.objects.filter(workspace=workspace).order_by(
+        "-updated_at"
+    )
+    return [serialize_session_summary(c) for c in conversations]
+
+
+def _create_session_with_title(
+    workspace: Workspace, title: str
+) -> Tuple[Conversation, ChatBranch]:
+    system_prompt = settings.CHAT_DEFAULT_SYSTEM
+    conversation = Conversation.objects.create(
+        workspace=workspace,
+        title=title or "",
+        system_prompt=system_prompt,
+        compressions=[],
+    )
+    root = ChatBranch.objects.create(
+        conversation=conversation,
+        is_root=True,
+        label="root",
+    )
+    if system_prompt:
+        ChatMessage.objects.create(
+            branch=root,
+            sequence=0,
+            role=ChatMessageRole.SYSTEM,
+            content=system_prompt,
+        )
+    return conversation, root
+
+
+def create_session(
+    workspace: Workspace, *, title: str = ""
+) -> Tuple[Conversation, ChatBranch]:
+    return _create_session_with_title(workspace, title)
+
+
+def get_session(workspace: Workspace, session_id: uuid.UUID) -> Conversation:
+    try:
+        return Conversation.objects.get(id=session_id, workspace=workspace)
+    except Conversation.DoesNotExist as exc:
+        raise SessionNotFoundError from exc
+
+
+def update_session_title(
+    workspace: Workspace, session_id: uuid.UUID, *, title: str
+) -> Conversation:
+    conversation = get_session(workspace, session_id)
+    conversation.title = title
+    conversation.save(update_fields=["title", "updated_at"])
+    return conversation
+
+
+def clear_session(session_id: uuid.UUID) -> Tuple[Conversation, ChatBranch]:
+    conversation = Conversation.objects.select_related("workspace").get(id=session_id)
+    system_prompt = conversation.system_prompt or settings.CHAT_DEFAULT_SYSTEM
+    with transaction.atomic():
+        ChatBranch.objects.filter(conversation_id=session_id).delete()
+        conversation.compressions = []
+        conversation.system_prompt = system_prompt
+        conversation.save(update_fields=["compressions", "system_prompt", "updated_at"])
+        root = ChatBranch.objects.create(
+            conversation=conversation,
+            is_root=True,
+            label="root",
+        )
+        if system_prompt:
+            ChatMessage.objects.create(
+                branch=root,
+                sequence=0,
+                role=ChatMessageRole.SYSTEM,
+                content=system_prompt,
+            )
+    return conversation, root
+
+
+def delete_session(session_id: uuid.UUID) -> None:
+    Conversation.objects.filter(id=session_id).delete()
+
+
+def build_empty_thread(system_prompt: str | None = None) -> Thread:
+    thread = Thread()
+    prompt = system_prompt if system_prompt is not None else settings.CHAT_DEFAULT_SYSTEM
+    if prompt:
+        thread.addSystem(prompt)
+    return thread
 
 
 def get_root_branch(conversation_id: uuid.UUID) -> ChatBranch:
@@ -83,7 +194,7 @@ def get_active_branch(conversation_id: uuid.UUID) -> ChatBranch:
         branch = child
 
 
-def list_visible_branches(conversation_id: uuid.UUID) -> list[ChatBranch]:
+def list_visible_branches(conversation_id: uuid.UUID) -> List[ChatBranch]:
     return list(
         ChatBranch.objects.filter(
             conversation_id=conversation_id, is_internal=False
@@ -91,42 +202,40 @@ def list_visible_branches(conversation_id: uuid.UUID) -> list[ChatBranch]:
     )
 
 
-def workspace_chat_summary(workspace: Workspace) -> dict[str, Any]:
-    conversation = get_workspace_chat(workspace)
-    if conversation is None:
-        return {
-            "workspace": workspace.name,
-            "updated_at": None,
-            "message_count": 0,
-        }
-    try:
-        root = get_root_branch(conversation.id)
-        message_count = ChatMessage.objects.filter(branch=root).count()
-    except ChatBranch.DoesNotExist:
-        message_count = 0
+def workspace_chat_summary(workspace: Workspace) -> Dict[str, Any]:
+    sessions = list_sessions(workspace)
     return {
         "workspace": workspace.name,
-        "updated_at": conversation.updated_at,
-        "message_count": message_count,
+        "sessions": sessions,
     }
 
 
-def list_chat_summary_for_workspace(workspace: Workspace) -> dict[str, Any]:
+def list_chat_summary_for_workspace(workspace: Workspace) -> Dict[str, Any]:
     return workspace_chat_summary(workspace)
 
 
-def list_chat_summary_for_group(group_name: str) -> dict[str, Any]:
+def list_chat_summary_for_group(
+    group_name: str,
+    *,
+    actor=None,
+    owner_id: int | None = None,
+) -> Dict[str, Any]:
     from nodepoint.enums import GroupTag
     from nodepoint.services.group_scope import resolve_group_search_scope
     from nodepoint.services.workspace_group import (
         get_group_by_name,
         get_or_create_group_chat_workspace,
+        get_group_workspaces_qs,
     )
 
-    group = get_group_by_name(group_name)
-    scope = resolve_group_search_scope(group_name)
-    chat_workspace = get_or_create_group_chat_workspace(group_name)
-    payload: dict[str, Any] = {
+    group = get_group_by_name(group_name, actor=actor, owner_id=owner_id)
+    scope = resolve_group_search_scope(
+        group_name, actor=actor, owner_id=owner_id, group=group
+    )
+    chat_workspace = get_or_create_group_chat_workspace(
+        group_name, actor=actor, owner_id=owner_id
+    )
+    payload: Dict[str, Any] = {
         "group": group_name,
         "tag": group.tag,
         "member_count": len(scope.document_ids)
@@ -136,28 +245,31 @@ def list_chat_summary_for_group(group_name: str) -> dict[str, Any]:
         else len(scope.relation_ids)
         if group.tag == GroupTag.RELATION
         else len(scope.workspace_names),
-        "group_chat": workspace_chat_summary(chat_workspace),
+        "group_chat": {
+            "workspace": chat_workspace.name,
+            "sessions": list_sessions(chat_workspace),
+        },
     }
     if group.tag == GroupTag.WORKSPACE:
-        from nodepoint.services.workspace_group import get_group_workspaces_qs
-
-        workspaces = get_group_workspaces_qs(group_name).order_by("name")
+        workspaces = get_group_workspaces_qs(
+            group_name, actor=actor, owner_id=owner_id
+        ).order_by("name")
         payload["workspaces"] = [workspace_chat_summary(ws) for ws in workspaces]
     return payload
 
 
-def load_root_messages(conversation_id: uuid.UUID) -> list[ChatMessage]:
+def load_root_messages(conversation_id: uuid.UUID) -> List[ChatMessage]:
     root = get_root_branch(conversation_id)
     return list(ChatMessage.objects.filter(branch=root).order_by("sequence"))
 
 
-def list_branches(conversation_id: uuid.UUID) -> list[ChatBranch]:
+def list_branches(conversation_id: uuid.UUID) -> List[ChatBranch]:
     return list(
         ChatBranch.objects.filter(conversation_id=conversation_id).order_by("created_at")
     )
 
 
-def load_branch_messages(branch_id: uuid.UUID) -> list[ChatMessage]:
+def load_branch_messages(branch_id: uuid.UUID) -> List[ChatMessage]:
     return list(ChatMessage.objects.filter(branch_id=branch_id).order_by("sequence"))
 
 
@@ -184,7 +296,7 @@ def append_message(
     role: str,
     content: str = "",
     reasoning_content: str | None = None,
-    tool_calls: list | dict | None = None,
+    tool_calls: List[Any] | Dict[str, Any] | None = None,
     tool_call_id: str | None = None,
     tool_name: str | None = None,
 ) -> ChatMessage:
@@ -207,7 +319,7 @@ def append_message_visible(
     role: str,
     content: str = "",
     reasoning_content: str | None = None,
-    tool_calls: list | dict | None = None,
+    tool_calls: List[Any] | Dict[str, Any] | None = None,
     tool_call_id: str | None = None,
     tool_name: str | None = None,
 ) -> ChatMessage:
@@ -277,7 +389,7 @@ def sync_visible_messages_to_root(
         root_keys.add(key)
 
 
-def load_thread(branch_id: uuid.UUID) -> tuple[Thread, ChatBranch, Conversation]:
+def load_thread(branch_id: uuid.UUID) -> Tuple[Thread, ChatBranch, Conversation]:
     branch = ChatBranch.objects.select_related("conversation").get(id=branch_id)
     conversation = branch.conversation
     thread = Thread()
@@ -346,7 +458,7 @@ def create_branch_from_compression(
     return new_branch
 
 
-def serialize_messages_for_api(messages: list[ChatMessage]) -> list[dict[str, Any]]:
+def serialize_messages_for_api(messages: List[ChatMessage]) -> List[Dict[str, Any]]:
     return [
         {
             "id": str(m.id),

@@ -22,3 +22,15 @@ class GroupTag(models.TextChoices):
     FILES = "files", "Files"
     ENTITY = "entity", "Entity"
     RELATION = "relation", "Relation"
+
+
+class UserRole(models.TextChoices):
+    SUPERADMIN = "superadmin", "Superadmin"
+    ADMIN = "admin", "Admin"
+    USER = "user", "User"
+
+
+class AccountStatus(models.TextChoices):
+    ACTIVE = "active", "Active"
+    PENDING_DELETION = "pending_deletion", "Pending deletion"
+    PURGED = "purged", "Purged"

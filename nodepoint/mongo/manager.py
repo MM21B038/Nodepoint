@@ -1,3 +1,4 @@
+from typing import Any, List, cast
 import logging
 
 from mongoengine import connect, disconnect
@@ -7,7 +8,7 @@ from nodepoint.settings_loader import mongo_config, mongo_uri
 
 logger = logging.getLogger(__name__)
 
-_connected = False
+_connected: bool = False
 
 
 def ensure_mongo_connection() -> None:
@@ -27,11 +28,11 @@ def reset_mongo_connection() -> None:
     _connected = False
 
 
-def ingest_document(doc_id, content):
+def ingest_document(doc_id: Any, content: str) -> bool:
     """Legacy full-document storage (deprecated for new uploads)."""
     ensure_mongo_connection()
     try:
-        existing = Content.objects(id=str(doc_id)).first()
+        existing = cast(Content | None, Content.objects(id=str(doc_id)).first())
         if existing:
             existing.content = content
             existing.save()
@@ -43,11 +44,11 @@ def ingest_document(doc_id, content):
         return False
 
 
-def ingest_chunk(chunk_id, document_id, index, content) -> bool:
+def ingest_chunk(chunk_id: Any, document_id: Any, index: int, content: str) -> bool:
     ensure_mongo_connection()
     try:
         cid = str(chunk_id)
-        existing = ChunkContent.objects(id=cid).first()
+        existing = cast(ChunkContent | None, ChunkContent.objects(id=cid).first())
         if existing:
             existing.document_id = str(document_id)
             existing.index = index
@@ -66,13 +67,13 @@ def ingest_chunk(chunk_id, document_id, index, content) -> bool:
         return False
 
 
-def get_document_text(document_id) -> str | None:
+def get_document_text(document_id: Any) -> str | None:
     """Full document text: legacy Mongo Content, else joined chunks, else file on disk."""
     ensure_mongo_connection()
     try:
-        row = Content.objects(id=str(document_id)).first()
+        row = cast(Content | None, Content.objects(id=str(document_id)).first())
         if row is not None and row.content:
-            return row.content
+            return cast(str | None, row.content)
     except Exception:
         logger.exception("Failed to read legacy Mongo content for document %s", document_id)
 
@@ -80,7 +81,7 @@ def get_document_text(document_id) -> str | None:
         from nodepoint.models import Document, DocumentChunk
 
         chunks = DocumentChunk.objects.filter(document_id=document_id).order_by("index")
-        parts: list[str] = []
+        parts: List[str] = []
         for chunk in chunks:
             text = get_chunk_text(chunk.id)
             if text:
@@ -101,19 +102,19 @@ def get_document_text(document_id) -> str | None:
     return None
 
 
-def get_chunk_text(chunk_id) -> str | None:
+def get_chunk_text(chunk_id: Any) -> str | None:
     ensure_mongo_connection()
     try:
-        row = ChunkContent.objects(id=str(chunk_id)).first()
+        row = cast(ChunkContent | None, ChunkContent.objects(id=str(chunk_id)).first())
         if row is None:
             return None
-        return row.content
+        return cast(str | None, row.content)
     except Exception:
         logger.exception("Failed to read chunk %s from MongoDB", chunk_id)
         return None
 
 
-def delete_chunks_for_document(document_id) -> None:
+def delete_chunks_for_document(document_id: Any) -> None:
     ensure_mongo_connection()
     try:
         ChunkContent.objects(document_id=str(document_id)).delete()

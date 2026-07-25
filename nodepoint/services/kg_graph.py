@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Dict, List, Set
 from uuid import UUID
 
 from django.db.models import Count, Q
@@ -19,12 +19,12 @@ MAX_GRAPH_DEPTH = 5
 
 @dataclass(frozen=True)
 class GraphFilters:
-    entity_types: list[str] | None
-    file_names: list[str] | None
+    entity_types: List[str] | None
+    file_names: List[str] | None
     depth: int
     limit: int
 
-    def as_response_dict(self) -> dict[str, Any]:
+    def as_response_dict(self) -> Dict[str, Any]:
         return {
             "entity_types": self.entity_types,
             "file_names": self.file_names,
@@ -33,7 +33,7 @@ class GraphFilters:
         }
 
 
-def parse_entity_types_param(raw: str | None) -> list[str] | None:
+def parse_entity_types_param(raw: str | None) -> List[str] | None:
     if raw is None or not str(raw).strip():
         return None
     types = [part.strip() for part in str(raw).split(",") if part.strip()]
@@ -42,7 +42,7 @@ def parse_entity_types_param(raw: str | None) -> list[str] | None:
     return types
 
 
-def parse_file_names_param(raw: str | None) -> list[str] | None:
+def parse_file_names_param(raw: str | None) -> List[str] | None:
     if raw is None or not str(raw).strip():
         return None
     names = [part.strip() for part in str(raw).split(",") if part.strip()]
@@ -87,7 +87,7 @@ def parse_graph_filters(
     )
 
 
-def serialize_graph_node(entity: KnowledgeEntity) -> dict:
+def serialize_graph_node(entity: KnowledgeEntity) -> Dict[str, Any]:
     return {
         "id": str(entity.id),
         "name": entity.name,
@@ -95,7 +95,7 @@ def serialize_graph_node(entity: KnowledgeEntity) -> dict:
     }
 
 
-def serialize_edge(relation: KnowledgeRelation) -> dict:
+def serialize_edge(relation: KnowledgeRelation) -> Dict[str, Any]:
     return {
         "id": str(relation.id),
         "source": relation.source.name,
@@ -106,7 +106,7 @@ def serialize_edge(relation: KnowledgeRelation) -> dict:
     }
 
 
-def _entity_types_rows(qs) -> list[dict[str, Any]]:
+def _entity_types_rows(qs) -> List[Dict[str, Any]]:
     rows = (
         qs.values("entity_type")
         .annotate(count=Count("id"))
@@ -115,7 +115,7 @@ def _entity_types_rows(qs) -> list[dict[str, Any]]:
     return [{"type": row["entity_type"], "count": row["count"]} for row in rows]
 
 
-def list_entity_types_for_workspace(workspace: Workspace) -> dict:
+def list_entity_types_for_workspace(workspace: Workspace) -> Dict[str, Any]:
     qs = KnowledgeEntity.objects.filter(document__workspace=workspace)
     return {
         "workspace": workspace.name,
@@ -123,15 +123,24 @@ def list_entity_types_for_workspace(workspace: Workspace) -> dict:
     }
 
 
-def list_entity_types_for_workspace_name(name: str) -> dict:
+def list_entity_types_for_workspace_name(name: str) -> Dict[str, Any]:
     workspace = Workspace.objects.get(name=name)
     return list_entity_types_for_workspace(workspace)
 
 
-def list_entity_types_for_group(group_name: str) -> dict:
-    scope = resolve_group_search_scope(group_name)
+def list_entity_types_for_group(
+    group_name: str,
+    *,
+    actor=None,
+    owner_id: int | None = None,
+) -> Dict[str, Any]:
+    scope = resolve_group_search_scope(
+        group_name, actor=actor, owner_id=owner_id
+    )
     workspaces = (
-        get_group_workspaces_qs(group_name).order_by("name")
+        get_group_workspaces_qs(group_name, actor=actor, owner_id=owner_id).order_by(
+            "name"
+        )
         if scope.workspace_names
         else Workspace.objects.none()
     )
@@ -161,7 +170,7 @@ def _scoped_entity_qs(workspace: Workspace, scope: GroupSearchScope):
             id__in=scope.relation_ids,
             document__workspace=workspace,
         )
-        endpoint_ids = set()
+        endpoint_ids: Set[UUID] = set()
         for rel in relation_qs.only("source_id", "target_id"):
             endpoint_ids.add(rel.source_id)
             endpoint_ids.add(rel.target_id)
@@ -171,8 +180,8 @@ def _scoped_entity_qs(workspace: Workspace, scope: GroupSearchScope):
 
 def _seed_entities_qs(
     workspace: Workspace,
-    entity_types: list[str] | None,
-    file_names: list[str] | None = None,
+    entity_types: List[str] | None,
+    file_names: List[str] | None = None,
 ):
     qs = (
         KnowledgeEntity.objects.filter(document__workspace=workspace)
@@ -188,8 +197,8 @@ def _seed_entities_qs(
 
 def _fetch_neighbors(
     workspace: Workspace,
-    frontier_ids: set[UUID],
-) -> list[KnowledgeRelation]:
+    frontier_ids: Set[UUID],
+) -> List[KnowledgeRelation]:
     if not frontier_ids:
         return []
     return list(
@@ -202,14 +211,14 @@ def _fetch_neighbors(
 
 def build_graph_from_seed_ids(
     workspace: Workspace,
-    seed_ids: list[UUID],
+    seed_ids: List[UUID],
     *,
     depth: int,
     limit: int,
-    entity_types: list[str] | None = None,
-    file_names: list[str] | None = None,
+    entity_types: List[str] | None = None,
+    file_names: List[str] | None = None,
     filters: GraphFilters | None = None,
-) -> dict:
+) -> Dict[str, Any]:
     """BFS subgraph from explicit seed entity ids (empty seeds → empty graph)."""
     if filters is None:
         filters = GraphFilters(
@@ -248,8 +257,8 @@ def build_graph_from_seed_ids(
     else:
         seeds = all_seeds
 
-    nodes_by_id: dict[UUID, KnowledgeEntity] = {e.id: e for e in seeds}
-    frontier_ids: set[UUID] = set(nodes_by_id)
+    nodes_by_id: Dict[UUID, KnowledgeEntity] = {e.id: e for e in seeds}
+    frontier_ids: Set[UUID] = set(nodes_by_id)
 
     for _hop in range(depth):
         if len(nodes_by_id) >= limit:
@@ -259,7 +268,7 @@ def build_graph_from_seed_ids(
             break
 
         relations = _fetch_neighbors(workspace, frontier_ids)
-        next_frontier: set[UUID] = set()
+        next_frontier: Set[UUID] = set()
         for rel in relations:
             for entity in (rel.source, rel.target):
                 eid = entity.id
@@ -277,8 +286,8 @@ def build_graph_from_seed_ids(
         frontier_ids = next_frontier
 
     node_ids = set(nodes_by_id)
-    edges: list[dict] = []
-    seen_edge_ids: set[UUID] = set()
+    edges: List[Dict[str, Any]] = []
+    seen_edge_ids: Set[UUID] = set()
     if node_ids:
         relations = (
             KnowledgeRelation.objects.filter(document__workspace=workspace)
@@ -308,7 +317,7 @@ def build_graph_from_seed_ids(
 def build_filtered_workspace_graph(
     workspace: Workspace,
     filters: GraphFilters,
-) -> dict:
+) -> Dict[str, Any]:
     seed_qs = _seed_entities_qs(
         workspace, filters.entity_types, filters.file_names
     )
@@ -321,8 +330,8 @@ def build_filtered_workspace_graph(
     else:
         seeds = all_seeds
 
-    nodes_by_id: dict[UUID, KnowledgeEntity] = {e.id: e for e in seeds}
-    frontier_ids: set[UUID] = set(nodes_by_id)
+    nodes_by_id: Dict[UUID, KnowledgeEntity] = {e.id: e for e in seeds}
+    frontier_ids: Set[UUID] = set(nodes_by_id)
 
     for _hop in range(filters.depth):
         if len(nodes_by_id) >= filters.limit:
@@ -332,7 +341,7 @@ def build_filtered_workspace_graph(
             break
 
         relations = _fetch_neighbors(workspace, frontier_ids)
-        next_frontier: set[UUID] = set()
+        next_frontier: Set[UUID] = set()
         for rel in relations:
             for entity in (rel.source, rel.target):
                 eid = entity.id
@@ -350,8 +359,8 @@ def build_filtered_workspace_graph(
         frontier_ids = next_frontier
 
     node_ids = set(nodes_by_id)
-    edges: list[dict] = []
-    seen_edge_ids: set[UUID] = set()
+    edges: List[Dict[str, Any]] = []
+    seen_edge_ids: Set[UUID] = set()
     if node_ids:
         relations = (
             KnowledgeRelation.objects.filter(document__workspace=workspace)
@@ -381,7 +390,7 @@ def build_filtered_workspace_graph(
 def build_filtered_graph_for_workspace_name(
     name: str,
     filters: GraphFilters,
-) -> dict:
+) -> Dict[str, Any]:
     workspace = Workspace.objects.get(name=name)
     return build_filtered_workspace_graph(workspace, filters)
 
@@ -389,24 +398,35 @@ def build_filtered_graph_for_workspace_name(
 def build_filtered_graphs_for_group(
     group_name: str,
     filters: GraphFilters,
-) -> list[dict]:
-    scope = resolve_group_search_scope(group_name)
+    *,
+    actor=None,
+    owner_id: int | None = None,
+) -> List[Dict[str, Any]]:
+    scope = resolve_group_search_scope(
+        group_name, actor=actor, owner_id=owner_id
+    )
     if scope.is_empty:
         return []
 
     if scope.tag == GroupTag.WORKSPACE:
-        workspaces = get_group_workspaces_qs(group_name).order_by("name")
+        workspaces = get_group_workspaces_qs(
+            group_name, actor=actor, owner_id=owner_id
+        ).order_by("name")
         return [build_filtered_workspace_graph(ws, filters) for ws in workspaces]
 
     if scope.tag == GroupTag.FILES:
-        graphs = []
-        doc_ids_by_ws: dict[str, list[UUID]] = {}
+        graphs: List[Dict[str, Any]] = []
+        doc_ids_by_ws_id: Dict[int, List[UUID]] = {}
+        workspace_by_id: Dict[int, Workspace] = {}
         for doc in Document.objects.filter(id__in=scope.document_ids).select_related(
             "workspace"
         ):
-            doc_ids_by_ws.setdefault(doc.workspace.name, []).append(doc.id)
-        for ws_name, doc_ids in sorted(doc_ids_by_ws.items()):
-            workspace = Workspace.objects.get(name=ws_name)
+            ws = doc.workspace
+            workspace_by_id[ws.pk] = ws
+            doc_ids_by_ws_id.setdefault(ws.pk, []).append(doc.id)
+        for ws_id in sorted(doc_ids_by_ws_id):
+            workspace = workspace_by_id[ws_id]
+            doc_ids = doc_ids_by_ws_id[ws_id]
             file_names = list(
                 Document.objects.filter(id__in=doc_ids).values_list("file_name", flat=True)
             )
@@ -420,20 +440,21 @@ def build_filtered_graphs_for_group(
         return graphs
 
     if scope.tag == GroupTag.ENTITY:
-        graphs = []
-        entity_ids_by_ws: dict[str, list[UUID]] = {}
+        graphs: List[Dict[str, Any]] = []
+        entity_ids_by_ws_id: Dict[int, List[UUID]] = {}
+        workspace_by_id: Dict[int, Workspace] = {}
         for entity in KnowledgeEntity.objects.filter(id__in=scope.entity_ids).select_related(
             "document__workspace"
         ):
-            entity_ids_by_ws.setdefault(entity.document.workspace.name, []).append(
-                entity.id
-            )
-        for ws_name, entity_ids in sorted(entity_ids_by_ws.items()):
-            workspace = Workspace.objects.get(name=ws_name)
+            ws = entity.document.workspace
+            workspace_by_id[ws.pk] = ws
+            entity_ids_by_ws_id.setdefault(ws.pk, []).append(entity.id)
+        for ws_id in sorted(entity_ids_by_ws_id):
+            workspace = workspace_by_id[ws_id]
             graphs.append(
                 build_graph_from_seed_ids(
                     workspace,
-                    entity_ids,
+                    entity_ids_by_ws_id[ws_id],
                     depth=filters.depth,
                     limit=filters.limit,
                     entity_types=filters.entity_types,
@@ -443,20 +464,21 @@ def build_filtered_graphs_for_group(
             )
         return graphs
 
-    graphs = []
-    relation_ids_by_ws: dict[str, list[UUID]] = {}
+    graphs: List[Dict[str, Any]] = []
+    relation_ids_by_ws_id: Dict[int, List[UUID]] = {}
+    workspace_by_id: Dict[int, Workspace] = {}
     for relation in KnowledgeRelation.objects.filter(
         id__in=scope.relation_ids
     ).select_related("document__workspace"):
-        relation_ids_by_ws.setdefault(relation.document.workspace.name, []).append(
-            relation.id
-        )
-    for ws_name, relation_ids in sorted(relation_ids_by_ws.items()):
-        workspace = Workspace.objects.get(name=ws_name)
+        ws = relation.document.workspace
+        workspace_by_id[ws.pk] = ws
+        relation_ids_by_ws_id.setdefault(ws.pk, []).append(relation.id)
+    for ws_id in sorted(relation_ids_by_ws_id):
+        workspace = workspace_by_id[ws_id]
         graphs.append(
             build_graph_from_relation_ids(
                 workspace,
-                relation_ids,
+                relation_ids_by_ws_id[ws_id],
                 depth=filters.depth,
                 limit=filters.limit,
                 filters=filters,
@@ -467,12 +489,12 @@ def build_filtered_graphs_for_group(
 
 def build_graph_from_relation_ids(
     workspace: Workspace,
-    relation_ids: list[UUID],
+    relation_ids: List[UUID],
     *,
     depth: int,
     limit: int,
     filters: GraphFilters | None = None,
-) -> dict:
+) -> Dict[str, Any]:
     if filters is None:
         filters = GraphFilters(
             entity_types=None,
@@ -515,7 +537,7 @@ def build_graph_from_relation_ids(
 
 # Legacy helpers (delegate to filtered builder with defaults)
 
-def build_workspace_graph(workspace: Workspace) -> dict:
+def build_workspace_graph(workspace: Workspace) -> Dict[str, Any]:
     return build_filtered_workspace_graph(
         workspace,
         GraphFilters(
@@ -527,7 +549,7 @@ def build_workspace_graph(workspace: Workspace) -> dict:
     )
 
 
-def build_graph_for_workspace_name(name: str) -> dict:
+def build_graph_for_workspace_name(name: str) -> Dict[str, Any]:
     return build_filtered_graph_for_workspace_name(
         name,
         GraphFilters(

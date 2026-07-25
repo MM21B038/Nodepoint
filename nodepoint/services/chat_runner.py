@@ -4,7 +4,8 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Dict, List, Set, Tuple
 
 from django.conf import settings
 
@@ -26,6 +27,21 @@ from nodepoint.services import chat_storage_async as storage_async
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class SavedSegment:
+    message_id: str
+    content: str
+    reasoning_content: str | None
+
+    def as_saved_dict(self, *, ephemeral: bool = False) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"content": self.content}
+        if not ephemeral and self.message_id:
+            payload["message_id"] = self.message_id
+        if self.reasoning_content:
+            payload["reasoning_content"] = self.reasoning_content
+        return payload
+
+
 async def run_agent_stream(
     thread: Thread,
     agent: Agent,
@@ -34,19 +50,21 @@ async def run_agent_stream(
     *,
     workspace_name: str | None = None,
     group_name: str | None = None,
-    tools: list[dict[str, Any]] | None = None,
-    exclude_servers: set[str] | None = None,
-    on_event: Callable[[dict[str, Any]], Awaitable[None]],
-) -> tuple[Thread, uuid.UUID | None]:
+    tools: List[Dict[str, Any]] | None = None,
+    exclude_servers: Set[str] | None = None,
+    on_event: Callable[[Dict[str, Any]], Awaitable[None]],
+    interrupt_state: Dict[str, Any] | None = None,
+    persist: bool = True,
+) -> Tuple[Thread, uuid.UUID | None]:
     """
     Stream agent events to ``on_event`` (JSON-serializable dicts).
-    Mutates ``thread`` and persists messages to the DB.
+    Mutates ``thread``; persists messages when ``persist`` is True.
     Returns (thread, new_branch_id_if_compressed).
     """
     pending_calls = None
     tools_remaining = 0
-    thinking_buf: list[str] = []
-    response_buf: list[str] = []
+    thinking_buf: List[str] = []
+    response_buf: List[str] = []
     new_branch_id: uuid.UUID | None = None
     segment_saved = False
     effective_branch_id = branch_id
@@ -68,36 +86,54 @@ async def run_agent_stream(
         payload["type"] = payload.get("type", ev.__class__.__name__)
         await on_event(payload)
 
-    async def flush_streaming_segment(*, interrupted: bool = False) -> bool:
-        """Persist in-progress assistant text (e.g. disconnect or cancel mid-stream)."""
+    async def flush_streaming_segment(*, interrupted: bool = False) -> SavedSegment | None:
+        """Persist in-progress assistant text (e.g. cancel mid-stream)."""
         nonlocal segment_saved
         if segment_saved:
-            return False
+            return None
         text = "".join(response_buf)
         reasoning = "".join(thinking_buf) or None
         if not text and not reasoning:
-            return False
+            return None
         thread.addAssistant(text)
-        await storage_async.append_message_visible(
-            conversation_id,
-            effective_branch_id,
-            role=ChatMessageRole.ASSISTANT,
+        message_id = ""
+        if persist:
+            msg = await storage_async.append_message_visible(
+                conversation_id,
+                effective_branch_id,
+                role=ChatMessageRole.ASSISTANT,
+                content=text,
+                reasoning_content=reasoning,
+            )
+            message_id = str(msg.id)
+        saved = SavedSegment(
+            message_id=message_id,
             content=text,
             reasoning_content=reasoning,
         )
         segment_saved = True
         thinking_buf.clear()
         response_buf.clear()
+        if interrupt_state is not None:
+            interrupt_state["saved"] = saved.as_saved_dict(ephemeral=not persist)
         if interrupted:
+            interrupt_msg = (
+                "Partial response available in saved."
+                if not persist
+                else "Response saved; merge saved content or refresh history."
+            )
             await on_event(
                 {
                     "type": "chat.interrupted",
-                    "message": "Response saved; reconnect or refresh history to continue.",
+                    "message": interrupt_msg,
+                    "saved": saved.as_saved_dict(ephemeral=not persist),
                 }
             )
-        return True
+        return saved
 
     async def maybe_compress() -> None:
+        if not persist:
+            return
         nonlocal thread, new_branch_id, effective_branch_id, segment_saved
         # Count the current active branch (not the root conversation), otherwise
         # compression can re-trigger immediately after switching to a compressed branch.
@@ -182,14 +218,15 @@ async def run_agent_stream(
                         "reasoning_content": ev.reasoning_content,
                     }
                 )
-                await storage_async.append_message_visible(
-                    conversation_id,
-                    effective_branch_id,
-                    role=ChatMessageRole.ASSISTANT,
-                    content=ev.content or "",
-                    reasoning_content=ev.reasoning_content,
-                    tool_calls=[tc.model_dump(mode="json") for tc in ev.tool_calls],
-                )
+                if persist:
+                    await storage_async.append_message_visible(
+                        conversation_id,
+                        effective_branch_id,
+                        role=ChatMessageRole.ASSISTANT,
+                        content=ev.content or "",
+                        reasoning_content=ev.reasoning_content,
+                        tool_calls=[tc.model_dump(mode="json") for tc in ev.tool_calls],
+                    )
                 segment_saved = True
                 pending_calls = tool_call_items_to_normalized(ev.tool_calls)
                 tools_remaining = len(ev.tool_calls)
@@ -213,14 +250,15 @@ async def run_agent_stream(
                     )
                 if call is not None:
                     thread.addTool(call, ev.result)
-                    await storage_async.append_message_visible(
-                        conversation_id,
-                        effective_branch_id,
-                        role=ChatMessageRole.TOOL,
-                        content=ev.result,
-                        tool_call_id=ev.tool_call_id or call.id,
-                        tool_name=ev.tool_name,
-                    )
+                    if persist:
+                        await storage_async.append_message_visible(
+                            conversation_id,
+                            effective_branch_id,
+                            role=ChatMessageRole.TOOL,
+                            content=ev.result,
+                            tool_call_id=ev.tool_call_id or call.id,
+                            tool_name=ev.tool_name,
+                        )
                 await on_event(
                     {
                         "type": "tool_completed",
@@ -234,13 +272,14 @@ async def run_agent_stream(
                 text = "".join(response_buf)
                 if text:
                     thread.addAssistant(text)
-                    await storage_async.append_message_visible(
-                        conversation_id,
-                        effective_branch_id,
-                        role=ChatMessageRole.ASSISTANT,
-                        content=text,
-                        reasoning_content="".join(thinking_buf) or None,
-                    )
+                    if persist:
+                        await storage_async.append_message_visible(
+                            conversation_id,
+                            effective_branch_id,
+                            role=ChatMessageRole.ASSISTANT,
+                            content=text,
+                            reasoning_content="".join(thinking_buf) or None,
+                        )
                     segment_saved = True
                 # Only compress after the final assistant response is complete and persisted,
                 # never mid-stream (avoids visible pauses / branch switches while streaming).
@@ -267,13 +306,13 @@ async def run_agent_stream(
             )
         chat_context.reset_search_session(search_token)
         chat_context.reset_chat_workspace(ctx_token)
-        if group_name:
+        if group_token is not None:
             chat_context.reset_group_scope_chat(group_token)
 
     return thread, new_branch_id
 
 
-def default_tools(exclude_servers: set[str] | None = None) -> list[dict[str, Any]]:
+def default_tools(exclude_servers: Set[str] | None = None) -> List[Dict[str, Any]]:
     del exclude_servers
     return Tool.schemas(
         include_servers={"Knowledge"},

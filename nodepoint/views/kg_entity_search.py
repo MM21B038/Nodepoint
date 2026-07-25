@@ -1,13 +1,13 @@
 from rest_framework import status
 from rest_framework.response import Response
-from rest_framework.views import APIView
+from nodepoint.auth.mixins import AuthenticatedAPIView
+from nodepoint.auth.users import request_actor
 
-from nodepoint.models import Workspace
 from nodepoint.services import kg_entity_search
-from nodepoint.views.kg_scope import resolve_kg_scope, validate_kg_group_exists
+from nodepoint.views.kg_scope import resolve_kg_scope, resolve_kg_scope_targets
 
 
-class KnowledgeEntitySearchAPIView(APIView):
+class KnowledgeEntitySearchAPIView(AuthenticatedAPIView):
     """
     Fuzzy entity name search with optional subgraph (depth / limit).
 
@@ -23,12 +23,17 @@ class KnowledgeEntitySearchAPIView(APIView):
             )
 
         scope, error = resolve_kg_scope(request)
-        if error:
-            return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
+        if scope is None:
+            return Response(
+                {"error": error or "Provide workspace_name or group"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        group_error = validate_kg_group_exists(scope)
-        if group_error:
-            return Response({"error": group_error}, status=status.HTTP_404_NOT_FOUND)
+        workspace, group, err = resolve_kg_scope_targets(
+            request, scope, actor=request_actor(request)
+        )
+        if err is not None:
+            return err
 
         try:
             graph_filters, threshold, match_limit = (
@@ -44,28 +49,28 @@ class KnowledgeEntitySearchAPIView(APIView):
         except ValueError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        if scope.is_group_scope:
+        if group is not None:
             payload = kg_entity_search.search_group_workspaces_by_name(
-                scope.group_name,
+                group.name,
                 query,
                 graph_filters,
                 threshold=threshold,
                 match_limit=match_limit,
+                actor=request.user,
+                owner_id=group.owner_id,
             )
             return Response(payload)
 
-        try:
-            payload = kg_entity_search.search_by_name_for_workspace_name(
-                scope.workspace_name,
-                query,
-                graph_filters,
-                threshold=threshold,
-                match_limit=match_limit,
-            )
-        except Workspace.DoesNotExist:
+        if workspace is None:
             return Response(
-                {"error": "Workspace not found"},
-                status=status.HTTP_404_NOT_FOUND,
+                {"error": "Workspace not found"}, status=status.HTTP_404_NOT_FOUND
             )
 
+        payload = kg_entity_search.search_workspace_by_name(
+            workspace,
+            query,
+            graph_filters,
+            threshold=threshold,
+            match_limit=match_limit,
+        )
         return Response(payload)

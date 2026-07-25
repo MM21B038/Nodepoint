@@ -28,11 +28,37 @@ dependencies = [
     "rank-bm25>=0.2.2",
     "rapidfuzz>=3.13.0",
     "psycopg2-binary>=2.9.12",
+    "djangorestframework-simplejwt>=5.5.1",
+    "umap-learn>=0.5.12",
+    "scikit-learn>=1.9.0",
+    "hdbscan>=0.8.44",
+    "whitenoise>=6.12.0",
+    "pandas>=3.0.3",
+    "django-stubs-ext>=6.0.7",
 ]
 
 [dependency-groups]
 dev = [
+    "django-stubs>=6.0.7",
+    "django-stubs-ext>=6.0.7",
+    "djangorestframework-stubs>=3.17.0",
     "fastmcp>=3.2.4",
     "ipykernel>=7.2.0",
     "jupyter>=1.1.1",
+    "pyright>=1.1.411",
 ]
+
+[tool.django-stubs]
+django_settings_module = "config.settings"
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.14"
+pythonPlatform = "Windows"
+
+[tool.basedpyright]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.14"
+pythonPlatform = "Windows"

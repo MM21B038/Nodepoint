@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import List
 from uuid import UUID
 
 import django_rq
@@ -110,8 +111,8 @@ def vector_preprocess(document_id=None, workspace_name=None):
 
 def enqueue_vectors_for_chunk(
     chunk_id: UUID,
-    entity_ids: list | None = None,
-    relation_ids: list | None = None,
+    entity_ids: List[UUID] | None = None,
+    relation_ids: List[UUID] | None = None,
 ) -> int:
     """Enqueue embedding jobs for KG rows produced by a single completed chunk."""
     queue = _vector_queue()
